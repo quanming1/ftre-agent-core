@@ -3,7 +3,7 @@ Tool 依赖注入标记
 
 用法：在 tool 函数参数中声明需要注入的依赖，执行时由 ToolRegistry 自动填充。
 
-    from packages.core.tool.inject import Injected
+    from ftre_agent_core.tool.inject import Injected
 
     @tool(name="workspace_search", ...)
     def workspace_search(query: str, memory=Injected("memory")) -> str:

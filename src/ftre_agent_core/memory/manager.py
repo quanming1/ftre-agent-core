@@ -14,7 +14,7 @@ Checkpoint state key 约定：
 from typing import Any
 from .types import MemoryOptions
 from .token import TokenUsage
-from packages.core.checkpoint import CheckpointManager, Checkpoint, CheckpointType
+from ftre_agent_core.checkpoint import CheckpointManager, Checkpoint, CheckpointType
 
 
 DEFAULT_MAX_MESSAGES = 100

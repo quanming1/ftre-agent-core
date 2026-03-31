@@ -27,14 +27,14 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generator
 
-from packages.core.agent.event import (
+from ftre_agent_core.agent.event import (
     AgentEvent,
     tool_call_event,
     tool_result_event,
 )
-from packages.core.tool import ToolRegistry
-from packages.core.tool.middleware import ToolContext
-from packages.core.tool_system import (
+from ftre_agent_core.tool import ToolRegistry
+from ftre_agent_core.tool.middleware import ToolContext
+from ftre_agent_core.tool_system import (
     ToolCancelledError,
     ToolExecutionHandle,
     ToolOutput,
@@ -83,7 +83,7 @@ class ToolHandler:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
         # 使用全局线程池，不再每个 agent 各建一个（避免 N*8 线程爆炸）
-        from packages.core.threading import thread_pool
+        from ftre_agent_core.threading import thread_pool
         self._executor = thread_pool.tool
         self._output_guard = get_output_guard()
         self._active_handles: dict[str, ToolExecutionHandle] = {}

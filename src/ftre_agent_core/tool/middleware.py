@@ -15,7 +15,7 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any
 
-from packages.core.tool_system import CancellationToken, ResourceRegistry
+from ftre_agent_core.tool_system import CancellationToken, ResourceRegistry
 
 
 @dataclass

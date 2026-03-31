@@ -8,7 +8,7 @@
 - tool:       工具执行（全局共享，替代每个 agent 各建一个 8 线程池）
 
 使用方式：
-    from packages.core.threading import thread_pool
+    from ftre_agent_core.threading import thread_pool
 
     # 在 async handler 里
     await loop.run_in_executor(thread_pool.io, blocking_fn, arg1, arg2)

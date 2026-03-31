@@ -4,7 +4,7 @@ LLM 客户端层
 协议适配的统一入口。上层只需调 create_client() 拿到兼容 OpenAI SDK 的 client。
 
 用法：
-    from packages.core.llm import create_client
+    from ftre_agent_core.llm import create_client
 
     client = create_client(api_key, base_url, api_type="completions")
     # client.chat.completions.create(...) — 所有协议统一接口
