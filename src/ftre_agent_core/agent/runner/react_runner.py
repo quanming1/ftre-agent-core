@@ -60,7 +60,7 @@ class ReActRunner:
         self.state = RunState()
         self._consecutive_empty = 0
 
-        self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base)
+        self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
         self.interrupt_handler = InterruptHandler(
             state=self.state,
