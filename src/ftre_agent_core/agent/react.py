@@ -38,8 +38,9 @@ class ReActAgent(Agent):
 
     def __init__(
         self,
-        client,
         model: str,
+        api_key: str,
+        api_base: str | None = None,
         system_prompt: str = None,
         tools: list[Tool] = None,
         max_iterations: int = 10,
@@ -49,8 +50,9 @@ class ReActAgent(Agent):
     ):
         """
         Args:
-            client:           OpenAI 客户端
-            model:            模型名称
+            model:            模型名称（LiteLLM 格式，如 "openai/gpt-4"）
+            api_key:          API 密钥
+            api_base:         自定义端点（可选）
             system_prompt:    系统提示词
             tools:            工具列表
             max_iterations:   最大迭代次数
@@ -61,8 +63,9 @@ class ReActAgent(Agent):
         default_prompt = core_prompts.get("react_system")
 
         super().__init__(
-            client=client,
             model=model,
+            api_key=api_key,
+            api_base=api_base,
             system_prompt=system_prompt or default_prompt,
             tools=tools,
             memory=memory,
@@ -130,7 +133,6 @@ class ReActAgent(Agent):
 
         适用于 CompiledGraph 等不能阻塞的场景，
         善后由 generator 消费链路自然完成。
-        同时强关 LLM HTTP 连接，避免线程卡在等待 chunk 上。
         """
         self._runner.state.cancel()
         self._runner.llm.cancel()

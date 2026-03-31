@@ -1,18 +1,18 @@
 """
 LLMHandler - LLM 调用封装
 
-职责：封装 OpenAI API 的流式调用，统一输出格式。
+职责：封装 LiteLLM 的流式调用，统一输出格式。
 对上层屏蔽流式 chunk 拼接、tool_calls 累积等细节。
 """
 import json
 import logging
+import litellm
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from typing import Generator, Any
 from uuid import uuid4
-from openai import OpenAI, APIError, APITimeoutError, RateLimitError, APIConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +42,16 @@ class LLMError:
 
     @staticmethod
     def classify(e: Exception) -> "LLMError":
-        """根据异常类型分类错误"""
-        if isinstance(e, RateLimitError):
+        """根据异常类型分类错误（适配 LiteLLM）"""
+        if isinstance(e, litellm.RateLimitError):
             return LLMError(message=f"请求频率超限: {e}", code="rate_limit")
-        if isinstance(e, APITimeoutError):
+        if isinstance(e, litellm.Timeout):
             return LLMError(message=f"请求超时: {e}", code="timeout")
-        if isinstance(e, APIConnectionError):
+        if isinstance(e, litellm.APIConnectionError):
             return LLMError(message=f"网络连接失败: {e}", code="network")
-        if isinstance(e, APIError):
-            msg = str(e)
-            if "DataInspectionFailed" in msg or "content" in msg.lower():
-                return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
+        if isinstance(e, litellm.ContentPolicyViolationError):
+            return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
+        if isinstance(e, litellm.APIError):
             return LLMError(message=f"API 错误: {e}", code="api_error")
         return LLMError(message=f"未知错误: {e}", code="unknown")
 
@@ -69,7 +68,7 @@ class LLMResponse:
 
 @dataclass
 class ToolCallDeltaChunk:
-    """单个 tool_call 的增量信息，直接映射 OpenAI stream chunk 中的 tool_call delta"""
+    """单个 tool_call 的增量信息"""
     index: int
     id: str | None = None
     name: str | None = None
@@ -77,7 +76,7 @@ class ToolCallDeltaChunk:
 
 @dataclass
 class StreamDelta:
-    """流式输出的 delta 片段 — 完整映射 OpenAI delta 对象"""
+    """流式输出的 delta 片段"""
     content: str | None = None
     tool_calls: list[ToolCallDeltaChunk] | None = None
     usage: Any = None
@@ -121,7 +120,7 @@ class ToolCallAccumulator:
     def feed(self, tc) -> ToolCallDeltaChunk:
         """
         喂入一个 tool_call delta，返回前端需要的 ToolCallDeltaChunk。
-        tc 是 OpenAI SDK 的 ChoiceDeltaToolCall 对象。
+        tc 是 LiteLLM 流式 chunk 中的 tool_call 对象。
         """
         raw_idx = tc.index
         idx = self._index_remap.get(raw_idx, raw_idx)
@@ -230,50 +229,38 @@ class LLMHandler:
     - 只有 content → 边读边 yield StreamDelta
 
     取消机制：
-    - cancel() 强关底层 HTTP 连接，使迭代线程立即收到异常
-    - 支持 OpenAI SDK（Stream.close）和协议适配器（cancel_stream）两条路径
+    - cancel() 设置标志位（软取消）
+    - stream() 生成器在每次 yield 前检查标志位
     """
 
-    def __init__(self, client: OpenAI, model: str):
-        self.client = client
+    def __init__(self, model: str, api_key: str, api_base: str | None = None):
         self.model = model
-        self._active_response = None
+        self.api_key = api_key
+        self.api_base = api_base
+        self._cancelled = False
 
     def cancel(self) -> None:
-        """
-        强关活跃的 LLM 流，立即中断底层 HTTP 连接。线程安全。
-
-        两条路径：
-        - OpenAI SDK: Stream.close() 直接关 httpx socket
-        - 协议适配器: cancel_stream() 关内部持有的 httpx response
-        """
-        resp = self._active_response
-        if resp is not None:
-            try:
-                resp.close()
-            except Exception:
-                pass
-        if hasattr(self.client, "cancel_stream"):
-            try:
-                self.client.cancel_stream()
-            except Exception:
-                pass
+        """设置取消标志位（软取消）。线程安全。"""
+        self._cancelled = True
 
     def stream(
         self,
         messages: list[dict],
         tools: list[dict] | None = None
     ) -> Generator[StreamDelta | LLMResponse, None, None]:
-        """流式调用 LLM"""
+        """流式调用 LLM（使用 LiteLLM）"""
+        self._cancelled = False
         _dump_llm_input(messages, tools, self.model)
-        response = self.client.chat.completions.create(
+
+        response = litellm.completion(
             model=self.model,
             messages=messages,
             tools=tools if tools else None,
+            api_key=self.api_key,
+            api_base=self.api_base,
             stream=True,
-            stream_options={"include_usage": True}
+            stream_options={"include_usage": True},
         )
-        self._active_response = response
 
         accumulator = ToolCallAccumulator()
         content_buffer: list[str] = []
@@ -281,18 +268,21 @@ class LLMHandler:
 
         try:
             for chunk in response:
-                if chunk.usage:
+                if self._cancelled:
+                    break
+
+                if hasattr(chunk, "usage") and chunk.usage:
                     usage = chunk.usage
-                if not chunk.choices:
+                if not hasattr(chunk, "choices") or not chunk.choices:
                     continue
 
                 delta = chunk.choices[0].delta
 
-                if delta.tool_calls:
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
                     tc_deltas = [accumulator.feed(tc) for tc in delta.tool_calls]
                     yield StreamDelta(tool_calls=tc_deltas)
 
-                if delta.content:
+                if hasattr(delta, "content") and delta.content:
                     content_buffer.append(delta.content)
                     yield StreamDelta(content=delta.content)
 
@@ -306,18 +296,18 @@ class LLMHandler:
                 if usage:
                     yield StreamDelta(usage=usage)
         finally:
-            self._active_response = None
+            pass
 
 
 class _ToolCallWrapper:
-    """模拟 OpenAI tool_call 对象"""
+    """模拟 tool_call 对象"""
     def __init__(self, data: dict):
         self.id = data["id"]
         self.type = data["type"]
         self.function = _FunctionWrapper(data["function"])
 
 class _FunctionWrapper:
-    """模拟 OpenAI function 对象（tc.function.name / tc.function.arguments）"""
+    """模拟 function 对象（tc.function.name / tc.function.arguments）"""
     def __init__(self, data: dict):
         self.name = data["name"]
         self.arguments = data["arguments"]
