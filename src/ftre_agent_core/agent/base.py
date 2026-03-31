@@ -2,7 +2,6 @@
 Agent 基类
 """
 from abc import ABC, abstractmethod
-from openai import OpenAI
 from ftre_agent_core.tool import Tool, ToolRegistry
 from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.memory.protocol import MemoryProtocol
@@ -13,14 +12,16 @@ class Agent(ABC):
 
     def __init__(
         self,
-        client: OpenAI,
         model: str,
+        api_key: str,
+        api_base: str | None = None,
         system_prompt: str = "你是一个有帮助的助手。",
         tools: list[Tool] = None,
         memory: MemoryProtocol | None = None,
     ):
-        self.client = client
         self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
 
         # 记忆管理器: 外部传入或使用默认实现
         if memory is not None:
