@@ -44,6 +44,7 @@ agent = ReActAgent(
 | `model` | `str` | LiteLLM 模型格式，如 `openai/gpt-4`、`anthropic/claude-3-opus`、`openai/qwen-plus` |
 | `api_key` | `str` | API 密钥 |
 | `api_base` | `str \| None` | 自定义 API 端点（可选），用于兼容 OpenAI 协议的第三方服务 |
+| `api_type` | `str` | 协议类型，`"completions"`（默认）或 `"responses"` |
 
 ### 模型命名格式
 
@@ -71,6 +72,32 @@ api_base="http://localhost:11434"
 ```
 
 完整支持列表见 [LiteLLM 文档](https://docs.litellm.ai/docs/providers)。
+
+### Responses API 厂商
+
+某些厂商使用 Responses 协议而非 Completions 协议：
+
+```python
+agent = ReActAgent(
+    model="openai/gpt-5.4",
+    api_key="sk-xxx",
+    api_base="http://ai.xiamai.top/v1",
+    api_type="responses",  # 指定 Responses 协议
+    system_prompt="你是一个助手",
+    tools=[...],
+)
+```
+
+典型的 Responses 协议厂商配置：
+```json
+{
+  "xiamai": {
+    "api_key": "sk-xxx",
+    "base_url": "http://ai.xiamai.top/v1",
+    "api_type": "responses"
+  }
+}
+```
 
 ## 已移除的 API
 

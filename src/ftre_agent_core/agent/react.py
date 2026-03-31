@@ -41,6 +41,7 @@ class ReActAgent(Agent):
         model: str,
         api_key: str,
         api_base: str | None = None,
+        api_type: str = "completions",
         system_prompt: str = None,
         tools: list[Tool] = None,
         max_iterations: int = 10,
@@ -53,6 +54,7 @@ class ReActAgent(Agent):
             model:            模型名称（LiteLLM 格式，如 "openai/gpt-4"）
             api_key:          API 密钥
             api_base:         自定义端点（可选）
+            api_type:         协议类型，"completions"（默认）或 "responses"
             system_prompt:    系统提示词
             tools:            工具列表
             max_iterations:   最大迭代次数
@@ -66,6 +68,7 @@ class ReActAgent(Agent):
             model=model,
             api_key=api_key,
             api_base=api_base,
+            api_type=api_type,
             system_prompt=system_prompt or default_prompt,
             tools=tools,
             memory=memory,

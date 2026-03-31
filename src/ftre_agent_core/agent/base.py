@@ -15,6 +15,7 @@ class Agent(ABC):
         model: str,
         api_key: str,
         api_base: str | None = None,
+        api_type: str = "completions",
         system_prompt: str = "你是一个有帮助的助手。",
         tools: list[Tool] = None,
         memory: MemoryProtocol | None = None,
@@ -22,6 +23,7 @@ class Agent(ABC):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
+        self.api_type = api_type
 
         # 记忆管理器: 外部传入或使用默认实现
         if memory is not None:
