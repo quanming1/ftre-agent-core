@@ -23,6 +23,10 @@ class LLMError:
             return LLMError(message=f"网络连接失败: {e}", code="network")
         if isinstance(e, litellm.ContentPolicyViolationError):
             return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
+        if isinstance(e, litellm.AuthenticationError):
+            return LLMError(message=f"认证失败: {e}", code="auth_error")
+        if isinstance(e, litellm.BadRequestError):
+            return LLMError(message=f"请求无效: {e}", code="bad_request")
         if isinstance(e, litellm.APIError):
             return LLMError(message=f"API 错误: {e}", code="api_error")
         return LLMError(message=f"未知错误: {e}", code="unknown")
