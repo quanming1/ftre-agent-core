@@ -231,12 +231,23 @@ class LLMHandler:
     取消机制：
     - cancel() 设置标志位（软取消）
     - stream() 生成器在每次 yield 前检查标志位
+
+    协议支持：
+    - api_type="completions" → litellm.completion()
+    - api_type="responses"   → litellm.responses()
     """
 
-    def __init__(self, model: str, api_key: str, api_base: str | None = None):
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        api_base: str | None = None,
+        api_type: str = "completions"
+    ):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
+        self.api_type = api_type
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -248,7 +259,18 @@ class LLMHandler:
         messages: list[dict],
         tools: list[dict] | None = None
     ) -> Generator[StreamDelta | LLMResponse, None, None]:
-        """流式调用 LLM（使用 LiteLLM）"""
+        """根据 api_type 分发到对应实现"""
+        if self.api_type == "responses":
+            yield from self._stream_responses(messages, tools)
+        else:
+            yield from self._stream_completion(messages, tools)
+
+    def _stream_completion(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None
+    ) -> Generator[StreamDelta | LLMResponse, None, None]:
+        """Completions API 流式调用（litellm.completion）"""
         self._cancelled = False
         _dump_llm_input(messages, tools, self.model)
 
@@ -290,6 +312,68 @@ class LLMHandler:
                 yield LLMResponse(
                     content="".join(content_buffer) if content_buffer else None,
                     tool_calls=accumulator.build(),
+                    usage=usage,
+                )
+            else:
+                if usage:
+                    yield StreamDelta(usage=usage)
+        finally:
+            pass
+
+    def _stream_responses(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None
+    ) -> Generator[StreamDelta | LLMResponse, None, None]:
+        """Responses API 流式调用（litellm.responses）"""
+        self._cancelled = False
+        _dump_llm_input(messages, tools, self.model)
+
+        response = litellm.responses(
+            model=self.model,
+            input=messages,
+            tools=tools if tools else None,
+            api_key=self.api_key,
+            api_base=self.api_base,
+            stream=True,
+        )
+
+        content_buffer: list[str] = []
+        tool_calls_buffer: list[dict] = []
+        usage = None
+
+        try:
+            for event in response:
+                if self._cancelled:
+                    break
+
+                event_type = getattr(event, "type", None)
+
+                if event_type == "response.output_text.delta":
+                    delta_text = getattr(event, "delta", "")
+                    if delta_text:
+                        content_buffer.append(delta_text)
+                        yield StreamDelta(content=delta_text)
+
+                elif event_type == "response.completed":
+                    completed_response = getattr(event, "response", None)
+                    if completed_response:
+                        usage = getattr(completed_response, "usage", None)
+                        for item in getattr(completed_response, "output", []):
+                            if getattr(item, "type", None) == "function_call":
+                                tool_calls_buffer.append({
+                                    "id": getattr(item, "call_id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": getattr(item, "name", ""),
+                                        "arguments": getattr(item, "arguments", "")
+                                    }
+                                })
+
+            if tool_calls_buffer:
+                yield LLMResponse(
+                    content="".join(content_buffer) if content_buffer else None,
+                    tool_calls=[_ToolCallWrapper(tc) for tc in tool_calls_buffer],
                     usage=usage,
                 )
             else:

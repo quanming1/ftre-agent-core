@@ -40,12 +40,26 @@ from ftre_agent_core.tool_system import (
     ToolOutput,
     ToolResult as StandardToolResult,
 )
-from packages.workspace import get_output_guard
 
 if TYPE_CHECKING:
     from ..state import RunState
 
 logger = logging.getLogger(__name__)
+
+
+class _DefaultOutputGuard:
+    """默认的输出过滤器（不做任何过滤）"""
+    def sanitize_tool_result(self, tool_name: str, result: str) -> str:
+        return result
+
+
+def _get_output_guard():
+    """获取输出过滤器，优先使用外部注入的实现"""
+    try:
+        from packages.workspace import get_output_guard
+        return get_output_guard()
+    except ImportError:
+        return _DefaultOutputGuard()
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +99,7 @@ class ToolHandler:
         # 使用全局线程池，不再每个 agent 各建一个（避免 N*8 线程爆炸）
         from ftre_agent_core.threading import thread_pool
         self._executor = thread_pool.tool
-        self._output_guard = get_output_guard()
+        self._output_guard = _get_output_guard()
         self._active_handles: dict[str, ToolExecutionHandle] = {}
         self._context_local = threading.local()
         self.registry.provide("tool_context", self._get_current_context)
@@ -327,7 +341,15 @@ class ToolHandler:
 
     def parse_tool_call(self, tool_call) -> tuple[str, str, dict]:
         raw = tool_call.function.arguments
-        args = json.loads(raw)
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, "
+                f"call_id={tool_call.id}, error={e}, "
+                f"raw_len={len(raw)}, raw[:500]={raw[:500]!r}, raw[-200:]={raw[-200:]!r}"
+            )
+            raise
         return (tool_call.id, tool_call.function.name, args)
 
     @staticmethod
