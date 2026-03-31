@@ -3,9 +3,9 @@ Agent 基类
 """
 from abc import ABC, abstractmethod
 from openai import OpenAI
-from packages.core.tool import Tool, ToolRegistry
-from packages.core.memory import MemoryManager
-from packages.core.memory.protocol import MemoryProtocol
+from ftre_agent_core.tool import Tool, ToolRegistry
+from ftre_agent_core.memory import MemoryManager
+from ftre_agent_core.memory.protocol import MemoryProtocol
 
 
 class Agent(ABC):

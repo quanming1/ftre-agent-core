@@ -18,7 +18,7 @@ ReActRunner - ReAct 执行引擎
 """
 import logging
 from typing import Generator, TYPE_CHECKING
-from packages.core.tool.builtins import BUILTIN_TOOL_FACTORIES
+from ftre_agent_core.tool.builtins import BUILTIN_TOOL_FACTORIES
 from .state import RunState, CancelledError
 from .handler import LLMHandler, LLMResponse, LLMError, StreamDelta, ToolHandler, InterruptHandler
 from ..event import (

@@ -13,9 +13,9 @@ ReAct Agent - 推理与行动循环
 """
 import asyncio
 from typing import Generator
-from packages.core.tool import Tool
-from packages.core.prompt import prompts as core_prompts
-from packages.core.checkpoint import Checkpoint
+from ftre_agent_core.tool import Tool
+from ftre_agent_core.prompt import prompts as core_prompts
+from ftre_agent_core.checkpoint import Checkpoint
 from .base import Agent
 from .event import AgentEvent
 from .runner import ReActRunner

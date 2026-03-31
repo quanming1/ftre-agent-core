@@ -10,9 +10,9 @@ InterruptHandler - 中断/恢复处理器
 取消时 CancelledError 自然冒泡到 ReActRunner._loop() 统一处理。
 """
 from typing import Generator, TYPE_CHECKING
-from packages.core.checkpoint import CheckpointType
-from packages.core.agent.runner.state import CancelledError
-from packages.core.agent.event import (
+from ftre_agent_core.checkpoint import CheckpointType
+from ftre_agent_core.agent.runner.state import CancelledError
+from ftre_agent_core.agent.event import (
     AgentEvent,
     interrupt_event,
     tool_result_event,
@@ -21,7 +21,7 @@ from packages.core.agent.event import (
 if TYPE_CHECKING:
     from ..state import RunState
     from .tool_handler import ToolHandler
-    from packages.core.memory import MemoryManager
+    from ftre_agent_core.memory import MemoryManager
 
 
 class InterruptHandler:

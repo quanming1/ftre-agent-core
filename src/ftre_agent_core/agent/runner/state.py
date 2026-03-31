@@ -13,7 +13,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any
 
-from packages.core.tool_system import CancellationToken, ToolCancelledError
+from ftre_agent_core.tool_system import CancellationToken, ToolCancelledError
 
 class RunStatus(str, Enum):
     """运行状态"""
