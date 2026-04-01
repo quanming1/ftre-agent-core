@@ -52,13 +52,9 @@ class ReActRunner:
     - _loop() 统一 catch CancelledError，执行善后逻辑
     """
 
-    # 连续空响应最大重试次数，超过则视为异常终止
-    MAX_EMPTY_RETRIES = 3
-
     def __init__(self, agent: "ReActAgent"):
         self.agent = agent
         self.state = RunState()
-        self._consecutive_empty = 0
 
         self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
@@ -244,34 +240,17 @@ class ReActRunner:
                         last_usage = item.usage
                         self.agent.memory.token.add(item.usage)
 
+            # for 循环正常结束（adapter break 或流耗尽），统一检查取消。
+            # 场景：cancel() 硬关连接后 adapter 检测到 is_cancelled 直接 break，
+            # 此时 for 循环正常退出而不抛异常，需要在这里捕获。
+            self.state.check_cancel()
+
             # LLM 返回纯文本、无 tool_calls → 任务自然结束
             if full_content:
-                self._consecutive_empty = 0
                 self.agent.memory.add_assistant(full_content, usage=last_usage)
                 yield message_complete_event(content=full_content)
-                yield done_event(success=True, reason=DoneReason.COMPLETED, usage=self._token_usage())
-                self.state.complete()
-            else:
-                # LLM 返回了空内容（无文本、无工具调用）
-                self._consecutive_empty += 1
-                logger.warning(
-                    f"LLM 返回空响应（无文本、无工具调用）"
-                    f"[连续第 {self._consecutive_empty} 次]"
-                )
-                if self._consecutive_empty >= self.MAX_EMPTY_RETRIES:
-                    logger.error(
-                        f"连续 {self.MAX_EMPTY_RETRIES} 次空响应，终止循环"
-                    )
-                    self.agent.memory.add_assistant(
-                        "[系统] LLM 连续返回空响应，无法继续"
-                    )
-                    yield error_event(
-                        message=f"LLM 连续 {self.MAX_EMPTY_RETRIES} 次返回空响应",
-                        code="empty_response",
-                    )
-                    yield done_event(success=False, reason=DoneReason.ERROR, usage=self._token_usage())
-                    self.state.fail("连续空响应")
-                # 未达上限：不设 complete，_loop 会继续下一次迭代
+            yield done_event(success=True, reason=DoneReason.COMPLETED, usage=self._token_usage())
+            self.state.complete()
 
         except CancelledError:
             # 善后：把已有的部分内容写入 Memory，再重新抛出
