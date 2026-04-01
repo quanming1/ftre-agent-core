@@ -31,6 +31,7 @@ from ..event import (
     usage_update_event,
     error_event,
     tool_call_streaming_event,
+    tool_result_event,
 )
 
 if TYPE_CHECKING:
@@ -297,14 +298,34 @@ class ReActRunner:
 
         tool_calls = response.tool_calls
 
-        # 预解析所有 tool_calls（必须在写入 memory 之前，
-        # 以免 parse 失败时留下不完整的 assistant message 污染上下文）
-        parsed: list[tuple[str, str, dict]] = []
+        # 预解析所有 tool_calls
+        # arguments=None 表示 JSON 解析失败（如 streaming 截断）
+        parsed: list[tuple[str, str, dict | None]] = []
         for tc in tool_calls:
             parsed.append(self.tool_handler.parse_tool_call(tc))
 
         assistant_msg = self.tool_handler.build_assistant_message(response)
         self.agent.memory.add_raw(assistant_msg, usage=response.usage)
+
+        # 处理解析失败的 tool_calls：返回错误结果，让 LLM 下一轮重试
+        parse_failed = [(cid, name) for cid, name, args in parsed if args is None]
+        if parse_failed:
+            for call_id, name in parse_failed:
+                error_msg = (
+                    f"[PARSE_ERROR] Tool call JSON appears truncated or malformed. "
+                    f"Please retry this tool call with complete arguments."
+                )
+                yield tool_result_event(
+                    id=call_id, name=name, result=error_msg,
+                    error=error_msg, status="failed"
+                )
+                self.agent.memory.add_tool_result(call_id, error_msg)
+
+            # 过滤掉解析失败的，只执行解析成功的
+            parsed = [(cid, name, args) for cid, name, args in parsed if args is not None]
+            if not parsed:
+                # 所有 tool_calls 都解析失败，直接返回让 LLM 重试
+                return
 
         # 判断是否可以并行：多个 tool_call 且全部不需要 interrupt
         can_parallel = (

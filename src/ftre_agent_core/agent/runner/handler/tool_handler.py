@@ -340,16 +340,27 @@ class ToolHandler:
     # =====================================================================
 
     def parse_tool_call(self, tool_call) -> tuple[str, str, dict]:
+        """
+        解析 tool_call 的 JSON 参数。
+
+        Returns:
+            成功: (call_id, tool_name, arguments)
+            失败: (call_id, tool_name, None)  # arguments=None 表示解析失败
+
+        调用方检查 arguments is None 来判断是否解析失败，
+        失败时应跳过执行并返回错误结果给 LLM，让其在下一轮重试。
+        """
         raw = tool_call.function.arguments
         try:
             args = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.error(
-                f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, "
-                f"call_id={tool_call.id}, error={e}, "
-                f"raw_len={len(raw)}, raw[:500]={raw[:500]!r}, raw[-200:]={raw[-200:]!r}"
+            logger.warning(
+                f"[parse_tool_call] JSON 解析失败（可能是 streaming 截断）: "
+                f"tool={tool_call.function.name}, call_id={tool_call.id}, "
+                f"error={e}, raw_len={len(raw)}, raw[:500]={raw[:500]!r}"
             )
-            raise
+            # 返回 None 作为 arguments，让调用方处理
+            return (tool_call.id, tool_call.function.name, None)
         return (tool_call.id, tool_call.function.name, args)
 
     @staticmethod
