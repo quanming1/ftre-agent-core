@@ -6,7 +6,7 @@ from ftre_agent_core.agent import ReActAgent, EventType
 from ftre_agent_core.tool import tool
 
 # xiamai 配置
-API_KEY = "sk-f3bf50bf75b2f0030ffcd87441cdcfbf1b99df36aa80b1e25cc209fc8026b96c"
+API_KEY = "sk-3d6e0dc78b9b00f6c30709dd3e8d6bef55922219e64419ec7b7236051afa1638"
 API_BASE = "http://ai.xiamai.top/v1"
 MODEL = "openai/gpt-5.4"
 
