@@ -138,6 +138,7 @@ class CompletionAdapter(StreamAdapter):
             stream=True,
             stream_options={"include_usage": True},
         )
+        self._active_response = response
 
         accumulator = ToolCallAccumulator()
         content_buffer: list[str] = []
@@ -173,4 +174,4 @@ class CompletionAdapter(StreamAdapter):
                 if usage:
                     yield StreamDelta(usage=usage)
         finally:
-            pass
+            self._active_response = None
