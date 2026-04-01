@@ -60,8 +60,9 @@ class LLMHandler:
         )
 
     def cancel(self) -> None:
-        """设置取消标志位（软取消）。线程安全。"""
+        """取消 LLM 调用：设标志位 + 硬关 HTTP 连接，立即中断。"""
         self._cancelled = True
+        self._adapter.close_stream()
 
     def stream(
         self,

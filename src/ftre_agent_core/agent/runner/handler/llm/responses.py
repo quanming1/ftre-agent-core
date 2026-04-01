@@ -111,6 +111,7 @@ class ResponsesAdapter(StreamAdapter):
             kwargs["previous_response_id"] = self._last_response_id
 
         response = litellm.responses(**kwargs)
+        self._active_response = response
 
         content_buffer: list[str] = []
         tool_calls_buffer: list[dict] = []
@@ -157,4 +158,4 @@ class ResponsesAdapter(StreamAdapter):
                 if usage:
                     yield StreamDelta(usage=usage)
         finally:
-            pass
+            self._active_response = None
