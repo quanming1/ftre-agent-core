@@ -89,12 +89,22 @@ class InterruptHandler:
         if start_index >= len(tool_calls):
             return
 
+        remaining_parsed: list[tuple[str, str, dict]] = []
+
         try:
             # 处理被中断的那个工具
             current_tc = tool_calls[start_index]
             call_id, name, arguments = self.tool_handler.parse_tool_call(current_tc)
 
-            if approved:
+            # 处理解析失败的情况
+            if arguments is None:
+                error_msg = (
+                    f"[PARSE_ERROR] Tool call JSON appears truncated or malformed. "
+                    f"Please retry this tool call with complete arguments."
+                )
+                yield tool_result_event(id=call_id, name=name, result=error_msg, error=error_msg, status="failed")
+                self.memory.add_tool_result(call_id, error_msg)
+            elif approved:
                 yield from self._execute_and_record(call_id, name, arguments)
             else:
                 reject_result = f"[用户拒绝执行此工具: {name}]"
@@ -106,14 +116,28 @@ class InterruptHandler:
             if remaining_start >= len(tool_calls):
                 return
 
-            remaining_parsed: list[tuple[str, str, dict]] = []
             for i in range(remaining_start, len(tool_calls)):
                 tc = tool_calls[i]
                 remaining_parsed.append(self.tool_handler.parse_tool_call(tc))
 
+            # 处理解析失败的 tool_calls
+            parse_failed = [(cid, n) for cid, n, args in remaining_parsed if args is None]
+            for cid, n in parse_failed:
+                error_msg = (
+                    f"[PARSE_ERROR] Tool call JSON appears truncated or malformed. "
+                    f"Please retry this tool call with complete arguments."
+                )
+                yield tool_result_event(id=cid, name=n, result=error_msg, error=error_msg, status="failed")
+                self.memory.add_tool_result(cid, error_msg)
+
+            # 过滤掉解析失败的
+            remaining_parsed = [(cid, n, args) for cid, n, args in remaining_parsed if args is not None]
+            if not remaining_parsed:
+                return
+
             # 判断剩余工具是否可以并行
             has_interrupt = any(
-                self.should_interrupt(name) for _, name, _ in remaining_parsed
+                self.should_interrupt(n) for _, n, _ in remaining_parsed
             )
 
             if not has_interrupt and len(remaining_parsed) > 1:
