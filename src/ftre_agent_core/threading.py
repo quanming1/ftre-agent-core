@@ -34,10 +34,10 @@ class ThreadPoolRegistry:
         self._pools: dict[str, ThreadPoolExecutor] = {}
 
         # ── 预定义池 ──────────────────────────────────────────────
-        self.chat = self._create("chat", max_workers=8)
-        self.io = self._create("io", max_workers=8)
-        self.background = self._create("background", max_workers=4)
-        self.tool = self._create("tool", max_workers=12)
+        self.chat = self._create("chat", max_workers=16)
+        self.io = self._create("io", max_workers=16)
+        self.background = self._create("background", max_workers=8)
+        self.tool = self._create("tool", max_workers=24)
 
     def _create(self, name: str, max_workers: int) -> ThreadPoolExecutor:
         pool = ThreadPoolExecutor(

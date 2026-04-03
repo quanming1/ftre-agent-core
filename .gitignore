@@ -1,8 +1,8 @@
 # ftre workspace
 .ftre/snapshot/
 
-# Logs
-data/logs/
+# Data (logs, cache, etc.)
+src/data/
 
 # Python
 __pycache__/
