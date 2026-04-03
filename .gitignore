@@ -3,6 +3,7 @@
 
 # Data (logs, cache, etc.)
 src/data/
+data/
 
 # Python
 __pycache__/
