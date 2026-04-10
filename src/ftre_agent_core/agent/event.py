@@ -32,6 +32,8 @@ class EventType(str, Enum):
 
     ERROR = "error"
 
+    RETRY = "retry"
+
     DONE = "done"
 
     TOOL_CALL_STREAMING = "tool_call_streaming"
@@ -114,6 +116,16 @@ class ErrorData(TypedDict):
 
     code: str
 
+class RetryData(TypedDict):
+
+    code: str
+
+    message: str
+
+    attempt: int
+
+    max_attempts: int
+
 class ToolCallStreamingData(TypedDict):
     tool_calls: list[dict]
 
@@ -181,6 +193,12 @@ class ErrorEvent(TypedDict):
 
     data: ErrorData
 
+class RetryEvent(TypedDict):
+
+    type: EventType
+
+    data: RetryData
+
 AgentEvent = (
 
     ToolCallEvent
@@ -204,6 +222,8 @@ AgentEvent = (
     | UsageUpdateEvent
 
     | ErrorEvent
+
+    | RetryEvent
 
 )
 
@@ -371,4 +391,8 @@ def usage_update_event(usage: dict) -> UsageUpdateEvent:
 def error_event(message: str, code: str = "unknown") -> ErrorEvent:
 
     return {"type": EventType.ERROR, "data": {"message": message, "code": code}}
+
+def retry_event(code: str, message: str, attempt: int, max_attempts: int) -> RetryEvent:
+
+    return {"type": EventType.RETRY, "data": {"code": code, "message": message, "attempt": attempt, "max_attempts": max_attempts}}
 

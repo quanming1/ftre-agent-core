@@ -6,11 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from ftre_agent_core.threading import thread_pool
+
 _DEBUG_LLM_INPUT_DIR = Path("data/logs/llm_input")
 
 
-def dump_llm_input(messages: list[dict], tools: list[dict] | None, model: str) -> None:
-    """记录 LLM 调用输入（用于调试）"""
+def _do_dump(messages: list[dict], tools: list[dict] | None, model: str) -> None:
+    """实际写文件（在 IO 线程池中执行）"""
     try:
         now = datetime.now()
         day_dir = _DEBUG_LLM_INPUT_DIR / now.strftime("%Y%m%d")
@@ -25,3 +27,8 @@ def dump_llm_input(messages: list[dict], tools: list[dict] | None, model: str) -
         file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     except Exception:
         pass
+
+
+def dump_llm_input(messages: list[dict], tools: list[dict] | None, model: str) -> None:
+    """记录 LLM 调用输入（异步提交到 IO 线程池，不阻塞主线程）"""
+    thread_pool.io.submit(_do_dump, messages, tools, model)
