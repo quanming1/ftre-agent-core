@@ -24,7 +24,7 @@ import logging
 import threading
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator
 
 from ftre_agent_core.agent.event import (
@@ -74,6 +74,7 @@ class ToolResult:
     result: str
     error: str | None = None
     status: str = "completed"
+    metadata: dict = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -235,6 +236,7 @@ class ToolHandler:
             result=text,
             error=std.error.message if std.error else None,
             status=std.status,
+            metadata=dict(ctx.metadata),  # 复制 context.metadata 到结果
         )
         return self._run_after(ctx, compat)
 
@@ -318,6 +320,7 @@ class ToolHandler:
         yield tool_result_event(
             id=call_id, name=name, result=result.result,
             error=result.error, status=result.status,
+            metadata=result.metadata,
         )
         return result
 

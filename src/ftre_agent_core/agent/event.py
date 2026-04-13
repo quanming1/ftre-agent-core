@@ -58,13 +58,14 @@ class ToolCallData(TypedDict):
 
     arguments: dict[str, Any]
 
-class ToolResultData(TypedDict):
+class ToolResultData(TypedDict, total=False):
     id: str
     name: str
     result: str
     error: str | None
     status: str
     error_code: str | None
+    metadata: dict[str, Any]
 
 class ToolLifecycleData(TypedDict, total=False):
     id: str
@@ -264,29 +265,31 @@ def tool_result_event(
 
     error_code: str | None = None,
 
+    metadata: dict[str, Any] | None = None,
+
 ) -> ToolResultEvent:
 
-    return {
+    data: ToolResultData = {
 
-        "type": EventType.TOOL_RESULT,
+        "id": id,
 
-        "data": {
+        "name": name,
 
-            "id": id,
+        "result": result,
 
-            "name": name,
+        "error": error,
 
-            "result": result,
+        "status": status,
 
-            "error": error,
-
-            "status": status,
-
-            "error_code": error_code,
-
-        },
+        "error_code": error_code,
 
     }
+
+    if metadata:
+
+        data["metadata"] = metadata
+
+    return {"type": EventType.TOOL_RESULT, "data": data}
 
 def tool_cancel_requested_event(
 
