@@ -22,5 +22,8 @@ dev = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+ftre_agent_core = ["prompt/templates/*.md", "prompt/templates/*.txt"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
