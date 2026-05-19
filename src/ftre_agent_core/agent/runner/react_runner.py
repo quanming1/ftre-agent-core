@@ -26,7 +26,6 @@ from ..event import (
     message_event,
     reasoning_event,
     message_complete_event,
-    max_iterations_event,
     done_event,
     usage_update_event,
     error_event,
@@ -154,13 +153,10 @@ class ReActRunner:
                     yield usage_update_event(self._token_usage())
 
                 if self.state.is_done:
-                    self.agent.memory.after_loop()
                     return
 
-            yield max_iterations_event(iterations=self.agent.max_iterations)
             yield done_event(success=False, reason=DoneReason.MAX_ITERATIONS, usage=self._token_usage())
             self.state.complete()
-            self.agent.memory.after_loop()
 
         except CancelledError:
             yield from self._on_cancelled()
@@ -189,7 +185,6 @@ class ReActRunner:
                     last_usage = item.usage
                     if last_usage:
                         self.agent.memory.token.add(last_usage)
-                    # 如果 LLM 在调用工具的同时输出了文本，记录完整内容
                     if full_content:
                         yield message_complete_event(content=full_content)
                     yield from self._handle_tool_calls(item)
@@ -207,12 +202,11 @@ class ReActRunner:
                         last_usage = item.usage
                         self.agent.memory.token.add(item.usage)
 
-            # for 循环正常结束（adapter break 或流耗尽），统一检查取消。
-            # 场景：cancel() 硬关连接后 adapter 检测到 is_cancelled 直接 break，
-            # 此时 for 循环正常退出而不抛异常，需要在这里捕获。
-            self.state.check_cancel()
-
             # LLM 返回纯文本、无 tool_calls → 任务自然结束
+            # 但如果是取消导致的 break，不应该标记为完成
+            if self.state.is_cancelled:
+                raise CancelledError()
+
             if full_content:
                 self.agent.memory.add_assistant(full_content, usage=last_usage)
                 yield message_complete_event(content=full_content)
@@ -220,30 +214,23 @@ class ReActRunner:
             self.state.complete()
 
         except CancelledError:
-            # 善后：把已有的部分内容写入 Memory，再重新抛出
             if full_content:
                 self.agent.memory.add_assistant(full_content)
                 yield message_complete_event(content=full_content)
-            else:
-                self.agent.memory.add_assistant("[用户取消]")
             raise
 
         except Exception as e:
-            # cancel() 强关 HTTP 连接会导致网络异常（非 CancelledError），
-            # 通过 state.is_cancelled 识别：转为 CancelledError 走正常善后路径
+            # cancel() 硬关连接会导致网络异常或 adapter break 后正常退出，
+            # 统一通过 state.is_cancelled 识别，转为 CancelledError
             if self.state.is_cancelled:
-                logger.info(f"[_step] LLM 流被取消关闭: {e}")
                 if full_content:
                     self.agent.memory.add_assistant(full_content)
                     yield message_complete_event(content=full_content)
-                else:
-                    self.agent.memory.add_assistant("[用户取消]")
                 raise CancelledError() from e
 
             err = LLMError.classify(e)
             err_str = f"LLM 调用失败: [{err.code}] {err.message}"
             logger.warning(err_str)
-            self.agent.memory.add_assistant(f"[系统错误] {err_str}")
             yield error_event(message=err.message, code=err.code)
             yield done_event(success=False, reason=DoneReason.ERROR, usage=self._token_usage())
             self.state.fail(err_str)

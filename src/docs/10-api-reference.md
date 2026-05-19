@@ -65,7 +65,6 @@ from ftre_agent_core.agent import EventType
 | `EventType.RETRY` | 重试 |
 | `EventType.DONE` | 完成 |
 | `EventType.USAGE_UPDATE` | 用量更新 |
-| `EventType.MAX_ITERATIONS` | 达到上限 |
 
 ---
 

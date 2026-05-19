@@ -55,7 +55,6 @@ ReActRunner         ← 执行引擎（编排循环）
 | `RETRY` | 重试 | 自动重试中 |
 | `DONE` | 完成 | 整个执行结束 |
 | `USAGE_UPDATE` | 用量更新 | Token 使用统计 |
-| `MAX_ITERATIONS` | 达到上限 | 迭代次数用尽 |
 
 ### 事件结构
 
