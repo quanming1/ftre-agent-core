@@ -6,9 +6,9 @@ from ftre_agent_core.agent import ReActAgent, EventType
 from ftre_agent_core.tool import tool
 
 
-API_KEY = "sk-1cdcb7b0e7fb40d49bd6b66b8666022e"
-API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-MODEL = "openai/qwen-plus"
+API_KEY = "bce-v3/ALTAKSP-OaWOvCQU8el1GqZscIGgB/0cb52ddf8cabf8e8da91c707a16b4c9315ec270e"
+API_BASE = "https://qianfan.baidubce.com/v2/coding"
+MODEL = "openai/minimax-m2.5"
 
 
 @pytest.fixture
@@ -115,68 +115,6 @@ class TestAgentBasic:
         )
         assert tool_result_event is not None
         assert "56088" in tool_result_event["data"]["result"]
-
-
-class TestAgentInterrupt:
-    """Agent 中断测试"""
-
-    def test_interrupt_before_tool(self, simple_tools):
-        """测试工具执行前中断"""
-        agent = ReActAgent(
-            model=MODEL,
-            api_key=API_KEY,
-            api_base=API_BASE,
-            system_prompt="你是一个天气助手。",
-            tools=simple_tools,
-            interrupt_before=["get_weather"],
-        )
-
-        events = list(agent.run("北京天气怎么样？"))
-
-        event_types = [e["type"] for e in events]
-        assert EventType.INTERRUPT in event_types
-
-        interrupt_event = next(e for e in events if e["type"] == EventType.INTERRUPT)
-        assert interrupt_event["data"]["tool_name"] == "get_weather"
-
-    def test_resume_after_interrupt(self, simple_tools):
-        """测试中断后恢复执行"""
-        agent = ReActAgent(
-            model=MODEL,
-            api_key=API_KEY,
-            api_base=API_BASE,
-            system_prompt="你是一个天气助手。",
-            tools=simple_tools,
-            interrupt_before=["get_weather"],
-        )
-
-        events = list(agent.run("北京天气怎么样？"))
-        assert EventType.INTERRUPT in [e["type"] for e in events]
-
-        resume_events = list(agent.resume(approved=True))
-
-        event_types = [e["type"] for e in resume_events]
-        assert EventType.TOOL_RESULT in event_types
-        assert EventType.DONE in event_types
-
-    def test_reject_after_interrupt(self, simple_tools):
-        """测试中断后拒绝执行"""
-        agent = ReActAgent(
-            model=MODEL,
-            api_key=API_KEY,
-            api_base=API_BASE,
-            system_prompt="你是一个天气助手。如果工具被拒绝，告诉用户无法执行。",
-            tools=simple_tools,
-            interrupt_before=["get_weather"],
-        )
-
-        events = list(agent.run("北京天气怎么样？"))
-        assert EventType.INTERRUPT in [e["type"] for e in events]
-
-        resume_events = list(agent.resume(approved=False))
-
-        event_types = [e["type"] for e in resume_events]
-        assert EventType.DONE in event_types
 
 
 class TestAgentMultiTurn:

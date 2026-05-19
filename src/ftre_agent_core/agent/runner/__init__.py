@@ -1,5 +1,5 @@
 from .state import RunState, RunStatus, CancelledError
-from .handler import LLMHandler, LLMResponse, ToolHandler, ToolResult, InterruptHandler
+from .handler import LLMHandler, LLMResponse, ToolHandler, ToolResult
 from .react_runner import ReActRunner
 
 __all__ = [
@@ -10,6 +10,5 @@ __all__ = [
     "LLMResponse",
     "ToolHandler",
     "ToolResult",
-    "InterruptHandler",
     "ReActRunner",
 ]
