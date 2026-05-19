@@ -9,7 +9,7 @@ from typing import Generator
 
 from .base import StreamAdapter
 from .types import StreamDelta, LLMResponse, ToolCallDeltaChunk, ToolCallWrapper
-from .utils import dump_llm_input
+from .utils import LLMLogger
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,8 @@ class CompletionAdapter(StreamAdapter):
         messages: list[dict],
         tools: list[dict] | None = None
     ) -> Generator[StreamDelta | LLMResponse, None, None]:
-        dump_llm_input(messages, tools, self.model)
+        llm_log = LLMLogger(self.model)
+        llm_log.log_input(messages, tools)
 
         response = litellm.completion(
             model=self.model,
@@ -148,6 +149,8 @@ class CompletionAdapter(StreamAdapter):
             for chunk in response:
                 if self.is_cancelled:
                     break
+
+                llm_log.log_chunk(chunk)
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage = chunk.usage
@@ -180,3 +183,4 @@ class CompletionAdapter(StreamAdapter):
                     yield StreamDelta(usage=usage)
         finally:
             self._active_response = None
+            llm_log.flush()
