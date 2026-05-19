@@ -1,12 +1,7 @@
 """
 RunState - 运行时状态管理
 
-记录 ReAct 循环的执行位置，支持中断/恢复。
-
-中断时保存的关键信息：
-- iteration:          当前迭代轮次
-- pending_tool_calls: LLM 返回的待执行工具列表
-- tool_call_index:    已执行到第几个工具（resume 时从这里继续）
+记录 ReAct 循环的执行位置。
 """
 import threading
 from enum import Enum
@@ -19,7 +14,6 @@ class RunStatus(str, Enum):
     """运行状态"""
     IDLE = "idle"              # 空闲，未开始
     RUNNING = "running"        # 运行中
-    INTERRUPTED = "interrupted"  # 已中断，等待用户确认
     COMPLETED = "completed"    # 已完成
     ERROR = "error"            # 出错
     CANCELLED = "cancelled"    # 用户主动取消
@@ -33,15 +27,12 @@ class RunState:
     """
     运行时状态
 
-    记录当前执行的位置和状态，支持中断/恢复。
-    中断时 pending_tool_calls 和 tool_call_index 保留现场，
-    resume 时从 tool_call_index 处继续执行。
+    记录当前执行的位置和状态。
     """
     status: RunStatus = RunStatus.IDLE
     iteration: int = 0
     pending_tool_calls: list[Any] = field(default_factory=list)
     tool_call_index: int = 0
-    interrupt_checkpoint_id: str | None = None
     error: str | None = None
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     _done_event: threading.Event = field(default_factory=threading.Event)
@@ -53,10 +44,6 @@ class RunState:
     @property
     def is_running(self) -> bool:
         return self.status == RunStatus.RUNNING
-
-    @property
-    def is_interrupted(self) -> bool:
-        return self.status == RunStatus.INTERRUPTED
 
     @property
     def is_cancelled(self) -> bool:
@@ -71,7 +58,6 @@ class RunState:
         self.iteration = 0
         self.pending_tool_calls = []
         self.tool_call_index = 0
-        self.interrupt_checkpoint_id = None
         self.error = None
         self.cancel_token = CancellationToken()
         self._done_event.clear()
@@ -80,16 +66,6 @@ class RunState:
         self.iteration += 1
         self.pending_tool_calls = []
         self.tool_call_index = 0
-
-    def interrupt(self, checkpoint_id: str) -> None:
-        self.status = RunStatus.INTERRUPTED
-        self.interrupt_checkpoint_id = checkpoint_id
-
-    def resume(self) -> None:
-        self.status = RunStatus.RUNNING
-        self.interrupt_checkpoint_id = None
-        self.cancel_token = CancellationToken()
-        self._done_event.clear()
 
     def complete(self) -> None:
         self.status = RunStatus.COMPLETED
@@ -118,7 +94,6 @@ class RunState:
         self.iteration = 0
         self.pending_tool_calls = []
         self.tool_call_index = 0
-        self.interrupt_checkpoint_id = None
         self.error = None
         self.cancel_token = CancellationToken()
         self._done_event.clear()
@@ -137,5 +112,4 @@ class RunState:
             "status": self.status.value,
             "iteration": self.iteration,
             "tool_call_index": self.tool_call_index,
-            "interrupt_checkpoint_id": self.interrupt_checkpoint_id,
         }

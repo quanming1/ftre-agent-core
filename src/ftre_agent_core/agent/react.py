@@ -1,21 +1,10 @@
 """
 ReAct Agent - 推理与行动循环
-
-支持功能：
-- ReAct 循环（Reasoning + Acting）
-- Checkpoint（快照/回退）
-- Interrupt/Resume（中断/恢复）
-
-中断配置：
-    agent = ReActAgent(..., interrupt_before=["dangerous_tool"])
-    # 或者
-    agent = ReActAgent(..., interrupt_all=True)
 """
 import asyncio
 from typing import Generator
 from ftre_agent_core.tool import Tool
 from ftre_agent_core.prompt import prompts as core_prompts
-from ftre_agent_core.checkpoint import Checkpoint
 from .base import Agent
 from .event import AgentEvent
 from .runner import ReActRunner
@@ -29,7 +18,7 @@ class ReActAgent(Agent):
 
     实现 Reasoning + Acting 循环：
     1. 思考：分析问题，决定是否需要工具
-    2. 行动：调用工具获取信息（可能在此中断等待确认）
+    2. 行动：调用工具获取信息
     3. 观察：处理工具返回结果
     4. 重复：直到能给出最终答案
 
@@ -45,8 +34,6 @@ class ReActAgent(Agent):
         system_prompt: str = None,
         tools: list[Tool] = None,
         max_iterations: int = 10,
-        interrupt_before: list[str] = None,
-        interrupt_all: bool = False,
         memory=None,
     ):
         """
@@ -58,9 +45,7 @@ class ReActAgent(Agent):
             system_prompt:    系统提示词
             tools:            工具列表
             max_iterations:   最大迭代次数
-            interrupt_before: 需要中断确认的工具名列表
-            interrupt_all:    是否所有工具都需要中断确认
-            memory:           自定义 Memory 管理器 (实现 MemoryProtocol)
+            memory:           自定义 MemoryManager
         """
         default_prompt = core_prompts.get("react_system")
 
@@ -74,10 +59,6 @@ class ReActAgent(Agent):
             memory=memory,
         )
         self.max_iterations = max_iterations
-
-        # 中断配置
-        self.interrupt_before: list[str] = interrupt_before or []
-        self.interrupt_all: bool = interrupt_all
 
         # 执行引擎
         self._runner = ReActRunner(self)
@@ -102,17 +83,6 @@ class ReActAgent(Agent):
                 - list: 完整消息列表（含历史 + 当前用户消息）
         """
         yield from self._runner.run(message)
-
-    def resume(self, approved: bool = True) -> Generator[AgentEvent, None, None]:
-        """
-        从中断处恢复执行
-
-        Args:
-            approved: 是否批准执行被中断的工具
-                True  → 执行工具，继续 ReAct 循环
-                False → 跳过工具（告知 LLM 用户拒绝），继续循环
-        """
-        yield from self._runner.resume(approved)
 
     async def cancel(self) -> None:
         """
@@ -139,38 +109,3 @@ class ReActAgent(Agent):
         """
         self._runner.state.cancel()
         self._runner.llm.cancel()
-
-
-    # ============================================================
-    # Checkpoint API
-    # ============================================================
-
-    def list_checkpoints(self) -> list[Checkpoint]:
-        """列出所有快照"""
-        return self.memory.checkpoints.list()
-
-    def rollback(self, checkpoint_id: str) -> Checkpoint:
-        """
-        回退到指定快照
-
-        恢复消息历史和 token 统计到快照时的状态，
-        该快照之后的所有消息和快照都会被丢弃。
-        """
-        cp = self.memory.restore_checkpoint(checkpoint_id)
-        self._runner.state.reset()
-        return cp
-
-    def rollback_last(self) -> Checkpoint | None:
-        """
-        回退到上一个快照（撤销最后一轮对话）
-        """
-        checkpoints = self.memory.checkpoints.list()
-        if not checkpoints:
-            return None
-
-        if len(checkpoints) >= 2:
-            target = checkpoints[-2]
-        else:
-            target = checkpoints[0]
-
-        return self.rollback(target.id)
