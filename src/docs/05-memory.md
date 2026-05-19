@@ -4,8 +4,6 @@ Memory 管理当前 ReAct 循环中的消息列表，是 LLM 理解上下文的�
 
 ## MemoryManager
 
-框架内置的 `MemoryManager` 管理单次执行中的消息和 token 统计：
-
 ```python
 from ftre_agent_core.memory import MemoryManager
 
@@ -51,19 +49,6 @@ raw_messages = memory.messages
 ]
 ```
 
-## Token 统计
-
-```python
-# 累计 token 使用（由 Runner 自动调用）
-memory.token.add(usage)
-
-# 查看统计
-print(memory.token.prompt_tokens)
-print(memory.token.completion_tokens)
-print(memory.token.total_tokens)
-print(memory.token.request_count)
-```
-
 ## 生命周期
 
 MemoryManager 的生命周期与单次 `agent.run()` 调用对齐：
@@ -79,28 +64,15 @@ list(agent.run("查天气"))        # memory: [user, assistant, user, assistant+
 agent.memory.clear()
 ```
 
-## 自定义 Memory
+## Token 用量
 
-你可以传入自己的 MemoryManager 实例：
-
-```python
-memory = MemoryManager({"system_prompt": "自定义提示词"})
-
-agent = ReActAgent(
-    model="openai/gpt-4",
-    api_key="sk-xxx",
-    memory=memory,
-    tools=[...],
-)
-```
-
-也可以继承 `MemoryManager` 扩展行为：
+Token 用量通过事件流中的 `USAGE_UPDATE` 事件推送，每次 LLM 调用完成后触发：
 
 ```python
-class MyMemory(MemoryManager):
-    def after_loop(self):
-        """循环结束后的自定义逻辑"""
-        print(f"本次循环使用了 {self.token.total_tokens} tokens")
+for event in agent.run("..."):
+    if event["type"] == EventType.USAGE_UPDATE:
+        usage = event["data"]["usage"]
+        print(f"本次调用: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
 ```
 
 ## 下一步

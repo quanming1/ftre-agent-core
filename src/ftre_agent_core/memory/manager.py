@@ -4,10 +4,8 @@ MemoryManager - 对话消息管理器
 职责：
 - 管理当前 ReAct 循环的消息列表（messages）
 - 维护 system prompt
-- 统计 token 使用
 """
 from typing import Any
-from .token import TokenUsage
 
 
 DEFAULT_MAX_MESSAGES = 100
@@ -17,7 +15,7 @@ class MemoryManager:
     """
     对话消息管理器
 
-    管理单次 ReAct 循环中的消息列表和 token 统计。
+    管理单次 ReAct 循环中的消息列表。
     """
 
     def __init__(self, options: dict = None):
@@ -25,7 +23,6 @@ class MemoryManager:
         self._system_prompt = options.get("system_prompt", "你是一个有帮助的助手。")
         self._max_messages = options.get("max_messages", DEFAULT_MAX_MESSAGES)
         self._messages: list[dict] = []
-        self.token = TokenUsage()
 
     @property
     def system_prompt(self) -> str:
@@ -70,7 +67,6 @@ class MemoryManager:
     def clear(self) -> None:
         """清空消息"""
         self._messages = []
-        self.token.clear()
 
     # ============================================================
     # 内部方法

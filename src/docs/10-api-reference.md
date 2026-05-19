@@ -177,12 +177,11 @@ MemoryManager(options: dict = None)
 | 方法 | 说明 |
 |------|------|
 | `add_user(content)` | 添加用户消息 |
-| `add_assistant(content, usage=None)` | 添加助手消息 |
+| `add_assistant(content)` | 添加助手消息 |
 | `add_tool_result(tool_call_id, content)` | 添加工具结果 |
-| `add_raw(message, usage=None)` | 添加原始消息 |
+| `add_raw(message)` | 添加原始消息 |
 | `get_messages()` | 获取完整消息列表（含 system） |
-| `after_loop()` | 循环结束钩子 |
-| `clear()` | 清空消息和 token 统计 |
+| `clear()` | 清空消息 |
 
 #### 属性
 
@@ -190,23 +189,6 @@ MemoryManager(options: dict = None)
 |------|------|------|
 | `messages` | `list[dict]` | 消息列表（不含 system） |
 | `system_prompt` | `str` | 系统提示词 |
-| `token` | `TokenUsage` | Token 统计 |
-
-### TokenUsage
-
-```python
-from ftre_agent_core.memory import TokenUsage
-```
-
-| 属性/方法 | 说明 |
-|-----------|------|
-| `prompt_tokens` | 累计 prompt tokens |
-| `completion_tokens` | 累计 completion tokens |
-| `total_tokens` | 总计 |
-| `request_count` | 请求次数 |
-| `add(usage)` | 累加 |
-| `to_dict()` | 序列化 |
-| `clear()` | 清零 |
 
 ---
 
