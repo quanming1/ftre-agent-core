@@ -9,7 +9,7 @@
 | [快速开始](./01-getting-started.md) | 5 分钟上手，创建你的第一个 Agent |
 | [核心概念](./02-core-concepts.md) | 理解 ReAct 循环、事件流、状态管理 |
 | [工具系统](./03-tools.md) | 定义工具、装饰器、参数推断、依赖注入 |
-| [Memory](./05-memory.md) | 对话消息管理、Token 统计 |
+| [Memory](./05-memory.md) | 对话消息管理 |
 | [LLM 适配](./06-llm-adapters.md) | 多供应商支持、Completions / Responses 协议 |
 | [中间件](./07-middleware.md) | Tool 中间件、执行前后钩子 |
 | [取消机制](./09-cancellation.md) | 用户取消、超时、资源清理 |
@@ -55,7 +55,7 @@ src/ftre_agent_core/
 │   └── event.py        # 事件类型定义
 ├── tool/               # 工具系统（定义、注册、装饰器）
 ├── tool_system/        # 底层执行基础设施（取消、资源、结果）
-├── memory/             # 消息管理（消息列表、Token 统计）
+├── memory/             # 消息管理
 ├── prompt/             # 提示词管理（模板、渲染）
 └── threading.py        # 全局线程池
 ```
