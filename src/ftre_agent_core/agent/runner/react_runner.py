@@ -3,12 +3,11 @@ ReActRunner - ReAct 执行引擎
 
 只负责 ReAct 循环编排：
 - run()    → 启动循环
-- resume() → 从中断处恢复
 - cancel() → 用户主动取消
 - _loop()  → 主循环
 - _step()  → 单次迭代（调 LLM → 处理响应）
 
-具体的 LLM 调用、工具执行、中断逻辑分别委托给 handler/ 下的处理器。
+具体的 LLM 调用、工具执行分别委托给 handler/ 下的处理器。
 
 取消策略：
 - cancel() 设标志位 + threading.Event.set()（线程安全，立即唤醒等待者）
@@ -20,7 +19,7 @@ import logging
 from typing import Generator, TYPE_CHECKING
 from ftre_agent_core.tool.builtins import BUILTIN_TOOL_FACTORIES
 from .state import RunState, CancelledError
-from .handler import LLMHandler, LLMResponse, LLMError, StreamDelta, ToolHandler, InterruptHandler
+from .handler import LLMHandler, LLMResponse, LLMError, StreamDelta, ToolHandler
 from ..event import (
     DoneReason,
     AgentEvent,
@@ -44,8 +43,8 @@ class ReActRunner:
     """
     ReAct 执行引擎
 
-    编排 LLMHandler / ToolHandler / InterruptHandler 完成 ReAct 循环。
-    自身不包含工具执行或中断判断的具体逻辑。
+    编排 LLMHandler / ToolHandler 完成 ReAct 循环。
+    自身不包含工具执行的具体逻辑。
 
     取消机制：
     - 外部调 cancel() → state 设标志位 + Event.set()
@@ -59,13 +58,6 @@ class ReActRunner:
 
         self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
-        self.interrupt_handler = InterruptHandler(
-            state=self.state,
-            memory=agent.memory,
-            tool_handler=self.tool_handler,
-            interrupt_before=getattr(agent, "interrupt_before", None),
-            interrupt_all=getattr(agent, "interrupt_all", False),
-        )
 
         # 注入内置工具（think）
         for factory in BUILTIN_TOOL_FACTORIES:
@@ -132,22 +124,6 @@ class ReActRunner:
                     continue
                 memory.add_raw(msg)
 
-    def resume(self, approved: bool = True) -> Generator[AgentEvent, None, None]:
-        """从中断处恢复执行"""
-        if not self.state.is_interrupted:
-            return
-
-        self.state.resume()
-
-        try:
-            yield from self.interrupt_handler.resume_tool_calls(approved)
-        except CancelledError:
-            yield from self._on_cancelled()
-            return
-
-        if not self.state.is_done and not self.state.is_interrupted:
-            yield from self._loop()
-
     # ============================================================
     # 主循环（CancelledError 的唯一捕获点）
     # ============================================================
@@ -170,33 +146,20 @@ class ReActRunner:
                 self.state.check_cancel()
                 self.state.next_iteration()
 
-                # Compaction: 每次迭代开始前检查上下文是否溢出
-                if hasattr(self.agent.memory, "compact"):
-                    self.agent.memory.compact()
-
                 yield from self._step()
 
                 # 每次迭代结束后实时更新 usage（未结束时推送中间状态）
                 if not self.state.is_done:
                     yield usage_update_event(self._token_usage())
 
-                if self.state.is_interrupted:
-                    return
-
                 if self.state.is_done:
                     self.agent.memory.after_loop()
-                    self.agent.memory.save_checkpoint(
-                        label=label[:50] if label else ""
-                    )
                     return
 
             yield max_iterations_event(iterations=self.agent.max_iterations)
             yield done_event(success=False, reason=DoneReason.MAX_ITERATIONS, usage=self._token_usage())
             self.state.complete()
             self.agent.memory.after_loop()
-            self.agent.memory.save_checkpoint(
-                label=f"[max_iterations] {label[:30]}" if label else "[max_iterations]"
-            )
 
         except CancelledError:
             yield from self._on_cancelled()
@@ -287,9 +250,8 @@ class ReActRunner:
         处理工具调用（自动选择并行或串行）。
 
         策略：
-        - 单个 tool_call → 串行（无并行开销）
-        - 多个 tool_calls 且无需 interrupt → 并行执行
-        - 多个 tool_calls 但有需要 interrupt 的 → 串行（中断语义要求逐个处理）
+        - 单个 tool_call → 串行
+        - 多个 tool_calls → 并行执行
 
         CancelledError 可能从 check_cancel() 或工具执行中抛出，
         在此捕获后补齐未执行的 tool results，再重新抛出给 _loop()。
@@ -327,16 +289,8 @@ class ReActRunner:
                 # 所有 tool_calls 都解析失败，直接返回让 LLM 重试
                 return
 
-        # 判断是否可以并行：多个 tool_call 且全部不需要 interrupt
-        can_parallel = (
-            len(parsed) > 1
-            and not any(
-                self.interrupt_handler.should_interrupt(name)
-                for _, name, _ in parsed
-            )
-        )
-
-        if can_parallel:
+        # 多个 tool_call 时并行执行
+        if len(parsed) > 1:
             yield from self._handle_tool_calls_parallel(parsed)
         else:
             yield from self._handle_tool_calls_sequential(parsed)
@@ -346,8 +300,6 @@ class ReActRunner:
     ) -> Generator[AgentEvent, None, None]:
         """
         并行执行所有工具调用。
-
-        前提：调用方已确认所有工具都不需要 interrupt。
         """
         try:
             self.state.check_cancel()
@@ -384,18 +336,13 @@ class ReActRunner:
         parsed: list[tuple[str, str, dict]],
     ) -> Generator[AgentEvent, None, None]:
         """
-        串行执行工具调用（原始逻辑，支持 interrupt）。
+        串行执行工具调用。
         """
         for i, (call_id, name, arguments) in enumerate(parsed):
             try:
                 self.state.check_cancel()
 
                 self.state.tool_call_index = i
-
-                # 检查中断
-                if self.interrupt_handler.should_interrupt(name):
-                    yield from self.interrupt_handler.do_interrupt(call_id, name, arguments)
-                    return
 
                 # 执行工具，事件流保证完整（tool_call → tool_result）
                 result = None

@@ -4,7 +4,6 @@ Agent 基类
 from abc import ABC, abstractmethod
 from ftre_agent_core.tool import Tool, ToolRegistry
 from ftre_agent_core.memory import MemoryManager
-from ftre_agent_core.memory.protocol import MemoryProtocol
 
 
 class Agent(ABC):
@@ -18,7 +17,7 @@ class Agent(ABC):
         api_type: str = "completions",
         system_prompt: str = "你是一个有帮助的助手。",
         tools: list[Tool] = None,
-        memory: MemoryProtocol | None = None,
+        memory: MemoryManager | None = None,
     ):
         self.model = model
         self.api_key = api_key
@@ -27,9 +26,9 @@ class Agent(ABC):
 
         # 记忆管理器: 外部传入或使用默认实现
         if memory is not None:
-            self.memory: MemoryProtocol = memory
+            self.memory = memory
         else:
-            self.memory: MemoryProtocol = MemoryManager({
+            self.memory = MemoryManager({
                 "system_prompt": system_prompt
             })
 
@@ -73,8 +72,7 @@ class Agent(ABC):
 
         Args:
             message: 用户消息，支持两种格式：
-                - str: 单条用户消息（自动包装为 messages 列表）
-                - list[dict]: 完整消息列表（含历史），每条为 openai 格式 dict
-                  或 FtreMessage 对象
+                - str: 单条用户消息
+                - list[dict]: 完整消息列表（含历史）
         """
         pass
