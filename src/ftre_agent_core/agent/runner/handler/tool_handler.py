@@ -329,13 +329,51 @@ class ToolHandler:
         parsed_calls: list[tuple[str, str, dict]],
         state: "RunState",
     ) -> Generator[AgentEvent, None, list[ToolResult]]:
-        """串行 execute_and_emit 多个工具（当前未真正并行，保留接口语义）。"""
+        """
+        并行执行多个工具调用。
+
+        流程：
+        1. yield 所有 tool_call 事件
+        2. 在独立线程中并发执行所有工具（每个工具一个线程）
+        3. 等待全部完成
+        4. 按原始顺序 yield 所有 tool_result 事件
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # 1. yield 所有 tool_call 事件
+        for call_id, name, arguments in parsed_calls:
+            yield tool_call_event(id=call_id, name=name, arguments=arguments)
+
+        # 2. 并发执行（用临时线程池，避免和内部 _executor 嵌套死锁）
+        results_map: dict[str, ToolResult] = {}
+
+        with ThreadPoolExecutor(max_workers=len(parsed_calls), thread_name_prefix="ftre-parallel") as pool:
+            futures = {
+                pool.submit(self.execute_cancellable, call_id, name, arguments, state): call_id
+                for call_id, name, arguments in parsed_calls
+            }
+            for future in as_completed(futures):
+                call_id = futures[future]
+                try:
+                    results_map[call_id] = future.result()
+                except Exception as e:
+                    name = next(n for cid, n, _ in parsed_calls if cid == call_id)
+                    results_map[call_id] = ToolResult(
+                        call_id=call_id, name=name,
+                        result=str(e), error=str(e), status="failed"
+                    )
+
+        # 3. 按原始顺序 yield tool_result 事件
         results: list[ToolResult] = []
         for call_id, name, arguments in parsed_calls:
-            result = yield from self.execute_and_emit(
-                call_id=call_id, name=name, arguments=arguments, state=state,
+            result = results_map[call_id]
+            yield tool_result_event(
+                id=call_id, name=name, result=result.result,
+                error=result.error, status=result.status,
+                metadata=result.metadata,
             )
             results.append(result)
+
         return results
 
     # =====================================================================
