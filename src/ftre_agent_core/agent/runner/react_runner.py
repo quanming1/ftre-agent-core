@@ -128,10 +128,6 @@ class ReActRunner:
     # 主循环（CancelledError 的唯一捕获点）
     # ============================================================
 
-    def _token_usage(self) -> dict:
-        """获取当前累计 token 用量（用于 done_event）"""
-        return self.agent.memory.token.to_dict()
-
     def _loop(self, label: str = "") -> Generator[AgentEvent, None, None]:
         """
         ReAct 主循环
@@ -148,14 +144,10 @@ class ReActRunner:
 
                 yield from self._step()
 
-                # 每次迭代结束后实时更新 usage（未结束时推送中间状态）
-                if not self.state.is_done:
-                    yield usage_update_event(self._token_usage())
-
                 if self.state.is_done:
                     return
 
-            yield done_event(success=False, reason=DoneReason.MAX_ITERATIONS, usage=self._token_usage())
+            yield done_event(success=False, reason=DoneReason.MAX_ITERATIONS)
             self.state.complete()
 
         except CancelledError:
@@ -174,7 +166,6 @@ class ReActRunner:
         messages = self.agent.memory.get_messages()
         tools = self.agent.tools.to_openai_tools()
         full_content = ""
-        last_usage = None
 
         try:
             for item in self.llm.stream(messages, tools if tools else None):
@@ -182,9 +173,8 @@ class ReActRunner:
 
                 if isinstance(item, LLMResponse):
                     self._consecutive_empty = 0
-                    last_usage = item.usage
-                    if last_usage:
-                        self.agent.memory.token.add(last_usage)
+                    if item.usage:
+                        yield usage_update_event(item.usage)
                     if full_content:
                         yield message_complete_event(content=full_content)
                     yield from self._handle_tool_calls(item)
@@ -199,18 +189,17 @@ class ReActRunner:
                     if item.tool_calls:
                         yield tool_call_streaming_event(item.tool_calls)
                     if item.usage:
-                        last_usage = item.usage
-                        self.agent.memory.token.add(item.usage)
+                        yield usage_update_event(item.usage)
 
-            # LLM 返回纯文本、无 tool_calls → 任务自然结束
-            # 但如果是取消导致的 break，不应该标记为完成
+            # 如果是取消导致的 break，不应该标记为完成
             if self.state.is_cancelled:
                 raise CancelledError()
 
+            # LLM 返回纯文本、无 tool_calls → 任务自然结束
             if full_content:
-                self.agent.memory.add_assistant(full_content, usage=last_usage)
+                self.agent.memory.add_assistant(full_content)
                 yield message_complete_event(content=full_content)
-            yield done_event(success=True, reason=DoneReason.COMPLETED, usage=self._token_usage())
+            yield done_event(success=True, reason=DoneReason.COMPLETED)
             self.state.complete()
 
         except CancelledError:
@@ -220,8 +209,8 @@ class ReActRunner:
             raise
 
         except Exception as e:
-            # cancel() 硬关连接会导致网络异常或 adapter break 后正常退出，
-            # 统一通过 state.is_cancelled 识别，转为 CancelledError
+            # cancel() 硬关连接会导致网络异常，
+            # 通过 state.is_cancelled 识别，转为 CancelledError
             if self.state.is_cancelled:
                 if full_content:
                     self.agent.memory.add_assistant(full_content)
@@ -232,7 +221,7 @@ class ReActRunner:
             err_str = f"LLM 调用失败: [{err.code}] {err.message}"
             logger.warning(err_str)
             yield error_event(message=err.message, code=err.code)
-            yield done_event(success=False, reason=DoneReason.ERROR, usage=self._token_usage())
+            yield done_event(success=False, reason=DoneReason.ERROR)
             self.state.fail(err_str)
 
     def _handle_tool_calls(self, response: LLMResponse) -> Generator[AgentEvent, None, None]:
@@ -368,7 +357,7 @@ class ReActRunner:
     def _on_cancelled(self) -> Generator[AgentEvent, None, None]:
         """CancelledError 的统一善后：yield DONE 事件，然后通知等待者"""
         try:
-            yield done_event(success=False, reason=DoneReason.CANCELLED, usage=self._token_usage())
+            yield done_event(success=False, reason=DoneReason.CANCELLED)
         finally:
             self.state.mark_done()
 
