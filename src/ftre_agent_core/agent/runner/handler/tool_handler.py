@@ -330,13 +330,12 @@ class ToolHandler:
         state: "RunState",
     ) -> Generator[AgentEvent, None, list[ToolResult]]:
         """
-        并行执行多个工具调用。
+        并行执行多个工具调用，谁先完成谁先 yield 事件。
 
         流程：
         1. yield 所有 tool_call 事件
-        2. 在独立线程中并发执行所有工具（每个工具一个线程）
-        3. 等待全部完成
-        4. 按原始顺序 yield 所有 tool_result 事件
+        2. 并发提交所有工具
+        3. 谁先完成就立即 yield 对应的 tool_result
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -344,37 +343,33 @@ class ToolHandler:
         for call_id, name, arguments in parsed_calls:
             yield tool_call_event(id=call_id, name=name, arguments=arguments)
 
-        # 2. 并发执行（用临时线程池，避免和内部 _executor 嵌套死锁）
+        # 2. 并发执行
         results_map: dict[str, ToolResult] = {}
 
         with ThreadPoolExecutor(max_workers=len(parsed_calls), thread_name_prefix="ftre-parallel") as pool:
             futures = {
-                pool.submit(self.execute_cancellable, call_id, name, arguments, state): call_id
+                pool.submit(self.execute_cancellable, call_id, name, arguments, state): (call_id, name)
                 for call_id, name, arguments in parsed_calls
             }
+
+            # 3. 谁先完成谁先 yield
             for future in as_completed(futures):
-                call_id = futures[future]
+                call_id, name = futures[future]
                 try:
-                    results_map[call_id] = future.result()
+                    result = future.result()
                 except Exception as e:
-                    name = next(n for cid, n, _ in parsed_calls if cid == call_id)
-                    results_map[call_id] = ToolResult(
+                    result = ToolResult(
                         call_id=call_id, name=name,
                         result=str(e), error=str(e), status="failed"
                     )
+                results_map[call_id] = result
+                yield tool_result_event(
+                    id=call_id, name=name, result=result.result,
+                    error=result.error, status=result.status,
+                    metadata=result.metadata,
+                )
 
-        # 3. 按原始顺序 yield tool_result 事件
-        results: list[ToolResult] = []
-        for call_id, name, arguments in parsed_calls:
-            result = results_map[call_id]
-            yield tool_result_event(
-                id=call_id, name=name, result=result.result,
-                error=result.error, status=result.status,
-                metadata=result.metadata,
-            )
-            results.append(result)
-
-        return results
+        return [results_map[cid] for cid, _, _ in parsed_calls]
 
     # =====================================================================
     #  6. 消息解析（纯工具函数）
