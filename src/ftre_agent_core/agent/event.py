@@ -16,7 +16,6 @@ class EventType(str, Enum):
     MESSAGE = "message"
     MESSAGE_COMPLETE = "message_complete"
     REASONING = "reasoning"
-    MAX_ITERATIONS = "max_iterations"
     ERROR = "error"
     RETRY = "retry"
     DONE = "done"
@@ -63,10 +62,6 @@ class MessageData(TypedDict):
 
 class MessageCompleteData(TypedDict):
     content: str
-
-
-class MaxIterationsData(TypedDict):
-    iterations: int
 
 
 class DoneData(TypedDict, total=False):
@@ -125,11 +120,6 @@ class MessageCompleteEvent(TypedDict):
     data: MessageCompleteData
 
 
-class MaxIterationsEvent(TypedDict):
-    type: EventType
-    data: MaxIterationsData
-
-
 class DoneEvent(TypedDict):
     type: EventType
     data: DoneData
@@ -157,7 +147,6 @@ AgentEvent = (
     | ToolCallStreamingEvent
     | MessageEvent
     | MessageCompleteEvent
-    | MaxIterationsEvent
     | DoneEvent
     | UsageUpdateEvent
     | ErrorEvent
@@ -253,10 +242,6 @@ def reasoning_event(content: str) -> MessageEvent:
 
 def message_complete_event(content: str) -> MessageCompleteEvent:
     return {"type": EventType.MESSAGE_COMPLETE, "data": {"content": content}}
-
-
-def max_iterations_event(iterations: int) -> MaxIterationsEvent:
-    return {"type": EventType.MAX_ITERATIONS, "data": {"iterations": iterations}}
 
 
 def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> DoneEvent:
