@@ -15,6 +15,7 @@ class EventType(str, Enum):
     TOOL_TIMED_OUT = "tool_timed_out"
     MESSAGE = "message"
     MESSAGE_COMPLETE = "message_complete"
+    REASONING = "reasoning"
     MAX_ITERATIONS = "max_iterations"
     ERROR = "error"
     RETRY = "retry"
@@ -244,6 +245,10 @@ def tool_timed_out_event(
 
 def message_event(content: str) -> MessageEvent:
     return {"type": EventType.MESSAGE, "data": {"content": content}}
+
+
+def reasoning_event(content: str) -> MessageEvent:
+    return {"type": EventType.REASONING, "data": {"content": content}}
 
 
 def message_complete_event(content: str) -> MessageCompleteEvent:

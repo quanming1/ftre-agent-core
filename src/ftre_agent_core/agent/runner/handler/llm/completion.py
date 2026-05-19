@@ -160,6 +160,11 @@ class CompletionAdapter(StreamAdapter):
                     tc_deltas = [accumulator.feed(tc) for tc in delta.tool_calls]
                     yield StreamDelta(tool_calls=tc_deltas)
 
+                # 推理内容（DeepSeek reasoning_content 等）
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    yield StreamDelta(reasoning=reasoning)
+
                 if hasattr(delta, "content") and delta.content:
                     content_buffer.append(delta.content)
                     yield StreamDelta(content=delta.content)
