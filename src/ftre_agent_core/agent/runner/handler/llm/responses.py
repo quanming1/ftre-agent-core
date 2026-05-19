@@ -6,7 +6,7 @@ from typing import Generator, Callable
 
 from .base import StreamAdapter
 from .types import StreamDelta, LLMResponse, ToolCallWrapper
-from .utils import dump_llm_input
+from .utils import LLMLogger
 
 
 class ResponsesAdapter(StreamAdapter):
@@ -96,7 +96,8 @@ class ResponsesAdapter(StreamAdapter):
         converted_messages = self._convert_messages(messages, tool_results_only=use_previous_response)
         converted_tools = self._convert_tools(tools) if tools else None
 
-        dump_llm_input(converted_messages, converted_tools, self.model)
+        llm_log = LLMLogger(self.model)
+        llm_log.log_input(converted_messages, converted_tools)
 
         kwargs = {
             "model": self.model,
@@ -121,6 +122,8 @@ class ResponsesAdapter(StreamAdapter):
             for event in response:
                 if self.is_cancelled:
                     break
+
+                llm_log.log_chunk(event)
 
                 event_type = getattr(event, "type", None)
 
@@ -159,3 +162,4 @@ class ResponsesAdapter(StreamAdapter):
                     yield StreamDelta(usage=usage)
         finally:
             self._active_response = None
+            llm_log.flush()
