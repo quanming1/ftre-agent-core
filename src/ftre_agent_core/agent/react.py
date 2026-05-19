@@ -3,16 +3,17 @@ ReAct Agent - 推理与行动循环
 """
 import asyncio
 from typing import Generator
-from ftre_agent_core.tool import Tool
+from ftre_agent_core.tool import Tool, ToolRegistry
+from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.prompt import prompts as core_prompts
-from .base import Agent
 from .event import AgentEvent
 from .runner import ReActRunner
 import logging
 
 logger = logging.getLogger(__name__)
 
-class ReActAgent(Agent):
+
+class ReActAgent:
     """
     ReAct Agent
 
@@ -21,8 +22,6 @@ class ReActAgent(Agent):
     2. 行动：调用工具获取信息
     3. 观察：处理工具返回结果
     4. 重复：直到能给出最终答案
-
-    Agent 本身只做容器和代理，实际执行逻辑委托给 ReActRunner
     """
 
     def __init__(
@@ -34,7 +33,7 @@ class ReActAgent(Agent):
         system_prompt: str = None,
         tools: list[Tool] = None,
         max_iterations: int = 10,
-        memory=None,
+        memory: MemoryManager | None = None,
     ):
         """
         Args:
@@ -47,31 +46,69 @@ class ReActAgent(Agent):
             max_iterations:   最大迭代次数
             memory:           自定义 MemoryManager
         """
-        default_prompt = core_prompts.get("react_system")
-
-        super().__init__(
-            model=model,
-            api_key=api_key,
-            api_base=api_base,
-            api_type=api_type,
-            system_prompt=system_prompt or default_prompt,
-            tools=tools,
-            memory=memory,
-        )
+        self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
+        self.api_type = api_type
         self.max_iterations = max_iterations
+
+        # Memory
+        default_prompt = core_prompts.get("react_system")
+        if memory is not None:
+            self.memory = memory
+            if system_prompt:
+                self.memory.system_prompt = system_prompt
+        else:
+            self.memory = MemoryManager({
+                "system_prompt": system_prompt or default_prompt,
+            })
+
+        # 工具注册表
+        self._registry = ToolRegistry()
+        if tools:
+            for t in tools:
+                self._registry.register(t)
 
         # 执行引擎
         self._runner = ReActRunner(self)
 
+    # ============================================================
+    # 属性
+    # ============================================================
+
+    @property
+    def system_prompt(self) -> str:
+        return self.memory.system_prompt
+
+    @system_prompt.setter
+    def system_prompt(self, value: str) -> None:
+        self.memory.system_prompt = value
+
+    @property
+    def tools(self) -> ToolRegistry:
+        return self._registry
+
     @property
     def runner(self) -> ReActRunner:
-        """获取执行引擎"""
         return self._runner
 
     @property
     def state(self):
-        """获取运行状态（代理到 runner）"""
         return self._runner.state
+
+    # ============================================================
+    # 工具管理
+    # ============================================================
+
+    def add_tool(self, tool: Tool) -> None:
+        self._registry.register(tool)
+
+    def remove_tool(self, name: str) -> None:
+        self._registry.unregister(name)
+
+    # ============================================================
+    # 执行
+    # ============================================================
 
     def run(self, message) -> Generator[AgentEvent, None, None]:
         """
@@ -84,28 +121,19 @@ class ReActAgent(Agent):
         """
         yield from self._runner.run(message)
 
-    async def cancel(self) -> None:
-        """
-        用户主动取消当前执行（异步，等待善后完成）。
+    # ============================================================
+    # 取消
+    # ============================================================
 
-        await 返回时，runner 已完成所有善后工作（Memory 写入、tool results 补齐）。
-        """
+    async def cancel(self) -> None:
+        """异步取消（等待善后完成）"""
         await asyncio.to_thread(self._runner.cancel)
 
     def cancel_sync(self) -> None:
-        """
-        同步版取消（阻塞等待善后完成）。
-
-        适用于 CLI 等非 async 场景。
-        """
+        """同步取消（阻塞等待善后完成）"""
         self._runner.cancel()
 
     def cancel_nowait(self) -> None:
-        """
-        只发取消信号，不等待善后完成。
-
-        适用于 CompiledGraph 等不能阻塞的场景，
-        善后由 generator 消费链路自然完成。
-        """
+        """仅发取消信号，不等待善后"""
         self._runner.state.cancel()
         self._runner.llm.cancel()

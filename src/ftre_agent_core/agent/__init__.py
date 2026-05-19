@@ -1,4 +1,3 @@
-from .base import Agent
 from .react import ReActAgent
 from .event import (
     EventType,
@@ -19,8 +18,6 @@ from .runner import (
 )
 
 __all__ = [
-    # Agent
-    "Agent",
     "ReActAgent",
     # Event
     "EventType",
