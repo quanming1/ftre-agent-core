@@ -24,6 +24,7 @@ from ..event import (
     DoneReason,
     AgentEvent,
     message_event,
+    reasoning_event,
     message_complete_event,
     max_iterations_event,
     done_event,
@@ -198,6 +199,8 @@ class ReActRunner:
                     if item.content:
                         full_content += item.content
                         yield message_event(content=item.content)
+                    if item.reasoning:
+                        yield reasoning_event(content=item.reasoning)
                     if item.tool_calls:
                         yield tool_call_streaming_event(item.tool_calls)
                     if item.usage:

@@ -57,6 +57,7 @@ class ToolCallDeltaChunk:
 class StreamDelta:
     """流式输出的 delta 片段"""
     content: str | None = None
+    reasoning: str | None = None
     tool_calls: list[ToolCallDeltaChunk] | None = None
     usage: Any = None
 
