@@ -67,14 +67,6 @@ class MemoryManager:
         else:
             self._append(message)
 
-    # ============================================================
-    # 生命周期
-    # ============================================================
-
-    def after_loop(self) -> None:
-        """循环结束钩子（默认空操作）"""
-        pass
-
     def clear(self) -> None:
         """清空消息"""
         self._messages = []

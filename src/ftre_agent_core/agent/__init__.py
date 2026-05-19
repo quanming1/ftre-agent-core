@@ -7,7 +7,6 @@ from .event import (
     ToolResultData,
     MessageData,
     MessageCompleteData,
-    MaxIterationsData,
     DoneData,
     ErrorData,
 )
@@ -27,7 +26,6 @@ __all__ = [
     "ToolResultData",
     "MessageData",
     "MessageCompleteData",
-    "MaxIterationsData",
     "DoneData",
     "ErrorData",
     # Runner
