@@ -276,7 +276,6 @@ class ToolHandler:
         # 创建 handle，提交子线程
         handle = ToolExecutionHandle(call_id=call_id, name=name)
         handle.cancel_token = ctx.cancel_token
-        handle.resources = ctx.resources
         self._active_handles[call_id] = handle
         handle.transition_to(handle.status.RUNNING)
 
@@ -295,7 +294,6 @@ class ToolHandler:
 
         # 清理
         self._active_handles.pop(call_id, None)
-        handle.resources.cleanup_all()
 
         return result
 

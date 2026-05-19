@@ -15,7 +15,7 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any
 
-from ftre_agent_core.tool_system import CancellationToken, ResourceRegistry
+from ftre_agent_core.tool_system import CancellationToken
 
 
 @dataclass
@@ -31,7 +31,6 @@ class ToolContext:
     arguments: dict[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
-    resources: ResourceRegistry = field(default_factory=ResourceRegistry)
 
     _skipped: bool = field(default=False, repr=False)
     _skip_result: str = field(default="", repr=False)
