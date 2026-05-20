@@ -192,29 +192,13 @@ class ReActRunner:
         if not valid:
             return
 
-        # 执行（单个串行，多个并行）
+        # 执行
         if len(valid) == 1:
-            yield from self._execute_tools_sequential(valid)
+            events = self.tool_handler.execute_and_emit(*valid[0], self.state)
         else:
-            yield from self._execute_tools_parallel(valid)
+            events = self.tool_handler.execute_parallel(valid, self.state)
 
-    def _execute_tools_sequential(self, parsed: list[tuple[str, str, dict]]) -> Generator[AgentEvent, None, None]:
-        """串行执行工具。"""
-        for call_id, name, arguments in parsed:
-            self.state.check_cancel()
-
-            for event in self.tool_handler.execute_and_emit(call_id, name, arguments, self.state):
-                yield event
-                if event["type"].value == "tool_result":
-                    self.agent.memory.add_tool_result(event["data"]["id"], event["data"]["result"])
-                    if event["data"].get("status") == "cancelled":
-                        raise CancelledError()
-
-    def _execute_tools_parallel(self, parsed: list[tuple[str, str, dict]]) -> Generator[AgentEvent, None, None]:
-        """并行执行工具。"""
-        self.state.check_cancel()
-
-        for event in self.tool_handler.execute_parallel(parsed, self.state):
+        for event in events:
             yield event
             if event["type"].value == "tool_result":
                 self.agent.memory.add_tool_result(event["data"]["id"], event["data"]["result"])
