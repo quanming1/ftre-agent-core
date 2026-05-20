@@ -21,7 +21,7 @@ def test_retry_event_structure():
 
 def test_llm_error_classify():
     """验证 LLMError.classify() 分类"""
-    from ftre_agent_core.agent.runner.handler.llm.types import LLMError
+    from ftre_agent_core.agent.runner.handler.llm import LLMError
 
     # 用 Exception 代替具体 litellm 异常类
     err = LLMError.classify(Exception("test"))
