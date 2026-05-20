@@ -20,7 +20,7 @@ from ftre_agent_core.agent.event import (
     tool_result_event,
 )
 from ftre_agent_core.tool import ToolRegistry
-from ftre_agent_core.tool.middleware import ToolContext
+from ftre_agent_core.tool.registry import ToolContext
 
 if TYPE_CHECKING:
     from ..state import RunState
