@@ -193,9 +193,13 @@ class ReActRunner:
             return
 
         # 执行
+        cancelled = False
         for event in self.tool_handler.execute(valid, self.state):
             yield event
             if event["type"].value == "tool_result":
                 self.agent.memory.add_tool_result(event["data"]["id"], event["data"]["result"])
                 if event["data"].get("status") == "cancelled":
-                    raise CancelledError()
+                    cancelled = True
+
+        if cancelled:
+            raise CancelledError()
