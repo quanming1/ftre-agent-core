@@ -1,6 +1,6 @@
 # ftre-agent-core 文档
 
-欢迎使用 ftre-agent-core —— 一个轻量级 Python Agent 框架，实现 ReAct（推理 + 行动）循环，支持流式输出、工具调用和状态快照。
+一个轻量级 Python Agent 框架，实现 ReAct（推理 + 行动）循环，支持流式输出、工具调用和取消。
 
 ## 快速导航
 
@@ -12,7 +12,7 @@
 | [Memory](./05-memory.md) | 对话消息管理 |
 | [LLM 适配](./06-llm-adapters.md) | 多供应商支持、Completions / Responses 协议 |
 | [中间件](./07-middleware.md) | Tool 中间件、执行前后钩子 |
-| [取消机制](./09-cancellation.md) | 用户取消、超时、资源清理 |
+| [取消机制](./09-cancellation.md) | 用户取消、并行工具取消 |
 | [API 参考](./10-api-reference.md) | 完整类和方法索引 |
 
 ## 安装
@@ -50,12 +50,20 @@ for event in agent.run("北京天气怎么样？"):
 
 ```
 src/ftre_agent_core/
-├── agent/              # Agent 核心（ReAct 循环、事件、Runner）
-│   ├── runner/         # 执行引擎（LLM 调用、工具处理）
-│   └── event.py        # 事件类型定义
-├── tool/               # 工具系统（定义、注册、装饰器）
-├── tool_system/        # 底层执行基础设施（取消、资源、结果）
-├── memory/             # 消息管理
-├── prompt/             # 提示词管理（模板、渲染）
-└── threading.py        # 全局线程池
+├── memory.py           # 消息管理
+├── threading.py        # 全局线程池
+├── llm/                # LLM 调用（流式、多协议）
+│   ├── completion.py   # Completions API + 类型 + LLMHandler
+│   ├── responses.py    # Responses API
+│   └── utils.py        # 日志
+├── tool/               # 工具系统
+│   ├── base.py         # Tool + @tool 装饰器 + Injected
+│   ├── registry.py     # ToolRegistry + 中间件
+│   └── cancellation.py # CancellationToken
+└── agent/              # Agent 核心
+    ├── react.py        # ReActAgent
+    ├── event.py        # 事件类型
+    └── runner/         # 执行引擎
+        ├── react_runner.py  # ReActRunner + RunState
+        └── tool_handler.py  # ToolHandler
 ```
