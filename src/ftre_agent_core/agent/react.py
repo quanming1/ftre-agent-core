@@ -31,7 +31,7 @@ class ReActAgent:
         api_type: str = "completions",
         system_prompt: str = "",
         tools: list[Tool] = None,
-        max_iterations: int = 10,
+        max_iterations: int | None = None,
         memory: MemoryManager | None = None,
     ):
         """
@@ -42,7 +42,7 @@ class ReActAgent:
             api_type:         协议类型，"completions"（默认）或 "responses"
             system_prompt:    系统提示词
             tools:            工具列表
-            max_iterations:   最大迭代次数
+            max_iterations:   最大迭代次数。None 表示不限制（持续 loop 直到 LLM 不再调用工具或被取消）
             memory:           自定义 MemoryManager
         """
         self.model = model
