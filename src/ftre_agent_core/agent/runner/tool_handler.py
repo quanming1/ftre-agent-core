@@ -23,7 +23,7 @@ from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 
 if TYPE_CHECKING:
-    from ..state import RunState
+    from .react_runner import RunState
 
 logger = logging.getLogger(__name__)
 
