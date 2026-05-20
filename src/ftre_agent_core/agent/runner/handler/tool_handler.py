@@ -3,9 +3,8 @@ ToolHandler - 工具调用处理器
 
 职责：
 - 解析 LLM 返回的 tool_call JSON
-- 在子线程中执行工具，主线程轮询取消信号
-- 中间件链：before → execute → after
-- 构建 assistant message
+- 执行工具（支持并行、取消、中间件）
+- 派发事件（tool_call / tool_result）
 """
 from __future__ import annotations
 
@@ -22,17 +21,12 @@ from ftre_agent_core.agent.event import (
 )
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.middleware import ToolContext
-from ftre_agent_core.tool_system import ToolCancelledError
 
 if TYPE_CHECKING:
     from ..state import RunState
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-#  ToolResult
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ToolResult:
@@ -49,10 +43,6 @@ class ToolResult:
         return self.status == "cancelled"
 
 
-# ---------------------------------------------------------------------------
-#  ToolHandler
-# ---------------------------------------------------------------------------
-
 class ToolHandler:
 
     def __init__(self, registry: ToolRegistry):
@@ -61,116 +51,27 @@ class ToolHandler:
         self._executor = thread_pool.tool
 
     # =====================================================================
-    #  执行核心
+    #  核心：统一执行入口
     # =====================================================================
 
-    def _execute(self, ctx: ToolContext) -> str:
-        """在子线程中执行工具，返回字符串结果。"""
-        return self.registry.execute(ctx.name, **ctx.arguments)
-
-    def _run_middlewares_before(self, ctx: ToolContext) -> ToolContext:
-        for mw in self.registry.middlewares:
-            ctx = mw.before(ctx)
-            if ctx.skipped:
-                break
-        return ctx
-
-    def _run_middlewares_after(self, ctx: ToolContext, result: ToolResult) -> ToolResult:
-        for mw in reversed(self.registry.middlewares):
-            result = mw.after(ctx, result)
-        return result
-
-    # =====================================================================
-    #  可取消执行
-    # =====================================================================
-
-    def execute_cancellable(
-        self,
-        call_id: str,
-        name: str,
-        arguments: dict,
-        state: "RunState",
-    ) -> ToolResult:
-        """
-        执行工具，支持取消。
-
-        流程：middleware.before → 子线程执行(轮询取消) → middleware.after
-        无论成功、失败、取消，都返回 ToolResult，不抛异常。
-        """
-        from ..state import CancelledError
-
-        ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
-        ctx.cancel_token = state.cancel_token
-        ctx = self._run_middlewares_before(ctx)
-
-        # 中间件短路
-        if ctx.skipped:
-            result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
-            return self._run_middlewares_after(ctx, result)
-
-        # 提交到线程池执行
-        future = self._executor.submit(self._execute, ctx)
-
-        # 轮询等待，期间检查取消
-        raw, error = "", None
-        try:
-            while not future.done():
-                if state.wait_or_cancelled(0.1):
-                    future.cancel()
-                    raise CancelledError()
-            raw = future.result()
-        except CancelledError:
-            error = "cancelled"
-            raw = "[用户取消]"
-        except Exception as exc:
-            error = str(exc)
-            raw = str(exc)
-
-        # 构建结果
-        status = "cancelled" if error == "cancelled" else ("failed" if error else "completed")
-        result = ToolResult(
-            call_id=call_id,
-            name=name,
-            result=str(raw),
-            error=error if error != "cancelled" else None,
-            status=status,
-            metadata=dict(ctx.metadata),
-        )
-        return self._run_middlewares_after(ctx, result)
-
-    # =====================================================================
-    #  事件派发 API
-    # =====================================================================
-
-    def execute_and_emit(
-        self,
-        call_id: str,
-        name: str,
-        arguments: dict,
-        state: "RunState",
-    ) -> Generator[AgentEvent, None, ToolResult]:
-        """执行工具 + yield 事件流（tool_call → tool_result）"""
-        yield tool_call_event(id=call_id, name=name, arguments=arguments)
-        result = self.execute_cancellable(call_id, name, arguments, state)
-        yield tool_result_event(
-            id=call_id, name=name, result=result.result,
-            error=result.error, status=result.status,
-            metadata=result.metadata,
-        )
-        return result
-
-    def execute_parallel(
+    def execute(
         self,
         parsed_calls: list[tuple[str, str, dict]],
         state: "RunState",
     ) -> Generator[AgentEvent, None, list[ToolResult]]:
-        """并行执行多个工具，主线程轮询取消，谁先完成谁先 yield。"""
+        """
+        执行一个或多个工具调用，统一处理并行、取消、中间件。
 
+        流程：
+        1. yield 所有 tool_call 事件
+        2. 对每个工具：before 中间件 → 提交到线程池
+        3. 主线程轮询：检查取消 + 收割完成的 future → yield tool_result
+        """
         # 1. yield 所有 tool_call 事件
         for call_id, name, arguments in parsed_calls:
             yield tool_call_event(id=call_id, name=name, arguments=arguments)
 
-        # 2. 构建 context + before 中间件，直接提交到全局线程池
+        # 2. 构建 context + before 中间件 + 提交
         contexts: dict[str, ToolContext] = {}
         futures: dict[Future, str] = {}
         results: dict[str, ToolResult] = {}
@@ -178,37 +79,34 @@ class ToolHandler:
         for call_id, name, arguments in parsed_calls:
             ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
             ctx.cancel_token = state.cancel_token
-            ctx = self._run_middlewares_before(ctx)
+            ctx = self._run_before(ctx)
             contexts[call_id] = ctx
 
             if ctx.skipped:
-                # 中间件短路，直接出结果
                 result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
-                results[call_id] = self._run_middlewares_after(ctx, result)
+                results[call_id] = self._run_after(ctx, result)
                 yield tool_result_event(
                     id=call_id, name=name, result=results[call_id].result,
                     error=results[call_id].error, status=results[call_id].status,
                 )
             else:
-                futures[self._executor.submit(self._execute, ctx)] = call_id
+                futures[self._executor.submit(self._invoke, ctx)] = call_id
 
-        # 3. 主线程轮询：检查取消 + 收割完成的 future
+        # 3. 主线程轮询
         pending = set(futures.keys())
 
         while pending:
             if state.wait_or_cancelled(0.05):
-                # 取消所有未完成的
                 for f in pending:
                     f.cancel()
                 for f in pending:
                     cid = futures[f]
                     ctx = contexts[cid]
                     result = ToolResult(call_id=cid, name=ctx.name, result="[用户取消]", status="cancelled")
-                    results[cid] = self._run_middlewares_after(ctx, result)
+                    results[cid] = self._run_after(ctx, result)
                     yield tool_result_event(id=cid, name=ctx.name, result=result.result, status="cancelled")
                 break
 
-            # 收割已完成的
             done = {f for f in pending if f.done()}
             for f in done:
                 pending.discard(f)
@@ -219,7 +117,7 @@ class ToolHandler:
                     result = ToolResult(call_id=cid, name=ctx.name, result=str(raw))
                 except Exception as exc:
                     result = ToolResult(call_id=cid, name=ctx.name, result=str(exc), error=str(exc), status="failed")
-                results[cid] = self._run_middlewares_after(ctx, result)
+                results[cid] = self._run_after(ctx, result)
                 yield tool_result_event(
                     id=cid, name=ctx.name, result=results[cid].result,
                     error=results[cid].error, status=results[cid].status,
@@ -228,24 +126,37 @@ class ToolHandler:
         return [results[cid] for cid, _, _ in parsed_calls if cid in results]
 
     # =====================================================================
+    #  内部方法
+    # =====================================================================
+
+    def _invoke(self, ctx: ToolContext) -> str:
+        """在子线程中执行工具函数。"""
+        return self.registry.execute(ctx.name, **ctx.arguments)
+
+    def _run_before(self, ctx: ToolContext) -> ToolContext:
+        for mw in self.registry.middlewares:
+            ctx = mw.before(ctx)
+            if ctx.skipped:
+                break
+        return ctx
+
+    def _run_after(self, ctx: ToolContext, result: ToolResult) -> ToolResult:
+        for mw in reversed(self.registry.middlewares):
+            result = mw.after(ctx, result)
+        return result
+
+    # =====================================================================
     #  消息解析
     # =====================================================================
 
     def parse_tool_call(self, tool_call) -> tuple[str, str, dict | None]:
-        """
-        解析 tool_call 的 JSON 参数。
-
-        Returns:
-            成功: (call_id, tool_name, arguments)
-            失败: (call_id, tool_name, None)
-        """
+        """解析 tool_call JSON。失败返回 (id, name, None)。"""
         raw = tool_call.function.arguments
         try:
-            args = json.loads(raw)
+            return (tool_call.id, tool_call.function.name, json.loads(raw))
         except json.JSONDecodeError as e:
             logger.warning(f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, error={e}")
             return (tool_call.id, tool_call.function.name, None)
-        return (tool_call.id, tool_call.function.name, args)
 
     @staticmethod
     def build_assistant_message(response) -> dict:

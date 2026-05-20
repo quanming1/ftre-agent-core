@@ -193,12 +193,7 @@ class ReActRunner:
             return
 
         # 执行
-        if len(valid) == 1:
-            events = self.tool_handler.execute_and_emit(*valid[0], self.state)
-        else:
-            events = self.tool_handler.execute_parallel(valid, self.state)
-
-        for event in events:
+        for event in self.tool_handler.execute(valid, self.state):
             yield event
             if event["type"].value == "tool_result":
                 self.agent.memory.add_tool_result(event["data"]["id"], event["data"]["result"])
