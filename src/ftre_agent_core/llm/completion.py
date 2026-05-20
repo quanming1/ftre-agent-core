@@ -231,6 +231,7 @@ class CompletionAdapter(StreamAdapter):
             api_base=self.api_base,
             stream=True,
             stream_options={"include_usage": True},
+            max_tokens=16384,
         )
         self._active_response = response
 

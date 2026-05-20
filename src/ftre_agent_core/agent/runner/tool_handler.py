@@ -155,7 +155,10 @@ class ToolHandler:
         try:
             return (tool_call.id, tool_call.function.name, json.loads(raw))
         except json.JSONDecodeError as e:
-            logger.warning(f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, error={e}")
+            logger.warning(
+                f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, "
+                f"error={e}, len={len(raw)}, raw[:200]={raw[:200]!r}"
+            )
             return (tool_call.id, tool_call.function.name, None)
 
     @staticmethod
