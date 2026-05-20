@@ -148,9 +148,12 @@ class ReActRunner:
 
     def _loop(self) -> Generator[AgentEvent, None, None]:
         try:
-            for _ in range(self.agent.max_iterations):
+            max_iter = self.agent.max_iterations
+            iteration = 0
+            while max_iter is None or iteration < max_iter:
                 self.state.check_cancel()
                 self.state.next_iteration()
+                iteration += 1
                 yield from self._step()
                 if self.state.is_done:
                     return
