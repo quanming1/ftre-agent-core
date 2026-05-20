@@ -1,3 +1,4 @@
+"""CancellationToken - 线程安全的取消信号"""
 from __future__ import annotations
 
 import threading

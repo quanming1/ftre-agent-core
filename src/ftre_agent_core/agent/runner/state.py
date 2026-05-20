@@ -5,7 +5,7 @@ import threading
 from enum import Enum
 from dataclasses import dataclass, field
 
-from ftre_agent_core.tool_system import CancellationToken, ToolCancelledError
+from ftre_agent_core.tool import CancellationToken, ToolCancelledError
 
 
 class RunStatus(str, Enum):
