@@ -9,7 +9,6 @@ ReActRunner - ReAct 执行引擎
 """
 import logging
 from typing import Generator, TYPE_CHECKING
-from ftre_agent_core.tool.builtins import BUILTIN_TOOL_FACTORIES
 from .state import RunState, CancelledError
 from .handler import LLMHandler, LLMResponse, LLMError, StreamDelta, ToolHandler
 from ..event import (
@@ -43,10 +42,6 @@ class ReActRunner:
         self.state = RunState()
         self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
-
-        # 注入内置工具
-        for factory in BUILTIN_TOOL_FACTORIES:
-            self.agent.tools.register(factory())
 
     # ============================================================
     # 对外 API
