@@ -5,7 +5,6 @@ import asyncio
 from typing import Generator
 from ftre_agent_core.tool import Tool, ToolRegistry
 from ftre_agent_core.memory import MemoryManager
-from ftre_agent_core.prompt import prompts as core_prompts
 from .event import AgentEvent
 from .runner import ReActRunner
 import logging
@@ -30,7 +29,7 @@ class ReActAgent:
         api_key: str,
         api_base: str | None = None,
         api_type: str = "completions",
-        system_prompt: str = None,
+        system_prompt: str = "",
         tools: list[Tool] = None,
         max_iterations: int = 10,
         memory: MemoryManager | None = None,
@@ -53,15 +52,12 @@ class ReActAgent:
         self.max_iterations = max_iterations
 
         # Memory
-        default_prompt = core_prompts.get("react_system")
         if memory is not None:
             self.memory = memory
             if system_prompt:
                 self.memory.system_prompt = system_prompt
         else:
-            self.memory = MemoryManager({
-                "system_prompt": system_prompt or default_prompt,
-            })
+            self.memory = MemoryManager({"system_prompt": system_prompt})
 
         # 工具注册表
         self._registry = ToolRegistry()
