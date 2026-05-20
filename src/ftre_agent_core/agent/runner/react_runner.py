@@ -1,16 +1,15 @@
 """
 ReActRunner - ReAct 执行引擎
-
-职责：
-- run()    → 启动 ReAct 循环
-- cancel() → 用户取消
-- _loop()  → 主循环（CancelledError 唯一捕获点）
-- _step()  → 单次迭代（LLM 调用 → 处理响应）
 """
 import logging
+import threading
+from enum import Enum
+from dataclasses import dataclass, field
 from typing import Generator, TYPE_CHECKING
-from .state import RunState, CancelledError
-from .handler import LLMHandler, LLMResponse, LLMError, StreamDelta, ToolHandler
+
+from ftre_agent_core.tool import CancellationToken, ToolCancelledError
+from ftre_agent_core.llm import LLMHandler, LLMResponse, LLMError, StreamDelta
+from .tool_handler import ToolHandler
 from ..event import (
     DoneReason,
     AgentEvent,
@@ -30,22 +29,96 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class ReActRunner:
-    """
-    ReAct 执行引擎
+# ============================================================
+# 状态
+# ============================================================
 
-    编排 LLMHandler / ToolHandler 完成 ReAct 循环。
-    """
+class RunStatus(str, Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+class CancelledError(Exception):
+    pass
+
+
+@dataclass
+class RunState:
+    status: RunStatus = RunStatus.IDLE
+    iteration: int = 0
+    error: str | None = None
+    cancel_token: CancellationToken = field(default_factory=CancellationToken)
+    _done_event: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def is_running(self) -> bool:
+        return self.status == RunStatus.RUNNING
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.status == RunStatus.CANCELLED
+
+    @property
+    def is_done(self) -> bool:
+        return self.status in (RunStatus.COMPLETED, RunStatus.ERROR, RunStatus.CANCELLED)
+
+    def start(self) -> None:
+        self.status = RunStatus.RUNNING
+        self.iteration = 0
+        self.error = None
+        self.cancel_token = CancellationToken()
+        self._done_event.clear()
+
+    def next_iteration(self) -> None:
+        self.iteration += 1
+
+    def complete(self) -> None:
+        self.status = RunStatus.COMPLETED
+        self._done_event.set()
+
+    def fail(self, error: str) -> None:
+        self.status = RunStatus.ERROR
+        self.error = error
+        self._done_event.set()
+
+    def cancel(self) -> None:
+        if not self.is_running:
+            self._done_event.set()
+            return
+        self.status = RunStatus.CANCELLED
+        self.cancel_token.cancel("user_cancelled")
+
+    def mark_done(self) -> None:
+        self._done_event.set()
+
+    def wait_done(self, timeout: float | None = None) -> bool:
+        return self._done_event.wait(timeout)
+
+    def wait_or_cancelled(self, timeout: float) -> bool:
+        return self.cancel_token.wait(timeout)
+
+    def check_cancel(self) -> None:
+        try:
+            self.cancel_token.raise_if_cancelled()
+        except ToolCancelledError as exc:
+            raise CancelledError(str(exc)) from exc
+
+
+# ============================================================
+# Runner
+# ============================================================
+
+class ReActRunner:
+    """ReAct 执行引擎"""
 
     def __init__(self, agent: "ReActAgent"):
         self.agent = agent
         self.state = RunState()
         self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
-
-    # ============================================================
-    # 对外 API
-    # ============================================================
 
     def run(self, message) -> Generator[AgentEvent, None, None]:
         """启动 ReAct 循环。message: str 或 list[dict]"""
@@ -74,18 +147,14 @@ class ReActRunner:
     # ============================================================
 
     def _loop(self) -> Generator[AgentEvent, None, None]:
-        """ReAct 主循环。CancelledError 在此统一捕获。"""
         try:
             for _ in range(self.agent.max_iterations):
                 self.state.check_cancel()
                 self.state.next_iteration()
-
                 yield from self._step()
-
                 if self.state.is_done:
                     return
 
-            # 达到最大迭代次数
             yield done_event(success=False, reason=DoneReason.MAX_ITERATIONS)
             self.state.complete()
 
@@ -98,7 +167,6 @@ class ReActRunner:
     # ============================================================
 
     def _step(self) -> Generator[AgentEvent, None, None]:
-        """单次迭代：调 LLM → 处理响应。"""
         messages = self.agent.memory.get_messages()
         tools = self.agent.tools.to_openai_tools() or None
         full_content = ""
@@ -126,11 +194,9 @@ class ReActRunner:
                     if item.usage:
                         yield usage_update_event(item.usage)
 
-            # 取消导致的 break
             if self.state.is_cancelled:
                 raise CancelledError()
 
-            # 纯文本回复 → 完成
             if full_content:
                 self.agent.memory.add_assistant(full_content)
                 yield message_complete_event(content=full_content)
@@ -157,32 +223,27 @@ class ReActRunner:
             self.state.fail(f"[{err.code}] {err.message}")
 
     # ============================================================
-    # 工具调用处理
+    # 工具调用
     # ============================================================
 
     def _handle_tool_calls(self, response: LLMResponse) -> Generator[AgentEvent, None, None]:
-        """处理 LLM 返回的工具调用。"""
-        tool_calls = response.tool_calls
-
-        # 解析
         parsed: list[tuple[str, str, dict | None]] = [
-            self.tool_handler.parse_tool_call(tc) for tc in tool_calls
+            self.tool_handler.parse_tool_call(tc) for tc in response.tool_calls
         ]
 
-        # 写入 assistant message
         self.agent.memory.add_raw(
             self.tool_handler.build_assistant_message(response),
             usage=response.usage,
         )
 
-        # 处理解析失败的
-        failed = [(cid, name) for cid, name, args in parsed if args is None]
-        for call_id, name in failed:
-            error_msg = "[PARSE_ERROR] Tool call JSON truncated or malformed. Please retry."
-            yield tool_result_event(id=call_id, name=name, result=error_msg, error=error_msg, status="failed")
-            self.agent.memory.add_tool_result(call_id, error_msg)
+        # 解析失败的
+        for call_id, name, args in parsed:
+            if args is None:
+                error_msg = "[PARSE_ERROR] Tool call JSON truncated or malformed. Please retry."
+                yield tool_result_event(id=call_id, name=name, result=error_msg, error=error_msg, status="failed")
+                self.agent.memory.add_tool_result(call_id, error_msg)
 
-        # 过滤出可执行的
+        # 可执行的
         valid = [(cid, name, args) for cid, name, args in parsed if args is not None]
         if not valid:
             return
