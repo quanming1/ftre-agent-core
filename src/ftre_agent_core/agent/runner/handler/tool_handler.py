@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator
 
@@ -164,36 +164,68 @@ class ToolHandler:
         parsed_calls: list[tuple[str, str, dict]],
         state: "RunState",
     ) -> Generator[AgentEvent, None, list[ToolResult]]:
-        """并行执行多个工具，谁先完成谁先 yield 事件。"""
+        """并行执行多个工具，主线程轮询取消，谁先完成谁先 yield。"""
 
         # 1. yield 所有 tool_call 事件
         for call_id, name, arguments in parsed_calls:
             yield tool_call_event(id=call_id, name=name, arguments=arguments)
 
-        # 2. 并发执行
-        results_map: dict[str, ToolResult] = {}
+        # 2. 构建 context + before 中间件，直接提交到全局线程池
+        contexts: dict[str, ToolContext] = {}
+        futures: dict[Future, str] = {}
+        results: dict[str, ToolResult] = {}
 
-        with ThreadPoolExecutor(max_workers=len(parsed_calls), thread_name_prefix="ftre-parallel") as pool:
-            futures = {
-                pool.submit(self.execute_cancellable, call_id, name, arguments, state): (call_id, name)
-                for call_id, name, arguments in parsed_calls
-            }
+        for call_id, name, arguments in parsed_calls:
+            ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
+            ctx.cancel_token = state.cancel_token
+            ctx = self._run_middlewares_before(ctx)
+            contexts[call_id] = ctx
 
-            # 3. 谁先完成谁先 yield
-            for future in as_completed(futures):
-                call_id, name = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = ToolResult(call_id=call_id, name=name, result=str(e), error=str(e), status="failed")
-                results_map[call_id] = result
+            if ctx.skipped:
+                # 中间件短路，直接出结果
+                result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
+                results[call_id] = self._run_middlewares_after(ctx, result)
                 yield tool_result_event(
-                    id=call_id, name=name, result=result.result,
-                    error=result.error, status=result.status,
-                    metadata=result.metadata,
+                    id=call_id, name=name, result=results[call_id].result,
+                    error=results[call_id].error, status=results[call_id].status,
+                )
+            else:
+                futures[self._executor.submit(self._execute, ctx)] = call_id
+
+        # 3. 主线程轮询：检查取消 + 收割完成的 future
+        pending = set(futures.keys())
+
+        while pending:
+            if state.wait_or_cancelled(0.05):
+                # 取消所有未完成的
+                for f in pending:
+                    f.cancel()
+                for f in pending:
+                    cid = futures[f]
+                    ctx = contexts[cid]
+                    result = ToolResult(call_id=cid, name=ctx.name, result="[用户取消]", status="cancelled")
+                    results[cid] = self._run_middlewares_after(ctx, result)
+                    yield tool_result_event(id=cid, name=ctx.name, result=result.result, status="cancelled")
+                break
+
+            # 收割已完成的
+            done = {f for f in pending if f.done()}
+            for f in done:
+                pending.discard(f)
+                cid = futures[f]
+                ctx = contexts[cid]
+                try:
+                    raw = f.result()
+                    result = ToolResult(call_id=cid, name=ctx.name, result=str(raw))
+                except Exception as exc:
+                    result = ToolResult(call_id=cid, name=ctx.name, result=str(exc), error=str(exc), status="failed")
+                results[cid] = self._run_middlewares_after(ctx, result)
+                yield tool_result_event(
+                    id=cid, name=ctx.name, result=results[cid].result,
+                    error=results[cid].error, status=results[cid].status,
                 )
 
-        return [results_map[cid] for cid, _, _ in parsed_calls]
+        return [results[cid] for cid, _, _ in parsed_calls if cid in results]
 
     # =====================================================================
     #  消息解析
