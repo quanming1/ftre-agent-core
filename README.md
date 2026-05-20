@@ -18,9 +18,9 @@ LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，
 
 所有 Agent 执行都是流式的，通过 Generator 逐步 yield 事件。前端可以实时展示思考过程、工具调用、中间结果。
 
-**3. 可中断、可恢复**
+**3. 可中断**
 
-支持在工具执行前中断等待用户确认（`interrupt_before`），支持从 checkpoint 恢复执行。这对于危险操作（删除文件、执行命令）很重要。
+支持运行时取消（`CancellationToken`），工具执行中可随时中断。通过线程安全的取消信号，主循环和工具执行器协同响应用户取消请求。
 
 **4. 协议适配**
 
@@ -42,10 +42,10 @@ LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，
                            │
            ┌───────────────┼───────────────┐
            ▼               ▼               ▼
-    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-    │   LLM 层    │ │  Tool 层    │ │ Checkpoint  │
-    │ (协议适配)   │ │ (注册/执行)  │ │  (快照)     │
-    └─────────────┘ └─────────────┘ └─────────────┘
+    ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
+    │   LLM 层    │ │  Tool 层    │ │ Cancellation │
+    │ (协议适配)   │ │ (注册/执行)  │ │  (取消信号)   │
+    └─────────────┘ └─────────────┘ └──────────────┘
 ```
 
 ### 核心模块
@@ -56,8 +56,7 @@ LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，
 | `agent/runner/` | 执行引擎：LLM 调用、工具执行、事件分发 |
 | `tool/` | 工具定义、注册、中间件、依赖注入 |
 | `llm/` | LLM 客户端适配（completions / responses 协议） |
-| `memory/` | 消息历史管理、token 计数 |
-| `checkpoint/` | 执行状态快照与恢复 |
+| `memory.py` | 消息历史管理、token 计数 |
 | `threading.py` | 全局线程池（按用途分组） |
 
 ## 与 LangChain / AutoGen 的区别
@@ -114,7 +113,7 @@ agent = ReActAgent(
     model="gpt-4",
     system_prompt="你是一个文件处理助手",
     tools=[read_file, write_file],
-    interrupt_before=["write_file"],  # 写入前需要确认
+    max_iterations=20,
 )
 
 # 流式执行
@@ -144,7 +143,8 @@ editable 模式下，修改 `ftre-agent-core` 的代码会立即生效，不需�
 - [x] 工具系统（定义、注册、中间件）
 - [x] LLM 协议适配（completions / responses）
 - [x] 流式事件输出
-- [x] 中断与恢复
+- [x] 运行时取消（CancellationToken）
+- [ ] Checkpoint 快照与恢复
 - [ ] 多 Agent 协作
 - [ ] 更多 LLM 适配器（Anthropic native、Gemini）
 - [ ] 可视化调试工具
