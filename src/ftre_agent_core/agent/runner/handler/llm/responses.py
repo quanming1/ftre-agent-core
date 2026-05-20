@@ -4,8 +4,7 @@ Responses API 适配器
 import litellm
 from typing import Generator, Callable
 
-from .base import StreamAdapter
-from .types import StreamDelta, LLMResponse, ToolCallWrapper
+from .completion import StreamAdapter, StreamDelta, LLMResponse, ToolCallWrapper
 from .utils import LLMLogger
 
 
