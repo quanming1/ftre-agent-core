@@ -12,6 +12,7 @@
 | [Memory](./05-memory.md) | 对话消息管理 |
 | [LLM 适配](./06-llm-adapters.md) | 多供应商支持、Completions / Responses 协议 |
 | [中间件](./07-middleware.md) | Tool 中间件、执行前后钩子 |
+| [事件流](./08-events.md) | AgentEvent 完整规范、产出时机、顺序保证 |
 | [取消机制](./09-cancellation.md) | 用户取消、并行工具取消 |
 | [API 参考](./10-api-reference.md) | 完整类和方法索引 |
 

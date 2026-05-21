@@ -50,6 +50,8 @@ LLM 输出通过 Generator 逐步传递：
 | `auth_error` | 认证失败 |
 | `bad_request` | 请求无效 |
 | `content_filter` | 内容审核 |
+| `api_error` | API 错误 |
+| `unknown` | 未知错误 |
 
 ## 取消
 

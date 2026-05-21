@@ -26,7 +26,7 @@ cancel() 调用
 4. _loop() 捕获 → yield DONE(CANCELLED)
 ```
 
-取消延迟通常 < 2ms。
+取消信号设置毫秒级。LLM HTTP 连接强制关闭后立即中断流式输出。工具执行中的取消延迟 ≤ 50ms（轮询间隔）。
 
 ## LLM 调用中取消
 
