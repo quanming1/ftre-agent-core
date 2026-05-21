@@ -46,5 +46,9 @@ class MemoryManager:
     def clear(self) -> None:
         self._messages = []
 
+    def set_messages(self, messages: list[dict]) -> None:
+        """设置完整消息列表（用于恢复历史上下文）"""
+        self._messages = list(messages)
+
     def __len__(self) -> int:
         return len(self._messages)
