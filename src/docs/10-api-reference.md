@@ -10,14 +10,14 @@ from ftre_agent_core.agent import ReActAgent, EventType
 
 ```python
 ReActAgent(
-    model: str,                      # LiteLLM 模型名
-    api_key: str,                    # API 密钥
-    api_base: str | None = None,     # 自定义端点
-    api_type: str = "completions",   # "completions" 或 "responses"
-    system_prompt: str = "",         # 系统提示词
-    tools: list[Tool] = None,        # 工具列表
-    max_iterations: int = 10,        # 最大迭代次数
-    memory: MemoryManager = None,    # 自定义 Memory
+    model: str,                          # LiteLLM 模型名
+    api_key: str,                        # API 密钥
+    api_base: str | None = None,         # 自定义端点
+    api_type: str = "completions",       # "completions" 或 "responses"
+    system_prompt: str = "",             # 系统提示词
+    tools: list[Tool] = None,            # 工具列表
+    max_iterations: int | None = None,   # 最大迭代次数（None=无限）
+    memory: MemoryManager = None,        # 自定义 Memory
 )
 ```
 
@@ -91,18 +91,23 @@ thread.join()
 
 ## EventType
 
+详见 [事件流文档](./08-events.md)。
+
 | 值 | 说明 |
 |----|------|
-| `MESSAGE` | 流式文本 |
-| `MESSAGE_COMPLETE` | 完整文本 |
-| `REASONING` | 推理过程 |
-| `TOOL_CALL` | 工具调用 |
-| `TOOL_RESULT` | 工具结果 |
-| `TOOL_CALL_STREAMING` | 工具调用流式 |
-| `ERROR` | 错误 |
-| `RETRY` | 重试 |
-| `DONE` | 完成 |
-| `USAGE_UPDATE` | 用量 |
+| `MESSAGE` | 流式文本增量 |
+| `MESSAGE_COMPLETE` | 一段文本完整值 |
+| `REASONING` | 推理过程增量 |
+| `TOOL_CALL` | 工具开始执行 |
+| `TOOL_RESULT` | 工具执行完成 |
+| `TOOL_CALL_STREAMING` | 工具调用参数流式增量 |
+| `TOOL_CANCEL_REQUESTED` | 工具取消请求已发出 |
+| `TOOL_CANCELLED` | 工具已确认取消 |
+| `TOOL_TIMED_OUT` | 工具执行超时 |
+| `ERROR` | LLM 调用失败 |
+| `RETRY` | LLM 调用失败正在重试 |
+| `DONE` | ReAct 循环结束 |
+| `USAGE_UPDATE` | Token 用量更新 |
 
 ### 示例：完整事件处理
 
