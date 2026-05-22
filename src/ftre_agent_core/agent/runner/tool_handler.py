@@ -79,6 +79,7 @@ class ToolHandler:
         for call_id, name, arguments in parsed_calls:
             ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
             ctx.cancel_token = state.cancel_token
+            ctx.metadata["runtime_context"] = state.runtime_context
             ctx = self._run_before(ctx)
             contexts[call_id] = ctx
 
@@ -131,7 +132,7 @@ class ToolHandler:
 
     def _invoke(self, ctx: ToolContext) -> str:
         """在子线程中执行工具函数。"""
-        return self.registry.execute(ctx.name, **ctx.arguments)
+        return self.registry.execute(ctx.name, runtime_context=ctx.metadata.get("runtime_context"), **ctx.arguments)
 
     def _run_before(self, ctx: ToolContext) -> ToolContext:
         for mw in self.registry.middlewares:

@@ -4,7 +4,7 @@ ToolRegistry - 工具注册表 + 中间件
 import inspect
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .base import Tool, Injected
 from .cancellation import CancellationToken
@@ -59,7 +59,6 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
         self._middlewares: list[ToolMiddleware] = []
-        self._injections: dict[str, Callable[[], Any]] = {}
         self._inject_map: dict[str, dict[str, str]] = {}
 
     # --- 中间件 ---
@@ -92,19 +91,15 @@ class ToolRegistry:
 
     # --- 注入 ---
 
-    def provide(self, key: str, provider: Callable[[], Any]) -> None:
-        self._injections[key] = provider
-
-    def _resolve_injections(self, name: str, kwargs: dict) -> dict:
+    def _resolve_injections(self, name: str, kwargs: dict, runtime_context: dict | None) -> dict:
         inject_map = self._inject_map.get(name)
         if not inject_map:
             return kwargs
+        ctx = runtime_context or {}
         merged = dict(kwargs)
         for param_name, inject_key in inject_map.items():
             if param_name not in merged:
-                provider = self._injections.get(inject_key)
-                if provider is not None:
-                    merged[param_name] = provider()
+                merged[param_name] = ctx.get(inject_key)
         return merged
 
     @staticmethod
@@ -123,11 +118,11 @@ class ToolRegistry:
 
     # --- 执行 ---
 
-    def execute(self, name: str, **kwargs) -> Any:
+    def execute(self, name: str, runtime_context: dict | None = None, **kwargs) -> Any:
         tool = self.get(name)
         if tool is None:
             raise ValueError(f"Tool '{name}' not found")
-        return tool.execute(**self._resolve_injections(name, kwargs))
+        return tool.execute(**self._resolve_injections(name, kwargs, runtime_context))
 
     # --- 导出 ---
 
