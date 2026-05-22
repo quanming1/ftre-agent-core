@@ -106,7 +106,7 @@ class ReActAgent:
     # 执行
     # ============================================================
 
-    def run(self, message) -> Generator[AgentEvent, None, None]:
+    def run(self, message, runtime_context: dict | None = None) -> Generator[AgentEvent, None, None]:
         """
         运行 ReAct 循环，返回事件迭代器。
 
@@ -114,8 +114,9 @@ class ReActAgent:
             message: str 或 list[dict]
                 - str: 单条用户消息
                 - list: 完整消息列表（含历史 + 当前用户消息）
+            runtime_context: 本次 run 的运行时上下文 dict，用于工具的 Injected 注入。
         """
-        yield from self._runner.run(message)
+        yield from self._runner.run(message, runtime_context=runtime_context)
 
     # ============================================================
     # 取消

@@ -51,6 +51,7 @@ class RunState:
     iteration: int = 0
     error: str | None = None
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
+    runtime_context: dict = field(default_factory=dict)
     _done_event: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -120,9 +121,10 @@ class ReActRunner:
         self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
         self.tool_handler = ToolHandler(agent.tools)
 
-    def run(self, message) -> Generator[AgentEvent, None, None]:
+    def run(self, message, runtime_context: dict | None = None) -> Generator[AgentEvent, None, None]:
         """启动 ReAct 循环。message: str 或 list[dict]"""
         self.state.start()
+        self.state.runtime_context = runtime_context or {}
 
         if isinstance(message, str):
             self.agent.memory.add_user(message)
