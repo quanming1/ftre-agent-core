@@ -4,7 +4,7 @@ Responses API 适配器
 import litellm
 from typing import Generator, Callable
 
-from .completion import StreamAdapter, StreamDelta, LLMResponse, ToolCallWrapper
+from .completion import StreamAdapter, StreamDelta, LLMResponse, ToolCallWrapper, normalize_usage
 from .utils import LLMLogger
 
 
@@ -138,7 +138,7 @@ class ResponsesAdapter(StreamAdapter):
                         # 保存 response.id 供下次工具结果回传使用
                         self._last_response_id = getattr(completed_response, "id", None)
                         
-                        usage = getattr(completed_response, "usage", None)
+                        usage = normalize_usage(getattr(completed_response, "usage", None))
                         for item in getattr(completed_response, "output", []):
                             if getattr(item, "type", None) == "function_call":
                                 tool_calls_buffer.append({
