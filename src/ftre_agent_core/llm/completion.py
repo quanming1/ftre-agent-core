@@ -48,7 +48,7 @@ class LLMResponse:
     """LLM 完整响应（tool_calls 场景）"""
     content: str | None = None
     tool_calls: list[Any] = field(default_factory=list)
-    usage: Any = None
+    usage: dict | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -70,7 +70,44 @@ class StreamDelta:
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[ToolCallDeltaChunk] | None = None
-    usage: Any = None
+    usage: dict | None = None
+
+
+def normalize_usage(usage: Any) -> dict | None:
+    """
+    将 LiteLLM/SDK 的 usage 对象规范化为纯 dict（递归剥离 Pydantic 等容器）。
+    None / 空时返回 None。
+    """
+    if usage is None:
+        return None
+    return _to_plain(usage)
+
+
+def _to_plain(obj: Any) -> Any:
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_plain(v) for v in obj]
+    # Pydantic v2
+    if hasattr(obj, "model_dump"):
+        try:
+            return _to_plain(obj.model_dump())
+        except Exception:
+            pass
+    # Pydantic v1 / 类 dict 接口
+    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        try:
+            return _to_plain(obj.dict())
+        except Exception:
+            pass
+    if hasattr(obj, "__dict__"):
+        try:
+            return _to_plain(vars(obj))
+        except Exception:
+            pass
+    return str(obj)
 
 
 class ToolCallWrapper:
@@ -247,7 +284,7 @@ class CompletionAdapter(StreamAdapter):
                 llm_log.log_chunk(chunk)
 
                 if hasattr(chunk, "usage") and chunk.usage:
-                    usage = chunk.usage
+                    usage = normalize_usage(chunk.usage)
                 if not hasattr(chunk, "choices") or not chunk.choices:
                     continue
 
