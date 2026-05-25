@@ -31,8 +31,13 @@ class MemoryManager:
     def add_user(self, content: str) -> None:
         self._messages.append({"role": "user", "content": content})
 
-    def add_assistant(self, content: str, usage=None) -> None:
-        self._messages.append({"role": "assistant", "content": content})
+    def add_assistant(self, content: str, usage=None, reasoning: str | None = None) -> None:
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
+        # 部分 thinking 模型（DeepSeek-R1 / 千问 QwQ 等）要求多轮间把
+        # reasoning_content 透传回去，否则下一次请求会被拒。
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        self._messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, content: str, **kwargs) -> None:
         self._messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})

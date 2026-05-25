@@ -175,6 +175,7 @@ class ReActRunner:
         messages = self.agent.memory.get_messages()
         tools = self.agent.tools.to_openai_tools() or None
         full_content = ""
+        full_reasoning = ""
 
         try:
             for item in self.llm.stream(messages, tools):
@@ -193,6 +194,7 @@ class ReActRunner:
                         full_content += item.content
                         yield message_event(content=item.content)
                     if item.reasoning:
+                        full_reasoning += item.reasoning
                         yield reasoning_event(content=item.reasoning)
                     if item.tool_calls:
                         yield tool_call_streaming_event(item.tool_calls)
@@ -203,21 +205,21 @@ class ReActRunner:
                 raise CancelledError()
 
             if full_content:
-                self.agent.memory.add_assistant(full_content)
+                self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
                 yield message_complete_event(content=full_content)
             yield done_event(success=True, reason=DoneReason.COMPLETED)
             self.state.complete()
 
         except CancelledError:
             if full_content:
-                self.agent.memory.add_assistant(full_content)
+                self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
                 yield message_complete_event(content=full_content)
             raise
 
         except Exception as e:
             if self.state.is_cancelled:
                 if full_content:
-                    self.agent.memory.add_assistant(full_content)
+                    self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
                     yield message_complete_event(content=full_content)
                 raise CancelledError() from e
 

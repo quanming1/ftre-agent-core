@@ -47,6 +47,7 @@ class LLMError:
 class LLMResponse:
     """LLM 完整响应（tool_calls 场景）"""
     content: str | None = None
+    reasoning: str | None = None
     tool_calls: list[Any] = field(default_factory=list)
     usage: dict | None = None
 
@@ -274,6 +275,7 @@ class CompletionAdapter(StreamAdapter):
 
         accumulator = ToolCallAccumulator()
         content_buffer: list[str] = []
+        reasoning_buffer: list[str] = []
         usage = None
 
         try:
@@ -296,6 +298,7 @@ class CompletionAdapter(StreamAdapter):
 
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
+                    reasoning_buffer.append(reasoning)
                     yield StreamDelta(reasoning=reasoning)
 
                 if hasattr(delta, "content") and delta.content:
@@ -305,6 +308,7 @@ class CompletionAdapter(StreamAdapter):
             if accumulator.has_data:
                 yield LLMResponse(
                     content="".join(content_buffer) if content_buffer else None,
+                    reasoning="".join(reasoning_buffer) if reasoning_buffer else None,
                     tool_calls=accumulator.build(),
                     usage=usage,
                 )
