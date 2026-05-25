@@ -16,6 +16,7 @@ class EventType(str, Enum):
     MESSAGE = "message"
     MESSAGE_COMPLETE = "message_complete"
     REASONING = "reasoning"
+    REASONING_COMPLETE = "reasoning_complete"
     ERROR = "error"
     RETRY = "retry"
     DONE = "done"
@@ -238,6 +239,11 @@ def message_event(content: str) -> MessageEvent:
 
 def reasoning_event(content: str) -> MessageEvent:
     return {"type": EventType.REASONING, "data": {"content": content}}
+
+
+def reasoning_complete_event(content: str) -> MessageEvent:
+    """一轮 LLM 思考过程的完整文本（chunk 累积），用于持久化和多轮回放"""
+    return {"type": EventType.REASONING_COMPLETE, "data": {"content": content}}
 
 
 def message_complete_event(content: str) -> MessageCompleteEvent:
