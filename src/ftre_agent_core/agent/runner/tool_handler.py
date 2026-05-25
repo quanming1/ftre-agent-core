@@ -164,7 +164,7 @@ class ToolHandler:
 
     @staticmethod
     def build_assistant_message(response) -> dict:
-        return {
+        msg: dict = {
             "role": "assistant",
             "content": response.content,
             "tool_calls": [
@@ -179,3 +179,9 @@ class ToolHandler:
                 for tc in response.tool_calls
             ],
         }
+        # thinking 模型（DeepSeek-R1 / 千问 QwQ 等）要求 reasoning_content
+        # 必须随消息一起发回，否则下一次调用拒绝。
+        reasoning = getattr(response, "reasoning", None)
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        return msg
