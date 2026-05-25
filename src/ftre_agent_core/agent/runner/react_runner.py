@@ -15,6 +15,7 @@ from ..event import (
     AgentEvent,
     message_event,
     reasoning_event,
+    reasoning_complete_event,
     message_complete_event,
     done_event,
     usage_update_event,
@@ -184,6 +185,8 @@ class ReActRunner:
                 if isinstance(item, LLMResponse):
                     if item.usage:
                         yield usage_update_event(item.usage)
+                    if full_reasoning:
+                        yield reasoning_complete_event(content=full_reasoning)
                     if full_content:
                         yield message_complete_event(content=full_content)
                     yield from self._handle_tool_calls(item)
@@ -206,6 +209,8 @@ class ReActRunner:
 
             if full_content:
                 self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
+                if full_reasoning:
+                    yield reasoning_complete_event(content=full_reasoning)
                 yield message_complete_event(content=full_content)
             yield done_event(success=True, reason=DoneReason.COMPLETED)
             self.state.complete()
@@ -213,6 +218,8 @@ class ReActRunner:
         except CancelledError:
             if full_content:
                 self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
+                if full_reasoning:
+                    yield reasoning_complete_event(content=full_reasoning)
                 yield message_complete_event(content=full_content)
             raise
 
@@ -220,6 +227,8 @@ class ReActRunner:
             if self.state.is_cancelled:
                 if full_content:
                     self.agent.memory.add_assistant(full_content, reasoning=full_reasoning or None)
+                    if full_reasoning:
+                        yield reasoning_complete_event(content=full_reasoning)
                     yield message_complete_event(content=full_content)
                 raise CancelledError() from e
 
