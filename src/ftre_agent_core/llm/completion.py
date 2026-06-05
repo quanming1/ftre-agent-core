@@ -32,6 +32,8 @@ class LLMError:
             return LLMError(message=f"请求超时: {e}", code="timeout")
         if isinstance(e, litellm.APIConnectionError):
             return LLMError(message=f"网络连接失败: {e}", code="network")
+        if isinstance(e, litellm.InternalServerError):
+            return LLMError(message=f"服务端内部错误: {e}", code="internal_server_error")
         if isinstance(e, litellm.ContentPolicyViolationError):
             return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
         if isinstance(e, litellm.AuthenticationError):

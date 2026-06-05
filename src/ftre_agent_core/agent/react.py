@@ -33,6 +33,8 @@ class ReActAgent:
         tools: list[Tool] = None,
         max_iterations: int | None = None,
         memory: MemoryManager | None = None,
+        max_retries: int = 5,
+        retry_delay: float = 3.0,
     ):
         """
         Args:
@@ -44,12 +46,18 @@ class ReActAgent:
             tools:            工具列表
             max_iterations:   最大迭代次数。None 表示不限制（持续 loop 直到 LLM 不再调用工具或被取消）
             memory:           自定义 MemoryManager
+            max_retries:      LLM 调用失败时的最大重试次数（仅针对可重试错误）。0 表示不重试
+            retry_delay:      每次重试前固定等待的秒数
         """
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.api_type = api_type
         self.max_iterations = max_iterations
+
+        # 重试配置
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
         # Memory
         if memory is not None:
