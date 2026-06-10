@@ -1,8 +1,8 @@
 """
-ReAct Agent - 推理与行动循环
+ReAct Agent - 异步推理与行动循环
 """
-import asyncio
-from typing import Generator
+from typing import AsyncGenerator
+
 from ftre_agent_core.tool import Tool, ToolRegistry
 from ftre_agent_core.memory import MemoryManager
 from .event import AgentEvent
@@ -13,15 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class ReActAgent:
-    """
-    ReAct Agent
-
-    实现 Reasoning + Acting 循环：
-    1. 思考：分析问题，决定是否需要工具
-    2. 行动：调用工具获取信息
-    3. 观察：处理工具返回结果
-    4. 重复：直到能给出最终答案
-    """
 
     def __init__(
         self,
@@ -36,30 +27,14 @@ class ReActAgent:
         max_retries: int = 5,
         retry_delay: float = 3.0,
     ):
-        """
-        Args:
-            model:            模型名称（LiteLLM 格式，如 "openai/gpt-4"）
-            api_key:          API 密钥
-            api_base:         自定义端点（可选）
-            api_type:         协议类型，"completions"（默认）或 "responses"
-            system_prompt:    系统提示词
-            tools:            工具列表
-            max_iterations:   最大迭代次数。None 表示不限制（持续 loop 直到 LLM 不再调用工具或被取消）
-            memory:           自定义 MemoryManager
-            max_retries:      LLM 调用失败时的最大重试次数（仅针对可重试错误）。0 表示不重试
-            retry_delay:      每次重试前固定等待的秒数
-        """
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.api_type = api_type
         self.max_iterations = max_iterations
-
-        # 重试配置
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
-        # Memory
         if memory is not None:
             self.memory = memory
             if system_prompt:
@@ -67,18 +42,12 @@ class ReActAgent:
         else:
             self.memory = MemoryManager({"system_prompt": system_prompt})
 
-        # 工具注册表
         self._registry = ToolRegistry()
         if tools:
             for t in tools:
                 self._registry.register(t)
 
-        # 执行引擎
         self._runner = ReActRunner(self)
-
-    # ============================================================
-    # 属性
-    # ============================================================
 
     @property
     def system_prompt(self) -> str:
@@ -100,45 +69,17 @@ class ReActAgent:
     def state(self):
         return self._runner.state
 
-    # ============================================================
-    # 工具管理
-    # ============================================================
-
     def add_tool(self, tool: Tool) -> None:
         self._registry.register(tool)
 
     def remove_tool(self, name: str) -> None:
         self._registry.unregister(name)
 
-    # ============================================================
-    # 执行
-    # ============================================================
-
-    def run(self, message, runtime_context: dict | None = None) -> Generator[AgentEvent, None, None]:
-        """
-        运行 ReAct 循环，返回事件迭代器。
-
-        Args:
-            message: str 或 list[dict]
-                - str: 单条用户消息
-                - list: 完整消息列表（含历史 + 当前用户消息）
-            runtime_context: 本次 run 的运行时上下文 dict，用于工具的 Injected 注入。
-        """
-        yield from self._runner.run(message, runtime_context=runtime_context)
-
-    # ============================================================
-    # 取消
-    # ============================================================
-
-    async def cancel(self) -> None:
-        """异步取消（等待善后完成）"""
-        await asyncio.to_thread(self._runner.cancel)
-
-    def cancel_sync(self) -> None:
-        """同步取消（阻塞等待善后完成）"""
-        self._runner.cancel()
+    async def run(
+        self, message, runtime_context: dict | None = None
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async for event in self._runner.run(message, runtime_context=runtime_context):
+            yield event
 
     def cancel_nowait(self) -> None:
-        """仅发取消信号，不等待善后"""
-        self._runner.state.cancel()
-        self._runner.llm.cancel()
+        self._runner.cancel()

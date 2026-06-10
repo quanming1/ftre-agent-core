@@ -1,13 +1,13 @@
 """
-LLM 调用 - Completions API 适配器 + 类型定义 + LLMHandler
+LLM 调用 - OpenAI SDK 异步适配器 + 类型定义 + LLMHandler
 """
 import json
 import logging
-import litellm
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Generator
+from typing import Any, AsyncGenerator
+
+import openai
 
 from .utils import LLMLogger
 
@@ -19,28 +19,28 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 @dataclass
-class LLMError:
+class LLMError(Exception):
     """LLM 调用错误"""
     message: str
     code: str
 
     @staticmethod
     def classify(e: Exception) -> "LLMError":
-        if isinstance(e, litellm.RateLimitError):
+        if isinstance(e, openai.RateLimitError):
             return LLMError(message=f"请求频率超限: {e}", code="rate_limit")
-        if isinstance(e, litellm.Timeout):
+        if isinstance(e, openai.APITimeoutError):
             return LLMError(message=f"请求超时: {e}", code="timeout")
-        if isinstance(e, litellm.APIConnectionError):
+        if isinstance(e, openai.APIConnectionError):
             return LLMError(message=f"网络连接失败: {e}", code="network")
-        if isinstance(e, litellm.InternalServerError):
+        if isinstance(e, openai.InternalServerError):
             return LLMError(message=f"服务端内部错误: {e}", code="internal_server_error")
-        if isinstance(e, litellm.ContentPolicyViolationError):
+        if isinstance(e, openai.PermissionDeniedError):
             return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
-        if isinstance(e, litellm.AuthenticationError):
+        if isinstance(e, openai.AuthenticationError):
             return LLMError(message=f"认证失败: {e}", code="auth_error")
-        if isinstance(e, litellm.BadRequestError):
+        if isinstance(e, openai.BadRequestError):
             return LLMError(message=f"请求无效: {e}", code="bad_request")
-        if isinstance(e, litellm.APIError):
+        if isinstance(e, openai.APIError):
             return LLMError(message=f"API 错误: {e}", code="api_error")
         return LLMError(message=f"未知错误: {e}", code="unknown")
 
@@ -77,40 +77,16 @@ class StreamDelta:
 
 
 def normalize_usage(usage: Any) -> dict | None:
-    """
-    将 LiteLLM/SDK 的 usage 对象规范化为纯 dict（递归剥离 Pydantic 等容器）。
-    None / 空时返回 None。
-    """
+    """将 usage 对象规范化为纯 dict"""
     if usage is None:
         return None
-    return _to_plain(usage)
-
-
-def _to_plain(obj: Any) -> Any:
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    if isinstance(obj, dict):
-        return {k: _to_plain(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_plain(v) for v in obj]
-    # Pydantic v2
-    if hasattr(obj, "model_dump"):
-        try:
-            return _to_plain(obj.model_dump())
-        except Exception:
-            pass
-    # Pydantic v1 / 类 dict 接口
-    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
-        try:
-            return _to_plain(obj.dict())
-        except Exception:
-            pass
-    if hasattr(obj, "__dict__"):
-        try:
-            return _to_plain(vars(obj))
-        except Exception:
-            pass
-    return str(obj)
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump(exclude_none=True)
+    if hasattr(usage, "__dict__"):
+        return {k: v for k, v in vars(usage).items() if v is not None and not k.startswith("_")}
+    if isinstance(usage, dict):
+        return usage
+    return None
 
 
 class ToolCallWrapper:
@@ -125,50 +101,6 @@ class _FunctionWrapper:
     def __init__(self, data: dict):
         self.name = data["name"]
         self.arguments = data["arguments"]
-
-
-# ============================================================
-# StreamAdapter 基类
-# ============================================================
-
-class StreamAdapter(ABC):
-    """流式适配器基类"""
-
-    def __init__(
-        self,
-        model: str,
-        api_key: str,
-        api_base: str | None = None,
-        cancelled_check: Callable[[], bool] | None = None,
-    ):
-        self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
-        self._cancelled_check = cancelled_check or (lambda: False)
-        self._active_response = None
-
-    @property
-    def is_cancelled(self) -> bool:
-        return self._cancelled_check()
-
-    def close_stream(self) -> None:
-        """硬关活跃的流式连接"""
-        resp = self._active_response
-        if resp is None:
-            return
-        try:
-            inner = getattr(resp, "completion_stream", None)
-            if inner and hasattr(inner, "close"):
-                inner.close()
-            http_resp = getattr(inner, "response", None)
-            if http_resp and hasattr(http_resp, "close"):
-                http_resp.close()
-        except Exception:
-            pass
-
-    @abstractmethod
-    def stream(self, messages: list[dict], tools: list[dict] | None = None) -> Generator[StreamDelta | LLMResponse, None, None]:
-        pass
 
 
 # ============================================================
@@ -253,27 +185,64 @@ class ToolCallAccumulator:
 
 
 # ============================================================
-# CompletionAdapter
+# LLMHandler - 异步版
 # ============================================================
 
-class CompletionAdapter(StreamAdapter):
-    """Completions API 适配器（litellm.completion）"""
+class LLMHandler:
+    """LLM 调用封装，基于 OpenAI SDK 异步客户端"""
 
-    def stream(self, messages: list[dict], tools: list[dict] | None = None) -> Generator[StreamDelta | LLMResponse, None, None]:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        api_base: str | None = None,
+        api_type: str = "completions",
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
+        self._cancelled = False
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key,
+            base_url=api_base,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        self._active_stream = None
+
+    def cancel(self) -> None:
+        """取消当前请求"""
+        self._cancelled = True
+
+    async def stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[StreamDelta | LLMResponse, None]:
+        """异步流式调用 LLM，直接产出 StreamDelta 和 LLMResponse。"""
+        self._cancelled = False
+
         llm_log = LLMLogger(self.model)
         llm_log.log_input(messages, tools)
 
-        response = litellm.completion(
-            model=self.model,
-            messages=messages,
-            tools=tools if tools else None,
-            api_key=self.api_key,
-            api_base=self.api_base,
-            stream=True,
-            stream_options={"include_usage": True},
-            max_tokens=16384,
-        )
-        self._active_response = response
+        params: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            params["tools"] = tools
+
+        try:
+            response = await self._client.chat.completions.create(**params)
+        except Exception as e:
+            llm_log.flush()
+            raise
+
+        self._active_stream = response
 
         accumulator = ToolCallAccumulator()
         content_buffer: list[str] = []
@@ -281,20 +250,22 @@ class CompletionAdapter(StreamAdapter):
         usage = None
 
         try:
-            for chunk in response:
-                if self.is_cancelled:
+            async for chunk in response:
+                if self._cancelled:
                     break
 
-                llm_log.log_chunk(chunk)
+                if hasattr(chunk, "model_dump"):
+                    llm_log.log_chunk(chunk.model_dump())
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage = normalize_usage(chunk.usage)
-                if not hasattr(chunk, "choices") or not chunk.choices:
+
+                if not chunk.choices:
                     continue
 
                 delta = chunk.choices[0].delta
 
-                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                if delta.tool_calls:
                     tc_deltas = [accumulator.feed(tc) for tc in delta.tool_calls]
                     yield StreamDelta(tool_calls=tc_deltas)
 
@@ -303,9 +274,15 @@ class CompletionAdapter(StreamAdapter):
                     reasoning_buffer.append(reasoning)
                     yield StreamDelta(reasoning=reasoning)
 
-                if hasattr(delta, "content") and delta.content:
+                if delta.content:
                     content_buffer.append(delta.content)
                     yield StreamDelta(content=delta.content)
+
+            logger.info(
+                f"[completion] 流结束: has_tool_calls={accumulator.has_data}, "
+                f"content_len={len(content_buffer)}, "
+                f"reasoning_len={len(reasoning_buffer)}"
+            )
 
             if accumulator.has_data:
                 yield LLMResponse(
@@ -318,35 +295,9 @@ class CompletionAdapter(StreamAdapter):
                 if usage:
                     yield StreamDelta(usage=usage)
         finally:
-            self._active_response = None
+            self._active_stream = None
+            try:
+                await response.close()
+            except Exception:
+                pass
             llm_log.flush()
-
-
-# ============================================================
-# LLMHandler（对外入口）
-# ============================================================
-
-class LLMHandler:
-    """LLM 调用封装，根据 api_type 选择适配器。"""
-
-    def __init__(self, model: str, api_key: str, api_base: str | None = None, api_type: str = "completions"):
-        self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
-        self._cancelled = False
-        self._adapter = self._create_adapter(api_type)
-
-    def _create_adapter(self, api_type: str) -> StreamAdapter:
-        from .responses import ResponsesAdapter
-        if api_type == "responses":
-            return ResponsesAdapter(model=self.model, api_key=self.api_key, api_base=self.api_base, cancelled_check=lambda: self._cancelled)
-        return CompletionAdapter(model=self.model, api_key=self.api_key, api_base=self.api_base, cancelled_check=lambda: self._cancelled)
-
-    def cancel(self) -> None:
-        """取消：设标志位 + 硬关连接"""
-        self._cancelled = True
-        self._adapter.close_stream()
-
-    def stream(self, messages: list[dict], tools: list[dict] | None = None) -> Generator[StreamDelta | LLMResponse, None, None]:
-        self._cancelled = False
-        yield from self._adapter.stream(messages, tools)

@@ -1,3 +1,1 @@
-# Core Agent System
-import os
-os.environ.setdefault("LITELLM_LOG", "WARNING")  # 关闭 DEBUG 日志
+# Core Agent System - 异步 ReAct Agent
