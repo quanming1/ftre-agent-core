@@ -33,14 +33,14 @@ class TestImportReachability:
 
     def test_llm_event_types(self):
         from ftre_agent_core.llm import (
-            LLMEvent, StepStart, TextDelta, ReasoningDelta,
+            LLMEvent, TextDelta, ReasoningDelta,
             ToolInputDelta, ToolCall, StepFinish,
-            ToolResult, ToolError, ProviderError,
         )
         # 全部非空
-        for cls in [StepStart, TextDelta, ReasoningDelta, ToolInputDelta,
-                     ToolCall, StepFinish, ToolResult, ToolError, ProviderError]:
+        for cls in [TextDelta, ReasoningDelta, ToolInputDelta,
+                     ToolCall, StepFinish]:
             assert cls is not None
+        assert LLMEvent is not None
 
     def test_agent_event_module(self):
         from ftre_agent_core.agent.event import (
@@ -253,6 +253,19 @@ class TestRemovedItems:
     def test_tool_call_delta_chunk_removed(self):
         with pytest.raises(ImportError):
             from ftre_agent_core.llm import ToolCallDeltaChunk
+
+    def test_provider_error_removed(self):
+        with pytest.raises(ImportError):
+            from ftre_agent_core.llm import ProviderError
+
+    def test_step_start_removed(self):
+        with pytest.raises(ImportError):
+            from ftre_agent_core.llm import StepStart
+
+    def test_llm_tool_result_removed(self):
+        # llm 层的 ToolResult/ToolError 已删除（runner 自有 ToolResult 不受影响）
+        with pytest.raises(ImportError):
+            from ftre_agent_core.llm import ToolError
 
     def test_responses_module_removed(self):
         with pytest.raises(ImportError):
