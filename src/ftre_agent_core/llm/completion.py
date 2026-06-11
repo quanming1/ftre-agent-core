@@ -45,51 +45,56 @@ class LLMError(Exception):
     message: str
     code: str
 
+    # 异常类型 → 错误码映射
+    _TYPE_MAP = {
+        openai.RateLimitError: "rate_limit",
+        openai.APITimeoutError: "timeout",
+        openai.APIConnectionError: "network",
+        openai.AuthenticationError: "auth_error",
+        openai.PermissionDeniedError: "content_filter",
+        openai.BadRequestError: "bad_request",
+        openai.InternalServerError: "internal_server_error",
+        openai.APIError: "api_error",
+    }
+
+    # exc.code 优先级覆盖（OpenAI SDK 的 APIError 可能带更精确 code）
+    _CODE_OVERRIDES = {
+        "invalid_request_error": "bad_request",
+        "bad_request": "bad_request",
+        "rate_limit_exceeded": "rate_limit",
+        "context_length_exceeded": "bad_request",
+        "invalid_api_key": "auth_error",
+        "authentication_error": "auth_error",
+        "permission_denied": "content_filter",
+    }
+
+    # 不可重试的错误码
+    UNRETRYABLE_CODES = {"auth_error", "bad_request", "content_filter"}
+
     @staticmethod
     def classify(exc: Exception) -> "LLMError":
-        # OpenAI SDK 的 APIError 通常带有更精确的 code，优先使用它。
+        # 优先用 SDK 的 exc.code（更精确）
         if isinstance(exc, openai.APIError) and hasattr(exc, "code") and exc.code:
-            code = exc.code
-            if code in ("invalid_request_error", "bad_request"):
-                return LLMError(message=f"请求无效: {exc}", code="bad_request")
-            if code == "rate_limit_exceeded":
-                return LLMError(message=f"请求频率超限: {exc}", code="rate_limit")
-            if code == "context_length_exceeded":
-                return LLMError(message=f"上下文长度超限: {exc}", code="bad_request")
-            if code in ("invalid_api_key", "authentication_error"):
-                return LLMError(message=f"认证失败: {exc}", code="auth_error")
-            if code == "permission_denied":
-                return LLMError(message=f"内容审核未通过: {exc}", code="content_filter")
+            code = LLMError._CODE_OVERRIDES.get(exc.code)
+            if code:
+                return LLMError(message=str(exc), code=code)
 
-        # 如果没有精确 code，再按异常类型兜底分类。
-        if isinstance(exc, openai.RateLimitError):
-            return LLMError(message=f"请求频率超限: {exc}", code="rate_limit")
-        if isinstance(exc, openai.APITimeoutError):
-            return LLMError(message=f"请求超时: {exc}", code="timeout")
-        if isinstance(exc, openai.APIConnectionError):
-            return LLMError(message=f"网络连接失败: {exc}", code="network")
-        if isinstance(exc, openai.InternalServerError):
-            return LLMError(message=f"服务端内部错误: {exc}", code="internal_server_error")
-        if isinstance(exc, openai.PermissionDeniedError):
-            return LLMError(message=f"内容审核未通过: {exc}", code="content_filter")
-        if isinstance(exc, openai.AuthenticationError):
-            return LLMError(message=f"认证失败: {exc}", code="auth_error")
-        if isinstance(exc, openai.BadRequestError):
-            return LLMError(message=f"请求无效: {exc}", code="bad_request")
-        if isinstance(exc, openai.APIError):
-            return LLMError(message=f"API 错误: {exc}", code="api_error")
+        # 按异常类型映射
+        for exc_type, code in LLMError._TYPE_MAP.items():
+            if isinstance(exc, exc_type):
+                return LLMError(message=str(exc), code=code)
 
-        # 流式传输过程中也可能直接抛出 httpx 异常。
+        # httpx 兜底
         try:
             import httpx
             if isinstance(exc, httpx.RemoteProtocolError):
-                return LLMError(message=f"协议错误: {exc}", code="network")
+                return LLMError(message=str(exc), code="network")
             if isinstance(exc, httpx.ReadTimeout):
-                return LLMError(message=f"读取超时: {exc}", code="timeout")
+                return LLMError(message=str(exc), code="timeout")
         except ImportError:
             pass
 
-        return LLMError(message=f"未知错误: {exc}", code="unknown")
+        return LLMError(message=str(exc), code="unknown")
 
 
 # LLM 事件类型
@@ -402,52 +407,3 @@ class LLMHandler:
                 if inspect.isawaitable(close_result):
                     await close_result
             llm_log.flush()
-
-
-# 兼容旧测试和旧 adapter 的事件类型。
-@dataclass
-class StreamDelta:
-    """旧版流式 delta。"""
-    content: str | None = None
-    reasoning: str | None = None
-    tool_calls: list | None = None
-    usage: dict | None = None
-    finish_reason: str | None = None
-
-
-@dataclass
-class ToolCallDeltaChunk:
-    """旧版工具调用 delta。"""
-    index: int
-    id: str | None = None
-    name: str | None = None
-    arguments_delta: str | None = None
-
-
-@dataclass
-class LLMResponse:
-    """旧版完整响应对象。"""
-    content: str | None = None
-    reasoning: str | None = None
-    tool_calls: list[Any] = field(default_factory=list)
-    usage: dict | None = None
-    finish_reason: str | None = None
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return bool(self.tool_calls)
-
-
-class ToolCallWrapper:
-    """兼容 OpenAI SDK 形状的旧版 tool_call 包装对象。"""
-
-    def __init__(self, data: dict):
-        self.id = data["id"]
-        self.type = data.get("type", "function")
-        self.function = _FunctionWrapper(data["function"])
-
-
-class _FunctionWrapper:
-    def __init__(self, data: dict):
-        self.name = data["name"]
-        self.arguments = data["arguments"]

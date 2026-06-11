@@ -169,7 +169,6 @@ class ReActRunner:
             yield done_event(success=False, reason=DoneReason.CANCELLED)
 
     # 单轮 LLM 调用，带重试。重试使用 for 循环，避免递归放大重试次数。
-    UNRETRYABLE_ERROR_CODES = {"auth_error", "bad_request", "content_filter"}
 
     async def _run_turn(self) -> AsyncGenerator[AgentEvent, None]:
         """执行一次 provider turn，并对可重试错误自动重试。
@@ -200,7 +199,7 @@ class ReActRunner:
                     "LLM call failed [%s] %s (attempt %d/%d)",
                     err.code, err.message[:200], attempt + 1, max_attempts,
                 )
-                if err.code in self.UNRETRYABLE_ERROR_CODES or is_last:
+                if err.code in LLMError.UNRETRYABLE_CODES or is_last:
                     yield error_event(message=err.message, code=err.code)
                     yield done_event(success=False, reason=DoneReason.ERROR)
                     self.state.fail(f"[{err.code}] {err.message}")
@@ -212,7 +211,7 @@ class ReActRunner:
                     raise CancelledError() from exc
                 err = LLMError.classify(exc)
                 is_last = attempt >= max_attempts - 1
-                if err.code in self.UNRETRYABLE_ERROR_CODES or is_last:
+                if err.code in LLMError.UNRETRYABLE_CODES or is_last:
                     yield error_event(message=err.message, code=err.code)
                     yield done_event(success=False, reason=DoneReason.ERROR)
                     self.state.fail(f"[{err.code}] {err.message}")
@@ -331,11 +330,10 @@ class ReActRunner:
         # 阶段 4：没有工具调用的纯文本 turn。
         if not tool_calls_ordered:
             if full_text:
-                if finish_reason == "length":
-                    # 输出被截断时保存部分内容，并让外层循环继续请求后续内容。
-                    self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
-                    return
                 self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
+                if finish_reason == "length":
+                    # 输出被截断，保存部分内容，外层循环会继续请求后续内容。
+                    return
             yield done_event(success=True, reason=DoneReason.COMPLETED)
             self.state.complete()
             return

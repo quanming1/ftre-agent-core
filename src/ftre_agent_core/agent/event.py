@@ -10,9 +10,6 @@ from typing import Any, TypedDict
 class EventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    TOOL_CANCEL_REQUESTED = "tool_cancel_requested"
-    TOOL_CANCELLED = "tool_cancelled"
-    TOOL_TIMED_OUT = "tool_timed_out"
     MESSAGE = "message"
     MESSAGE_COMPLETE = "message_complete"
     REASONING = "reasoning"
@@ -45,16 +42,6 @@ class ToolResultData(TypedDict, total=False):
     status: str
     error_code: str | None
     metadata: dict[str, Any]
-
-
-class ToolLifecycleData(TypedDict, total=False):
-    id: str
-    name: str
-    arguments: dict[str, Any]
-    reason: str
-    status: str
-    error_code: str | None
-    result_status: str | None
 
 
 class MessageData(TypedDict):
@@ -91,71 +78,13 @@ class ToolCallStreamingData(TypedDict):
     tool_calls: list[dict]
 
 
-class ToolCallStreamingEvent(TypedDict):
-    type: EventType
-    data: ToolCallStreamingData
+# 统一事件类型：dict with "type" + "data"
+AgentEvent = dict
 
 
-class ToolCallEvent(TypedDict):
-    type: EventType
-    data: ToolCallData
+# ─── 事件构造函数 ────────────────────────────────────────────────
 
-
-class ToolResultEvent(TypedDict):
-    type: EventType
-    data: ToolResultData
-
-
-class ToolLifecycleEvent(TypedDict):
-    type: EventType
-    data: ToolLifecycleData
-
-
-class MessageEvent(TypedDict):
-    type: EventType
-    data: MessageData
-
-
-class MessageCompleteEvent(TypedDict):
-    type: EventType
-    data: MessageCompleteData
-
-
-class DoneEvent(TypedDict):
-    type: EventType
-    data: DoneData
-
-
-class UsageUpdateEvent(TypedDict):
-    type: EventType
-    data: UsageUpdateData
-
-
-class ErrorEvent(TypedDict):
-    type: EventType
-    data: ErrorData
-
-
-class RetryEvent(TypedDict):
-    type: EventType
-    data: RetryData
-
-
-AgentEvent = (
-    ToolCallEvent
-    | ToolResultEvent
-    | ToolLifecycleEvent
-    | ToolCallStreamingEvent
-    | MessageEvent
-    | MessageCompleteEvent
-    | DoneEvent
-    | UsageUpdateEvent
-    | ErrorEvent
-    | RetryEvent
-)
-
-
-def tool_call_streaming_event(chunks: list) -> ToolCallStreamingEvent:
+def tool_call_streaming_event(chunks: list) -> AgentEvent:
     """从 ToolCallDeltaChunk 列表或 dict 构造流式工具调用事件。"""
     result = []
     for c in chunks:
@@ -175,7 +104,7 @@ def tool_call_streaming_event(chunks: list) -> ToolCallStreamingEvent:
     }
 
 
-def tool_call_event(id: str, name: str, arguments: dict[str, Any]) -> ToolCallEvent:
+def tool_call_event(id: str, name: str, arguments: dict[str, Any]) -> AgentEvent:
     return {"type": EventType.TOOL_CALL, "data": {"id": id, "name": name, "arguments": arguments}}
 
 
@@ -188,7 +117,7 @@ def tool_result_event(
     status: str = "completed",
     error_code: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> ToolResultEvent:
+) -> AgentEvent:
     data: ToolResultData = {
         "id": id,
         "name": name,
@@ -202,70 +131,37 @@ def tool_result_event(
     return {"type": EventType.TOOL_RESULT, "data": data}
 
 
-def tool_cancel_requested_event(
-    id: str,
-    name: str,
-    reason: str = "user_cancelled",
-    *,
-    error_code: str | None = None,
-    result_status: str | None = "cancelled",
-) -> ToolLifecycleEvent:
-    return {"type": EventType.TOOL_CANCEL_REQUESTED, "data": {"id": id, "name": name, "reason": reason, "status": "cancelling", "error_code": error_code, "result_status": result_status}}
-
-
-def tool_cancelled_event(
-    id: str,
-    name: str,
-    reason: str = "user_cancelled",
-    *,
-    error_code: str | None = "cancelled",
-    result_status: str | None = "cancelled",
-) -> ToolLifecycleEvent:
-    return {"type": EventType.TOOL_CANCELLED, "data": {"id": id, "name": name, "reason": reason, "status": "cancelled", "error_code": error_code, "result_status": result_status}}
-
-
-def tool_timed_out_event(
-    id: str,
-    name: str,
-    reason: str = "timed_out",
-    *,
-    error_code: str | None = "timed_out",
-    result_status: str | None = "timed_out",
-) -> ToolLifecycleEvent:
-    return {"type": EventType.TOOL_TIMED_OUT, "data": {"id": id, "name": name, "reason": reason, "status": "timed_out", "error_code": error_code, "result_status": result_status}}
-
-
-def message_event(content: str) -> MessageEvent:
+def message_event(content: str) -> AgentEvent:
     return {"type": EventType.MESSAGE, "data": {"content": content}}
 
 
-def reasoning_event(content: str) -> MessageEvent:
+def reasoning_event(content: str) -> AgentEvent:
     return {"type": EventType.REASONING, "data": {"content": content}}
 
 
-def reasoning_complete_event(content: str) -> MessageEvent:
+def reasoning_complete_event(content: str) -> AgentEvent:
     """一轮 LLM reasoning 的完整文本，用于持久化和多轮回放。"""
     return {"type": EventType.REASONING_COMPLETE, "data": {"content": content}}
 
 
-def message_complete_event(content: str) -> MessageCompleteEvent:
+def message_complete_event(content: str) -> AgentEvent:
     return {"type": EventType.MESSAGE_COMPLETE, "data": {"content": content}}
 
 
-def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> DoneEvent:
+def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> AgentEvent:
     data: DoneData = {"success": success, "reason": reason}
     if usage:
         data["usage"] = usage
     return {"type": EventType.DONE, "data": data}
 
 
-def usage_update_event(usage: dict) -> UsageUpdateEvent:
+def usage_update_event(usage: dict) -> AgentEvent:
     return {"type": EventType.USAGE_UPDATE, "data": {"usage": usage}}
 
 
-def error_event(message: str, code: str = "unknown") -> ErrorEvent:
+def error_event(message: str, code: str = "unknown") -> AgentEvent:
     return {"type": EventType.ERROR, "data": {"message": message, "code": code}}
 
 
-def retry_event(code: str, message: str, attempt: int, max_attempts: int) -> RetryEvent:
+def retry_event(code: str, message: str, attempt: int, max_attempts: int) -> AgentEvent:
     return {"type": EventType.RETRY, "data": {"code": code, "message": message, "attempt": attempt, "max_attempts": max_attempts}}
