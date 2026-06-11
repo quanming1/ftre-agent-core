@@ -1,10 +1,33 @@
 """
-LLM 调用 - OpenAI SDK 异步适配器 + 类型定义 + LLMHandler
+OpenAI Chat Completions 流式客户端。
+
+事件模型参考 opencode 的 LLMEvent tagged union：
+
+  Provider 流式产出：
+    StepStart       一轮 provider 调用开始
+    TextDelta       assistant 文本增量
+    ReasoningDelta  reasoning 文本增量
+    ToolInputDelta  工具参数 JSON 原始片段
+    ToolCall        流结束后组装完成的工具调用
+    StepFinish      一轮 provider 调用结束，包含 finish_reason 和 usage
+
+  Core 后续注入：
+    ToolResult      工具执行成功结果
+    ToolError       工具执行失败结果
+
+  错误：
+    ProviderError   provider 异常分类后的事件
+
+所有事件都是带 type 字段的 dataclass，调用方可以用 isinstance()
+或者 event.type 做分支判断。
 """
-import json
+
+from __future__ import annotations
+
+import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import Any, AsyncGenerator
 
 import openai
@@ -14,182 +37,236 @@ from .utils import LLMLogger
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# 类型定义
-# ============================================================
-
+# LLM 错误分类
 @dataclass
 class LLMError(Exception):
-    """LLM 调用错误"""
+    """runner 重试策略使用的统一 LLM 错误。"""
+
     message: str
     code: str
 
     @staticmethod
-    def classify(e: Exception) -> "LLMError":
-        if isinstance(e, openai.RateLimitError):
-            return LLMError(message=f"请求频率超限: {e}", code="rate_limit")
-        if isinstance(e, openai.APITimeoutError):
-            return LLMError(message=f"请求超时: {e}", code="timeout")
-        if isinstance(e, openai.APIConnectionError):
-            return LLMError(message=f"网络连接失败: {e}", code="network")
-        if isinstance(e, openai.InternalServerError):
-            return LLMError(message=f"服务端内部错误: {e}", code="internal_server_error")
-        if isinstance(e, openai.PermissionDeniedError):
-            return LLMError(message=f"内容审核未通过: {e}", code="content_filter")
-        if isinstance(e, openai.AuthenticationError):
-            return LLMError(message=f"认证失败: {e}", code="auth_error")
-        if isinstance(e, openai.BadRequestError):
-            return LLMError(message=f"请求无效: {e}", code="bad_request")
-        if isinstance(e, openai.APIError):
-            return LLMError(message=f"API 错误: {e}", code="api_error")
-        return LLMError(message=f"未知错误: {e}", code="unknown")
+    def classify(exc: Exception) -> "LLMError":
+        # OpenAI SDK 的 APIError 通常带有更精确的 code，优先使用它。
+        if isinstance(exc, openai.APIError) and hasattr(exc, "code") and exc.code:
+            code = exc.code
+            if code in ("invalid_request_error", "bad_request"):
+                return LLMError(message=f"请求无效: {exc}", code="bad_request")
+            if code == "rate_limit_exceeded":
+                return LLMError(message=f"请求频率超限: {exc}", code="rate_limit")
+            if code == "context_length_exceeded":
+                return LLMError(message=f"上下文长度超限: {exc}", code="bad_request")
+            if code in ("invalid_api_key", "authentication_error"):
+                return LLMError(message=f"认证失败: {exc}", code="auth_error")
+            if code == "permission_denied":
+                return LLMError(message=f"内容审核未通过: {exc}", code="content_filter")
+
+        # 如果没有精确 code，再按异常类型兜底分类。
+        if isinstance(exc, openai.RateLimitError):
+            return LLMError(message=f"请求频率超限: {exc}", code="rate_limit")
+        if isinstance(exc, openai.APITimeoutError):
+            return LLMError(message=f"请求超时: {exc}", code="timeout")
+        if isinstance(exc, openai.APIConnectionError):
+            return LLMError(message=f"网络连接失败: {exc}", code="network")
+        if isinstance(exc, openai.InternalServerError):
+            return LLMError(message=f"服务端内部错误: {exc}", code="internal_server_error")
+        if isinstance(exc, openai.PermissionDeniedError):
+            return LLMError(message=f"内容审核未通过: {exc}", code="content_filter")
+        if isinstance(exc, openai.AuthenticationError):
+            return LLMError(message=f"认证失败: {exc}", code="auth_error")
+        if isinstance(exc, openai.BadRequestError):
+            return LLMError(message=f"请求无效: {exc}", code="bad_request")
+        if isinstance(exc, openai.APIError):
+            return LLMError(message=f"API 错误: {exc}", code="api_error")
+
+        # 流式传输过程中也可能直接抛出 httpx 异常。
+        try:
+            import httpx
+            if isinstance(exc, httpx.RemoteProtocolError):
+                return LLMError(message=f"协议错误: {exc}", code="network")
+            if isinstance(exc, httpx.ReadTimeout):
+                return LLMError(message=f"读取超时: {exc}", code="timeout")
+        except ImportError:
+            pass
+
+        return LLMError(message=f"未知错误: {exc}", code="unknown")
+
+
+# LLM 事件类型
+@dataclass
+class StepStart:
+    """一轮 provider 调用开始。"""
+    type: str = field(default="step-start", init=False)
 
 
 @dataclass
-class LLMResponse:
-    """LLM 完整响应（tool_calls 场景）"""
-    content: str | None = None
-    reasoning: str | None = None
-    tool_calls: list[Any] = field(default_factory=list)
+class TextDelta:
+    """assistant 文本增量。"""
+    type: str = field(default="text-delta", init=False)
+    text: str = ""
+
+
+@dataclass
+class ReasoningDelta:
+    """reasoning 文本增量。"""
+    type: str = field(default="reasoning-delta", init=False)
+    text: str = ""
+
+
+@dataclass
+class ToolInputDelta:
+    """单个工具调用的参数 JSON 原始片段。"""
+    type: str = field(default="tool-input-delta", init=False)
+    id: str = ""
+    name: str = ""
+    text: str = ""
+
+
+@dataclass
+class ToolCall:
+    """已经组装完整、可以执行的工具调用。"""
+    type: str = field(default="tool-call", init=False)
+    id: str = ""
+    name: str = ""
+    # None 表示 JSON parse 失败，调用方必须按工具错误处理。
+    input: dict | None = field(default_factory=dict)
+
+
+@dataclass
+class StepFinish:
+    """一轮 provider 调用结束。"""
+    type: str = field(default="step-finish", init=False)
+    finish_reason: str = "stop"
     usage: dict | None = None
 
-    @property
-    def has_tool_calls(self) -> bool:
-        return len(self.tool_calls) > 0
+
+@dataclass
+class ToolResult:
+    """工具执行成功结果；由 core 注入，不来自 provider。"""
+    type: str = field(default="tool-result", init=False)
+    id: str = ""
+    name: str = ""
+    result: str = ""
 
 
 @dataclass
-class ToolCallDeltaChunk:
-    """单个 tool_call 的增量"""
-    index: int
-    id: str | None = None
-    name: str | None = None
-    arguments_delta: str | None = None
+class ToolError:
+    """工具执行失败结果；由 core 注入，不来自 provider。"""
+    type: str = field(default="tool-error", init=False)
+    id: str = ""
+    name: str = ""
+    message: str = ""
 
 
 @dataclass
-class StreamDelta:
-    """流式 delta 片段"""
-    content: str | None = None
-    reasoning: str | None = None
-    tool_calls: list[ToolCallDeltaChunk] | None = None
-    usage: dict | None = None
+class ProviderError:
+    """provider 异常分类后的事件。"""
+    type: str = field(default="provider-error", init=False)
+    message: str = ""
+    code: str = "unknown"
+    retryable: bool = False
+
+
+# 统一事件类型别名。
+LLMEvent = (
+    StepStart | TextDelta | ReasoningDelta | ToolInputDelta
+    | ToolCall | StepFinish | ToolResult | ToolError | ProviderError
+)
+
+
+# 内部辅助函数
+def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
 
 def normalize_usage(usage: Any) -> dict | None:
-    """将 usage 对象规范化为纯 dict"""
+    """把 SDK usage 对象规范化成普通 dict。"""
     if usage is None:
         return None
+    if isinstance(usage, dict):
+        return usage
     if hasattr(usage, "model_dump"):
         return usage.model_dump(exclude_none=True)
     if hasattr(usage, "__dict__"):
         return {k: v for k, v in vars(usage).items() if v is not None and not k.startswith("_")}
-    if isinstance(usage, dict):
-        return usage
     return None
 
 
-class ToolCallWrapper:
-    """统一的 tool_call 对象"""
-    def __init__(self, data: dict):
-        self.id = data["id"]
-        self.type = data["type"]
-        self.function = _FunctionWrapper(data["function"])
-
-
-class _FunctionWrapper:
-    def __init__(self, data: dict):
-        self.name = data["name"]
-        self.arguments = data["arguments"]
-
-
-# ============================================================
-# ToolCallAccumulator
-# ============================================================
-
-class _SplitReason(Enum):
-    ID_CHANGED = auto()
-    ARGS_COMPLETE = auto()
-    NAME_CHANGED = auto()
-
-
-class ToolCallAccumulator:
-    """流式 tool_call delta 累积器"""
+class _ToolCallAccumulator:
+    """按 OpenAI streaming 的 index 累积 tool_call delta。"""
 
     def __init__(self):
-        self._buffer: dict[int, dict] = {}
-        self._index_remap: dict[int, int] = {}
-
-    def feed(self, tc) -> ToolCallDeltaChunk:
-        raw_idx = tc.index
-        idx = self._index_remap.get(raw_idx, raw_idx)
-        existing = self._buffer.get(idx)
-
-        split_reason = self._detect_split(existing, tc)
-        if split_reason is not None:
-            idx = self._allocate_new_slot(raw_idx, tc.id, split_reason)
-            existing = None
-
-        if not existing:
-            self._buffer[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
-        self._merge_delta(idx, tc)
-
-        return ToolCallDeltaChunk(
-            index=idx,
-            id=tc.id or None,
-            name=tc.function.name if tc.function and tc.function.name else None,
-            arguments_delta=tc.function.arguments if tc.function and tc.function.arguments else None,
-        )
+        # index -> {id, name, arguments}
+        self._items: dict[int, dict] = {}
 
     @property
     def has_data(self) -> bool:
-        return len(self._buffer) > 0
+        return bool(self._items)
 
-    def build(self) -> list[ToolCallWrapper]:
-        return [ToolCallWrapper(tc_data) for _, tc_data in sorted(self._buffer.items())]
+    def feed(self, tc_delta: Any) -> ToolInputDelta | None:
+        """喂入一个 delta；如果包含新的参数片段，则返回 ToolInputDelta。"""
+        index = _get_attr(tc_delta, "index")
+        if index is None:
+            index = len(self._items)
 
-    def _detect_split(self, existing: dict | None, tc) -> _SplitReason | None:
-        if not existing:
-            return None
-        if tc.id and existing["id"] and tc.id != existing["id"]:
-            return _SplitReason.ID_CHANGED
-        if tc.function and tc.function.arguments:
-            cur_args = existing["function"]["arguments"]
-            if cur_args:
-                try:
-                    json.loads(cur_args)
-                    return _SplitReason.ARGS_COMPLETE
-                except json.JSONDecodeError:
-                    pass
-        if tc.function and tc.function.name:
-            cur_name = existing["function"]["name"]
-            if cur_name and cur_name != tc.function.name:
-                return _SplitReason.NAME_CHANGED
+        entry = self._items.setdefault(
+            index,
+            {"id": "", "name": "", "arguments": ""},
+        )
+
+        function = _get_attr(tc_delta, "function")
+        call_id = _get_attr(tc_delta, "id") or ""
+        name = _get_attr(function, "name") or ""
+        args_fragment = _get_attr(function, "arguments") or ""
+
+        if call_id:
+            entry["id"] = call_id
+        if name:
+            entry["name"] = name
+        if args_fragment:
+            entry["arguments"] += args_fragment
+
+        if args_fragment:
+            return ToolInputDelta(
+                id=entry["id"],
+                name=entry["name"],
+                text=args_fragment,
+            )
         return None
 
-    def _allocate_new_slot(self, raw_idx: int, tc_id: str | None, reason: _SplitReason) -> int:
-        new_idx = max(self._buffer.keys()) + 1 if self._buffer else 0
-        self._index_remap[raw_idx] = new_idx
-        logger.warning(f"tool_call index 复用拆分: raw_idx={raw_idx} -> idx={new_idx}, reason={reason.name}")
-        return new_idx
+    def finalize(self) -> list[ToolCall]:
+        """流结束后生成完整 ToolCall 列表。"""
+        import json
+        calls: list[ToolCall] = []
+        for _, entry in sorted(self._items.items()):
+            if not entry["id"] or not entry["name"]:
+                continue
+            try:
+                parsed = json.loads(entry["arguments"]) if entry["arguments"] else {}
+            except json.JSONDecodeError:
+                logger.warning(
+                    "[accumulator] 工具 %s 的 JSON 参数解析失败: %r",
+                    entry["name"], entry["arguments"][:200],
+                )
+                parsed = None
+            calls.append(ToolCall(id=entry["id"], name=entry["name"], input=parsed))
+        return calls
 
-    def _merge_delta(self, idx: int, tc) -> None:
-        entry = self._buffer[idx]
-        if tc.id:
-            entry["id"] = tc.id
-        if tc.function:
-            if tc.function.name:
-                entry["function"]["name"] = tc.function.name
-            if tc.function.arguments:
-                entry["function"]["arguments"] += tc.function.arguments
-
-
-# ============================================================
-# LLMHandler - 异步版
-# ============================================================
 
 class LLMHandler:
-    """LLM 调用封装，基于 OpenAI SDK 异步客户端"""
+    """OpenAI Chat Completions 异步流式封装。
+
+    正常情况下产出顺序：
+
+        StepStart
+        ReasoningDelta* / TextDelta* / ToolInputDelta*
+        ToolCall*
+        StepFinish
+
+    调用方负责执行 ToolCall，并把工具结果写入自身的事件流和 memory。
+    """
 
     def __init__(
         self,
@@ -200,30 +277,44 @@ class LLMHandler:
         timeout: float = 120.0,
         max_retries: int = 3,
     ):
+        if api_type != "completions":
+            logger.warning(
+                "当前只支持 OpenAI chat completions；忽略 api_type=%s", api_type
+            )
+
         self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
-        self._cancelled = False
+        self._active_stream = None
+        self._active_loop: asyncio.AbstractEventLoop | None = None
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
             timeout=timeout,
             max_retries=max_retries,
         )
-        self._active_stream = None
 
     def cancel(self) -> None:
-        """取消当前请求"""
-        self._cancelled = True
+        """取消当前请求，并尽快关闭正在读取的 HTTP stream。"""
+        stream = self._active_stream
+        if stream is None:
+            return
+        self._active_stream = None
+        loop = self._active_loop
+        if loop is None or loop.is_closed():
+            return
+
+        async def close_stream() -> None:
+            close_result = stream.close()
+            if inspect.isawaitable(close_result):
+                await close_result
+
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(close_stream()))
 
     async def stream(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
-    ) -> AsyncGenerator[StreamDelta | LLMResponse, None]:
-        """异步流式调用 LLM，直接产出 StreamDelta 和 LLMResponse。"""
-        self._cancelled = False
-
+    ) -> AsyncGenerator[LLMEvent, None]:
+        """执行一次 provider turn，并产出 LLMEvent。"""
         llm_log = LLMLogger(self.model)
         llm_log.log_input(messages, tools)
 
@@ -236,68 +327,127 @@ class LLMHandler:
         if tools:
             params["tools"] = tools
 
+        response = None
         try:
+            self._active_loop = asyncio.get_running_loop()
             response = await self._client.chat.completions.create(**params)
-        except Exception as e:
-            llm_log.flush()
-            raise
+            self._active_stream = response
 
-        self._active_stream = response
+            accumulator = _ToolCallAccumulator()
+            usage: dict | None = None
+            finish_reason: str = "stop"
 
-        accumulator = ToolCallAccumulator()
-        content_buffer: list[str] = []
-        reasoning_buffer: list[str] = []
-        usage = None
+            yield StepStart()
 
-        try:
             async for chunk in response:
-                if self._cancelled:
-                    break
+                llm_log.log_chunk(chunk)
 
-                if hasattr(chunk, "model_dump"):
-                    llm_log.log_chunk(chunk.model_dump())
+                # OpenAI 会在最后额外返回一个 usage-only chunk。
+                chunk_usage = normalize_usage(_get_attr(chunk, "usage"))
+                if chunk_usage:
+                    usage = chunk_usage
 
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage = normalize_usage(chunk.usage)
-
-                if not chunk.choices:
+                choices = _get_attr(chunk, "choices", []) or []
+                if not choices:
                     continue
 
-                delta = chunk.choices[0].delta
+                choice = choices[0]
+                delta = _get_attr(choice, "delta")
 
-                if delta.tool_calls:
-                    tc_deltas = [accumulator.feed(tc) for tc in delta.tool_calls]
-                    yield StreamDelta(tool_calls=tc_deltas)
-
-                reasoning = getattr(delta, "reasoning_content", None)
+                # 部分推理模型会把 reasoning 放在 reasoning_content 字段。
+                reasoning = _get_attr(delta, "reasoning_content")
                 if reasoning:
-                    reasoning_buffer.append(reasoning)
-                    yield StreamDelta(reasoning=reasoning)
+                    yield ReasoningDelta(text=reasoning)
 
-                if delta.content:
-                    content_buffer.append(delta.content)
-                    yield StreamDelta(content=delta.content)
+                # 普通 assistant 文本。
+                content = _get_attr(delta, "content")
+                if content:
+                    yield TextDelta(text=content)
+
+                # 工具调用参数的 JSON 流式片段。
+                tc_deltas = _get_attr(delta, "tool_calls") or []
+                for tc_delta in tc_deltas:
+                    event = accumulator.feed(tc_delta)
+                    if event is not None:
+                        yield event
+
+                fr = _get_attr(choice, "finish_reason")
+                if fr:
+                    finish_reason = fr
+
+            # OpenAI Chat 没有 per-tool 结束事件，流结束后统一 finalize。
+            for tc in accumulator.finalize():
+                yield tc
 
             logger.info(
-                f"[completion] 流结束: has_tool_calls={accumulator.has_data}, "
-                f"content_len={len(content_buffer)}, "
-                f"reasoning_len={len(reasoning_buffer)}"
+                "[completion] stream ended: finish_reason=%s has_tool_calls=%s",
+                finish_reason,
+                accumulator.has_data,
             )
 
-            if accumulator.has_data:
-                yield LLMResponse(
-                    content="".join(content_buffer) if content_buffer else None,
-                    reasoning="".join(reasoning_buffer) if reasoning_buffer else None,
-                    tool_calls=accumulator.build(),
-                    usage=usage,
-                )
-            else:
-                if usage:
-                    yield StreamDelta(usage=usage)
+            yield StepFinish(finish_reason=finish_reason, usage=usage)
+
+        except Exception as exc:
+            err = LLMError.classify(exc)
+            yield ProviderError(
+                message=err.message,
+                code=err.code,
+                retryable=err.code not in {"auth_error", "bad_request", "content_filter"},
+            )
         finally:
             self._active_stream = None
-            try:
-                await response.close()
-            except Exception:
-                pass
+            self._active_loop = None
+            if response is not None:
+                close_result = response.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
             llm_log.flush()
+
+
+# 兼容旧测试和旧 adapter 的事件类型。
+@dataclass
+class StreamDelta:
+    """旧版流式 delta。"""
+    content: str | None = None
+    reasoning: str | None = None
+    tool_calls: list | None = None
+    usage: dict | None = None
+    finish_reason: str | None = None
+
+
+@dataclass
+class ToolCallDeltaChunk:
+    """旧版工具调用 delta。"""
+    index: int
+    id: str | None = None
+    name: str | None = None
+    arguments_delta: str | None = None
+
+
+@dataclass
+class LLMResponse:
+    """旧版完整响应对象。"""
+    content: str | None = None
+    reasoning: str | None = None
+    tool_calls: list[Any] = field(default_factory=list)
+    usage: dict | None = None
+    finish_reason: str | None = None
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
+
+
+class ToolCallWrapper:
+    """兼容 OpenAI SDK 形状的旧版 tool_call 包装对象。"""
+
+    def __init__(self, data: dict):
+        self.id = data["id"]
+        self.type = data.get("type", "function")
+        self.function = _FunctionWrapper(data["function"])
+
+
+class _FunctionWrapper:
+    def __init__(self, data: dict):
+        self.name = data["name"]
+        self.arguments = data["arguments"]
