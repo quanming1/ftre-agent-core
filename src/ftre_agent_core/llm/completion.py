@@ -4,20 +4,13 @@ OpenAI Chat Completions 流式客户端。
 事件模型参考 opencode 的 LLMEvent tagged union：
 
   Provider 流式产出：
-    StepStart       一轮 provider 调用开始
     TextDelta       assistant 文本增量
     ReasoningDelta  reasoning 文本增量
     ToolInputDelta  工具参数 JSON 原始片段
     ToolCall        流结束后组装完成的工具调用
     StepFinish      一轮 provider 调用结束，包含 finish_reason 和 usage
 
-  Core 后续注入：
-    ToolResult      工具执行成功结果
-    ToolError       工具执行失败结果
-
-  错误：
-    ProviderError   provider 异常分类后的事件
-
+provider 异常会直接 raise LLMError，由调用方决定是否重试。
 所有事件都是带 type 字段的 dataclass，调用方可以用 isinstance()
 或者 event.type 做分支判断。
 """
@@ -99,12 +92,6 @@ class LLMError(Exception):
 
 # LLM 事件类型
 @dataclass
-class StepStart:
-    """一轮 provider 调用开始。"""
-    type: str = field(default="step-start", init=False)
-
-
-@dataclass
 class TextDelta:
     """assistant 文本增量。"""
     type: str = field(default="text-delta", init=False)
@@ -145,37 +132,9 @@ class StepFinish:
     usage: dict | None = None
 
 
-@dataclass
-class ToolResult:
-    """工具执行成功结果；由 core 注入，不来自 provider。"""
-    type: str = field(default="tool-result", init=False)
-    id: str = ""
-    name: str = ""
-    result: str = ""
-
-
-@dataclass
-class ToolError:
-    """工具执行失败结果；由 core 注入，不来自 provider。"""
-    type: str = field(default="tool-error", init=False)
-    id: str = ""
-    name: str = ""
-    message: str = ""
-
-
-@dataclass
-class ProviderError:
-    """provider 异常分类后的事件。"""
-    type: str = field(default="provider-error", init=False)
-    message: str = ""
-    code: str = "unknown"
-    retryable: bool = False
-
-
 # 统一事件类型别名。
 LLMEvent = (
-    StepStart | TextDelta | ReasoningDelta | ToolInputDelta
-    | ToolCall | StepFinish | ToolResult | ToolError | ProviderError
+    TextDelta | ReasoningDelta | ToolInputDelta | ToolCall | StepFinish
 )
 
 
@@ -265,7 +224,6 @@ class LLMHandler:
 
     正常情况下产出顺序：
 
-        StepStart
         ReasoningDelta* / TextDelta* / ToolInputDelta*
         ToolCall*
         StepFinish
@@ -342,8 +300,6 @@ class LLMHandler:
             usage: dict | None = None
             finish_reason: str = "stop"
 
-            yield StepStart()
-
             async for chunk in response:
                 llm_log.log_chunk(chunk)
 
@@ -393,12 +349,7 @@ class LLMHandler:
             yield StepFinish(finish_reason=finish_reason, usage=usage)
 
         except Exception as exc:
-            err = LLMError.classify(exc)
-            yield ProviderError(
-                message=err.message,
-                code=err.code,
-                retryable=err.code not in {"auth_error", "bad_request", "content_filter"},
-            )
+            raise LLMError.classify(exc) from exc
         finally:
             self._active_stream = None
             self._active_loop = None
