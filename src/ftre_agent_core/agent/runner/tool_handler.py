@@ -1,18 +1,17 @@
 """
-工具执行器和 assistant 消息构造器。
+工具执行器、并发调度器和 assistant 消息构造器。
 
 本模块职责：
   - run_one(): 执行单个工具调用，返回 ToolResult。
-    react_runner._stream_turn() 会用 asyncio.create_task() 调它，
-    因此不会阻塞 LLM 流的消费。
-  - build_assistant_message_from_tool_calls(): 根据 LLMHandler 组装好的
-    ToolCall 对象，构造要写入 memory 的 assistant 原始消息。
+  - spawn(): 为一个 ToolCall 创建并发执行任务，不阻塞 LLM 流消费。
+  - drain(): 取消并回收一组工具任务（用于异常清理）。
+  - gather_results(): 等待全部工具任务、处理取消、按 tool_calls 顺序归并结果。
+  - build_assistant_message(): 根据 ToolCall 列表构造写入 memory 的 assistant 消息。
   - 执行工具中间件 before / after 链。
 
 本模块不负责：
   - 决定何时向调用方 yield 事件。
   - 写入 memory。
-  - 协调多个工具的并发、取消和批量结果补齐。
 """
 from __future__ import annotations
 
@@ -115,9 +114,78 @@ class ToolHandler:
 
         return self._run_after(ctx, result)
 
+    # ── 并发调度 ──────────────────────────────────────────────
+    def spawn(self, call: ToolCall, state: "RunState") -> asyncio.Task:
+        """为一个 ToolCall 创建并发执行任务。立即返回，不在此 await。"""
+        return asyncio.create_task(
+            self.run_one(
+                call_id=call.id,
+                name=call.name,
+                arguments=call.input if call.input is not None else {},
+                state=state,
+                parse_failed=(call.input is None),
+            ),
+            name=f"tool-{call.id}",
+        )
+
+    @staticmethod
+    async def drain(tasks: dict[str, asyncio.Task]) -> None:
+        """取消并等待一组工具任务，用于异常路径的清理。"""
+        for t in tasks.values():
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    async def gather_results(
+        self,
+        tool_calls: list[ToolCall],
+        tasks: dict[str, asyncio.Task],
+        state: "RunState",
+    ) -> tuple[list[ToolResult], bool]:
+        """等待全部工具任务完成，按 tool_calls 顺序返回 (results, cancelled)。
+
+        cancelled 为 True 表示发生了外部取消或有工具被取消，调用方写完 memory
+        后应抛出 CancelledError。任务异常会被归一成 INTERRUPTED 的 ToolResult。
+        """
+        if state.is_cancelled:
+            for t in tasks.values():
+                t.cancel()
+
+        cancelled_externally = False
+        try:
+            raw = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        except asyncio.CancelledError:
+            for t in tasks.values():
+                t.cancel()
+            raw = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            cancelled_externally = True
+
+        finished: dict[str, ToolResult] = {}
+        for call_id, item in zip(tasks.keys(), raw):
+            if isinstance(item, BaseException):
+                interrupted = state.is_cancelled or cancelled_externally
+                finished[call_id] = ToolResult(
+                    call_id=call_id,
+                    name=next((c.name for c in tool_calls if c.id == call_id), call_id),
+                    result="[INTERRUPTED] Tool execution was interrupted.",
+                    status="cancelled" if interrupted else "failed",
+                )
+            else:
+                finished[call_id] = item
+
+        results = [
+            finished.get(c.id) or ToolResult(
+                call_id=c.id, name=c.name,
+                result="[INTERRUPTED] Tool result was lost.", status="failed",
+            )
+            for c in tool_calls
+        ]
+        any_cancelled = any(r.status == "cancelled" for r in results)
+        return results, (cancelled_externally or any_cancelled or state.is_cancelled)
+
     # 构造带 tool_calls 的 assistant 消息。
     @staticmethod
-    def build_assistant_message_from_tool_calls(
+    def build_assistant_message(
         tool_calls: list[ToolCall],
         content: str | None = None,
         reasoning: str | None = None,
