@@ -1,20 +1,17 @@
 """
-Tool 定义 - 基类、参数、装饰器、依赖注入
+Tool 定义：基类、参数定义、装饰器和依赖注入标记。
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Callable, Any, get_type_hints
 from dataclasses import dataclass
+from typing import Any, Callable, get_type_hints
 
 
-# ============================================================
 # 依赖注入标记
-# ============================================================
-
 class Injected:
-    """注入标记。作为参数默认值，标记该参数需要从 ToolRegistry 注入，不暴露给 LLM。"""
+    """标记一个参数需要从 ToolRegistry 的 runtime_context 注入，不暴露给 LLM。"""
 
     def __init__(self, key: str):
         self.key = key
@@ -23,39 +20,39 @@ class Injected:
         return f"Injected({self.key!r})"
 
 
-# ============================================================
-# 参数定义
-# ============================================================
-
+# 工具参数定义
 @dataclass
 class ToolParameter:
-    """工具参数定义"""
+    """单个工具参数的 OpenAI schema 描述。"""
     name: str
-    type: str  # string, number, boolean, array, object
+    type: str  # string / number / boolean / array / object
     description: str
     required: bool = True
     enum: list = None
 
 
-# ============================================================
-# Tool 基类
-# ============================================================
-
+# 工具基类
 class Tool:
     """
-    工具基类
+    工具基类。
 
-    用法：
-    1) 装饰器: @tool() def fn(...) -> str: ...
-    2) 手动构造: Tool(name=..., func=fn, parameters=[...])
-    3) 子类继承: class MyTool(Tool): def _run(self, **kwargs): ...
+    支持三种使用方式：
+    1. 使用 @tool() 装饰普通函数。
+    2. 手动构造 Tool(name=..., func=..., parameters=...)。
+    3. 继承 Tool 并实现 _run()。
     """
 
     name: str = ""
     description: str = ""
     parameters: list[ToolParameter] = []
 
-    def __init__(self, name: str = None, description: str = None, parameters: list[ToolParameter] = None, func: Callable[..., Any] = None):
+    def __init__(
+        self,
+        name: str = None,
+        description: str = None,
+        parameters: list[ToolParameter] = None,
+        func: Callable[..., Any] = None,
+    ):
         if name is not None:
             self.name = name
         if description is not None:
@@ -65,7 +62,7 @@ class Tool:
         self.func = func
 
     def to_openai_dict(self) -> dict:
-        """转换为 OpenAI function calling 格式"""
+        """转换成 OpenAI function calling 工具定义。"""
         properties = {}
         required = []
         for param in self.parameters:
@@ -96,8 +93,24 @@ class Tool:
         return inspect.iscoroutinefunction(self._get_callable())
 
     def execute(self, **kwargs) -> Any:
+        """同步执行工具。
+
+        对异步工具来说，这个方法只适合在没有运行中 event loop 的同步上下文调用。
+        如果已经处在异步上下文中，应该使用 ``await tool_handler.run_one(...)``。
+        run_one() 会对同步工具走线程池，对异步工具直接 await。
+        """
         fn = self._get_callable()
         if inspect.iscoroutinefunction(fn):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and loop.is_running():
+                raise RuntimeError(
+                    f"Tool '{self.name}' is async. "
+                    "Call it via ToolHandler.run_one() inside an async context, "
+                    "not Tool.execute() which is for synchronous callers only."
+                )
             return asyncio.run(fn(**kwargs))
         return fn(**kwargs)
 
@@ -105,12 +118,9 @@ class Tool:
         raise NotImplementedError
 
 
-# ============================================================
 # @tool() 装饰器
-# ============================================================
-
 def tool(name: str = None, description: str = None, parameters: list[ToolParameter] = None):
-    """装饰器：将函数转换为 Tool"""
+    """把普通函数转换成 Tool 对象。"""
     def decorator(func: Callable) -> Tool:
         tool_name = name or func.__name__
         tool_desc = description or func.__doc__ or ""
@@ -120,7 +130,7 @@ def tool(name: str = None, description: str = None, parameters: list[ToolParamet
 
 
 def _infer_parameters(func: Callable) -> list[ToolParameter]:
-    """从函数签名推断参数"""
+    """根据函数签名推断工具参数。"""
     params = []
     sig = inspect.signature(func)
     try:
@@ -141,7 +151,14 @@ def _infer_parameters(func: Callable) -> list[ToolParameter]:
             param_type = _python_type_to_json_type(hints[param_name])
 
         required = param.default is inspect.Parameter.empty
-        params.append(ToolParameter(name=param_name, type=param_type, description=f"参数 {param_name}", required=required))
+        params.append(
+            ToolParameter(
+                name=param_name,
+                type=param_type,
+                description=f"参数 {param_name}",
+                required=required,
+            )
+        )
 
     return params
 
@@ -150,6 +167,7 @@ _TYPE_MAP = {str: "string", int: "number", float: "number", bool: "boolean", lis
 
 
 def _python_type_to_json_type(python_type) -> str:
+    """把 Python 类型映射成 JSON schema 类型。"""
     origin = getattr(python_type, "__origin__", None)
     if origin is list:
         return "array"

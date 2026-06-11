@@ -1,7 +1,7 @@
 """
-Agent 事件定义
+Agent 事件定义。
 
-事件结构：{"type": EventType, "data": <TypedDict>}
+事件统一结构：{"type": EventType, "data": <TypedDict>}
 """
 from enum import Enum
 from typing import Any, TypedDict
@@ -156,20 +156,22 @@ AgentEvent = (
 
 
 def tool_call_streaming_event(chunks: list) -> ToolCallStreamingEvent:
-    """从 ToolCallDeltaChunk 列表构造流式事件"""
+    """从 ToolCallDeltaChunk 列表或 dict 构造流式工具调用事件。"""
+    result = []
+    for c in chunks:
+        if isinstance(c, dict):
+            entry = {k: v for k, v in c.items() if v is not None}
+        else:
+            entry = {k: v for k, v in {
+                "index": c.index,
+                "id": c.id,
+                "name": c.name,
+                "arguments_delta": c.arguments_delta,
+            }.items() if v is not None}
+        result.append(entry)
     return {
         "type": EventType.TOOL_CALL_STREAMING,
-        "data": {
-            "tool_calls": [
-                {k: v for k, v in {
-                    "index": c.index,
-                    "id": c.id,
-                    "name": c.name,
-                    "arguments_delta": c.arguments_delta,
-                }.items() if v is not None}
-                for c in chunks
-            ]
-        }
+        "data": {"tool_calls": result}
     }
 
 
@@ -242,7 +244,7 @@ def reasoning_event(content: str) -> MessageEvent:
 
 
 def reasoning_complete_event(content: str) -> MessageEvent:
-    """一轮 LLM 思考过程的完整文本（chunk 累积），用于持久化和多轮回放"""
+    """一轮 LLM reasoning 的完整文本，用于持久化和多轮回放。"""
     return {"type": EventType.REASONING_COMPLETE, "data": {"content": content}}
 
 
