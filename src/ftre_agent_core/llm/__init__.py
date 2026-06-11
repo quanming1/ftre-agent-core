@@ -1,7 +1,7 @@
 from .completion import (
     LLMHandler,
     LLMError,
-    # 新的统一事件类型
+    # 统一事件类型
     LLMEvent,
     StepStart,
     TextDelta,
@@ -12,11 +12,6 @@ from .completion import (
     ToolResult,
     ToolError,
     ProviderError,
-    # 旧接口兼容类型
-    StreamDelta,
-    ToolCallDeltaChunk,
-    LLMResponse,
-    ToolCallWrapper,
 )
 
 __all__ = [
@@ -32,9 +27,4 @@ __all__ = [
     "ToolResult",
     "ToolError",
     "ProviderError",
-    # 旧接口兼容类型
-    "StreamDelta",
-    "ToolCallDeltaChunk",
-    "LLMResponse",
-    "ToolCallWrapper",
 ]
