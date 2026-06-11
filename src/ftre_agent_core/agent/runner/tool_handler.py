@@ -1,5 +1,18 @@
 """
-ToolHandler - 异步工具调用处理器
+工具执行器和 assistant 消息构造器。
+
+本模块职责：
+  - run_one(): 执行单个工具调用，返回 ToolResult。
+    react_runner._stream_turn() 会用 asyncio.create_task() 调它，
+    因此不会阻塞 LLM 流的消费。
+  - build_assistant_message_from_tool_calls(): 根据 LLMHandler 组装好的
+    ToolCall 对象，构造要写入 memory 的 assistant 原始消息。
+  - 执行工具中间件 before / after 链。
+
+本模块不负责：
+  - 决定何时向调用方 yield 事件。
+  - 写入 memory。
+  - 协调多个工具的并发、取消和批量结果补齐。
 """
 from __future__ import annotations
 
@@ -7,13 +20,9 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING
 
-from ftre_agent_core.agent.event import (
-    AgentEvent,
-    tool_call_event,
-    tool_result_event,
-)
+from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 
@@ -25,11 +34,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ToolResult:
+    """单个工具调用的执行结果。"""
     call_id: str
     name: str
     result: str
     error: str | None = None
-    status: str = "completed"
+    status: str = "completed"   # completed / failed / cancelled
     metadata: dict = field(default_factory=dict)
 
     @property
@@ -42,92 +52,102 @@ class ToolHandler:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
 
-    async def execute(
+    # 执行单个工具调用。
+    async def run_one(
         self,
-        parsed_calls: list[tuple[str, str, dict]],
+        call_id: str,
+        name: str,
+        arguments: dict,
         state: "RunState",
-    ) -> AsyncGenerator[AgentEvent, None]:
-        for call_id, name, arguments in parsed_calls:
-            yield tool_call_event(id=call_id, name=name, arguments=arguments)
+        parse_failed: bool = False,
+    ) -> ToolResult:
+        """执行一个工具调用并返回 ToolResult。
 
-        async def _run_one(call_id: str, name: str, arguments: dict) -> tuple[str, ToolResult]:
-            ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
-            ctx.cancel_token = state.cancel_token
-            ctx.metadata["runtime_context"] = state.runtime_context
-            ctx = self._run_before(ctx)
+        这个方法预期由 asyncio.create_task() 调用，这样多个工具可以并发执行。
+        parse_failed=True 表示模型输出的工具参数 JSON 格式错误，直接返回失败结果。
+        """
+        if parse_failed:
+            return ToolResult(
+                call_id=call_id,
+                name=name,
+                result="[PARSE_ERROR] Tool call arguments were malformed JSON.",
+                error="malformed JSON arguments",
+                status="failed",
+            )
 
-            if ctx.skipped:
-                result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
-                return call_id, self._run_after(ctx, result)
+        ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
+        ctx.cancel_token = state.cancel_token
+        ctx.metadata["runtime_context"] = state.runtime_context
 
-            try:
-                tool = self.registry.get(name)
-                if tool and tool.is_async():
-                    raw = await tool.execute(**ctx.arguments)
-                else:
-                    raw = await asyncio.to_thread(
-                        self.registry.execute, name,
-                        runtime_context=ctx.metadata.get("runtime_context"),
-                        **ctx.arguments
-                    )
-                result = ToolResult(call_id=call_id, name=name, result=str(raw))
-            except asyncio.CancelledError:
-                result = ToolResult(call_id=call_id, name=name, result="[用户取消]", status="cancelled")
-            except Exception as exc:
-                result = ToolResult(call_id=call_id, name=name, result=str(exc), error=str(exc), status="failed")
+        # 执行 before 中间件链。
+        ctx = self._run_before(ctx)
 
-            return call_id, self._run_after(ctx, result)
+        if ctx.skipped:
+            result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
+            return self._run_after(ctx, result)
 
-        tasks = [
-            asyncio.create_task(_run_one(cid, name, args))
-            for cid, name, args in parsed_calls
-        ]
-        task_to_call_id = {t: cid for t, (cid, _, _) in zip(tasks, parsed_calls)}
-        call_id_to_name = {cid: name for cid, name, _ in parsed_calls}
-
-        pending = set(tasks)
-        yielded = set()
-        while pending:
-            done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
-
-            if state.cancel_token.is_cancelled():
-                for t in pending:
-                    t.cancel()
-                remaining = set(pending)
-                if remaining:
-                    await asyncio.gather(*remaining, return_exceptions=True)
-                for t in done | remaining:
-                    cid = task_to_call_id[t]
-                    if cid in yielded:
-                        continue
-                    yielded.add(cid)
-                    yield tool_result_event(
-                        id=cid, name=call_id_to_name[cid],
-                        result="[用户取消]", status="cancelled",
-                    )
-                return
-
-            for t in done:
-                cid = task_to_call_id[t]
-                if cid in yielded:
-                    continue
-                yielded.add(cid)
-                try:
-                    call_id, result = await t
-                except asyncio.CancelledError:
-                    yield tool_result_event(
-                        id=cid, name=call_id_to_name[cid],
-                        result="[用户取消]", status="cancelled",
-                    )
-                    continue
-                yield tool_result_event(
-                    id=call_id, name=result.name, result=result.result,
-                    error=result.error, status=result.status,
+        try:
+            tool = self.registry.get(name)
+            if tool is not None and tool.is_async():
+                # 异步工具必须直接 await 底层协程函数，不能走 Tool.execute()。
+                # Tool.execute() 面向同步调用方，会使用 asyncio.run()。
+                raw = await tool._get_callable()(**ctx.arguments)
+            else:
+                raw = await asyncio.to_thread(
+                    self.registry.execute,
+                    name,
+                    runtime_context=ctx.metadata.get("runtime_context"),
+                    **ctx.arguments,
                 )
-                if result.cancelled:
-                    for t2 in pending:
-                        t2.cancel()
+            result = ToolResult(call_id=call_id, name=name, result=str(raw))
+        except asyncio.CancelledError:
+            result = ToolResult(
+                call_id=call_id, name=name,
+                result="[CANCELLED] Tool execution was cancelled.",
+                status="cancelled",
+            )
+        except Exception as exc:
+            logger.warning("[tool] %s failed: %s", name, exc)
+            result = ToolResult(
+                call_id=call_id, name=name,
+                result=str(exc), error=str(exc), status="failed",
+            )
 
+        return self._run_after(ctx, result)
+
+    # 构造带 tool_calls 的 assistant 消息。
+    @staticmethod
+    def build_assistant_message_from_tool_calls(
+        tool_calls: list[ToolCall],
+        content: str | None = None,
+        reasoning: str | None = None,
+    ) -> dict:
+        """构造要写入 memory.add_raw() 的 assistant 原始消息。
+
+        assistant 消息只包含 tool_calls；对应的 role="tool" 结果消息由
+        react_runner 在所有工具完成后统一写入。
+        """
+        msg: dict = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.input, ensure_ascii=False)
+                        if tc.input is not None else "{}",
+                    },
+                }
+                for tc in tool_calls
+            ],
+        }
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        return msg
+
+    # 工具中间件
     def _run_before(self, ctx: ToolContext) -> ToolContext:
         for mw in self.registry.middlewares:
             ctx = mw.before(ctx)
@@ -139,36 +159,3 @@ class ToolHandler:
         for mw in reversed(self.registry.middlewares):
             result = mw.after(ctx, result)
         return result
-
-    def parse_tool_call(self, tool_call) -> tuple[str, str, dict | None]:
-        raw = tool_call.function.arguments
-        try:
-            return (tool_call.id, tool_call.function.name, json.loads(raw))
-        except json.JSONDecodeError as e:
-            logger.warning(
-                f"[parse_tool_call] JSON 解析失败: tool={tool_call.function.name}, "
-                f"error={e}, len={len(raw)}, raw[:200]={raw[:200]!r}"
-            )
-            return (tool_call.id, tool_call.function.name, None)
-
-    @staticmethod
-    def build_assistant_message(response) -> dict:
-        msg: dict = {
-            "role": "assistant",
-            "content": response.content if response.content else None,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in response.tool_calls
-            ],
-        }
-        reasoning = getattr(response, "reasoning", None)
-        if reasoning:
-            msg["reasoning_content"] = reasoning
-        return msg
