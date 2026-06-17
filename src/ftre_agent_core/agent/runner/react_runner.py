@@ -283,6 +283,8 @@ class ReActRunner:
                 return
             # 无文本但模型仍在思考或流被截断 → 继续下一轮
             if full_reasoning or finish_reason == "length":
+                if full_reasoning:
+                    self.agent.memory.add_assistant("", reasoning=full_reasoning)
                 return
             # 真正空 turn：无文本、无推理、无工具调用
             yield done_event(success=True, reason=DoneReason.COMPLETED)
