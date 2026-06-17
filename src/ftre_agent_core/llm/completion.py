@@ -139,7 +139,7 @@ class ToolCall:
 class StepFinish:
     """一轮 provider 调用结束。"""
     type: str = field(default="step-finish", init=False)
-    finish_reason: str = "stop"
+    finish_reason: str = "unknown"
     usage: dict | None = None
 
 
@@ -306,7 +306,7 @@ class LLMHandler:
 
             accumulator = _ToolCallAccumulator()
             usage: dict | None = None
-            finish_reason: str = "stop"
+            finish_reason: str = "unknown"
 
             async for chunk in response:
                 if self._cancelled:
