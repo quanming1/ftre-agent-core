@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
+from ftre_agent_core.agent.event import AgentEvent
 
 if TYPE_CHECKING:
     from .react_runner import RunState
@@ -40,6 +41,7 @@ class ToolResult:
     error: str | None = None
     status: str = "completed"   # completed / failed / cancelled
     metadata: dict = field(default_factory=dict)
+    event: AgentEvent | None = None  # 工具返回了 AgentEvent（非 str）时设此字段
 
     @property
     def cancelled(self) -> bool:
@@ -98,7 +100,10 @@ class ToolHandler:
                     runtime_context=ctx.metadata.get("runtime_context"),
                     **ctx.arguments,
                 )
-            result = ToolResult(call_id=call_id, name=name, result=str(raw))
+            if isinstance(raw, AgentEvent):
+                result = ToolResult(call_id=call_id, name=name, result="", event=raw)
+            else:
+                result = ToolResult(call_id=call_id, name=name, result=str(raw))
         except asyncio.CancelledError:
             result = ToolResult(
                 call_id=call_id, name=name,

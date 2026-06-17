@@ -298,12 +298,28 @@ class ReActRunner:
         )
         events: list[AgentEvent] = []
         for tc, result in zip(tool_calls, results):
-            self.agent.memory.add_tool_result(tc.id, result.result)
-            events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
-            events.append(tool_result_event(
-                id=result.call_id, name=result.name, result=result.result,
-                error=result.error, status=result.status,
-            ))
+            if result.event is not None:
+                # 工具返回了 AgentEvent → 写入 tool_result + event 到 memory
+                self.agent.memory.add_tool_result(
+                    tc.id, result.result or f"[{tc.name}] 已完成"
+                )
+                self.agent.memory.add_raw(result.event.to_openai_message())
+                # yield: tool_call + tool_result + event（LLM 下一轮看到 event）
+                events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
+                events.append(tool_result_event(
+                    id=result.call_id, name=result.name,
+                    result=result.result or f"[{tc.name}] 已完成",
+                    error=result.error, status=result.status,
+                ))
+                events.append(result.event)
+            else:
+                # 正常 str 路径
+                self.agent.memory.add_tool_result(tc.id, result.result)
+                events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
+                events.append(tool_result_event(
+                    id=result.call_id, name=result.name, result=result.result,
+                    error=result.error, status=result.status,
+                ))
 
         for event in events:
             yield event
