@@ -3,8 +3,7 @@ Agent 事件定义。
 
 事件统一结构：{"type": EventType, "data": <TypedDict>}
 
-事件现已从裸 dict 迁移为 @dataclass 子类，通过 to_dict() 保持序列化兼容，
-并通过 __getitem__/get 保持 dict 风格访问的向后兼容。
+事件现已从裸 dict 迁移为 @dataclass 子类，通过 to_dict() 保持序列化兼容。
 """
 from __future__ import annotations
 
@@ -118,25 +117,6 @@ class AgentEvent:
     def _data_dict(self) -> dict:
         """子类覆盖：返回 data 段内容。"""
         raise NotImplementedError("Subclass must implement _data_dict()")
-
-    # ── 向后兼容：dict 风格访问 ──────────────────────────────
-
-    def __getitem__(self, key: str):
-        if key == "type":
-            return self.type
-        if key == "data":
-            return self._data_dict()
-        raise KeyError(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """模拟 dict.get()，向后兼容。"""
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-    def __contains__(self, key: str) -> bool:
-        return key in ("type", "data")
 
 
 # ─── 具体事件子类 ────────────────────────────────────────────────
