@@ -46,8 +46,8 @@ class TestImportReachability:
         from ftre_agent_core.agent.event import (
             EventType, DoneReason, AgentEvent,
             tool_call_event, tool_result_event,
-            message_event, reasoning_event, reasoning_complete_event,
-            message_complete_event, done_event, usage_update_event,
+            assistant_message_event, reasoning_event, reasoning_complete_event,
+            assistant_message_complete_event, done_event, usage_update_event,
             error_event, retry_event, tool_call_streaming_event,
         )
         assert EventType is not None
@@ -185,11 +185,11 @@ class TestEventConstructors:
         assert e.error == "fail"
         assert e.status == "failed"
 
-    def test_message_event(self):
-        from ftre_agent_core.agent.event import message_event, EventType, MessageEvent
-        e = message_event("hello")
-        assert isinstance(e, MessageEvent)
-        assert e.type == EventType.MESSAGE
+    def test_assistant_message_event(self):
+        from ftre_agent_core.agent.event import assistant_message_event, EventType, AssistantMessageEvent
+        e = assistant_message_event("hello")
+        assert isinstance(e, AssistantMessageEvent)
+        assert e.type == EventType.ASSISTANT_MESSAGE
         assert e.content == "hello"
 
     def test_reasoning_event(self):
@@ -238,11 +238,11 @@ class TestEventConstructors:
         assert isinstance(e, ReasoningCompleteEvent)
         assert e.type == EventType.REASONING_COMPLETE
 
-    def test_message_complete_event(self):
-        from ftre_agent_core.agent.event import message_complete_event, EventType, MessageCompleteEvent
-        e = message_complete_event("full message")
-        assert isinstance(e, MessageCompleteEvent)
-        assert e.type == EventType.MESSAGE_COMPLETE
+    def test_assistant_message_complete_event(self):
+        from ftre_agent_core.agent.event import assistant_message_complete_event, EventType, AssistantMessageCompleteEvent
+        e = assistant_message_complete_event("full message")
+        assert isinstance(e, AssistantMessageCompleteEvent)
+        assert e.type == EventType.ASSISTANT_MESSAGE_COMPLETE
 
 
 # ─── 5. 已删除项确认 ──────────────────────────────────────────
@@ -340,15 +340,15 @@ class TestAgentEventType:
         assert AgentEventDict is dict
 
     def test_agent_event_to_dict(self):
-        from ftre_agent_core.agent.event import message_event, EventType
-        e = message_event("hello")
+        from ftre_agent_core.agent.event import assistant_message_event, EventType
+        e = assistant_message_event("hello")
         d = e.to_dict()
         assert d == {"type": EventType.MESSAGE, "data": {"content": "hello"}}
 
     def test_agent_event_from_dict(self):
-        from ftre_agent_core.agent.event import AgentEvent, MessageEvent
-        e = AgentEvent.from_dict({"type": "message", "data": {"content": "world"}})
-        assert isinstance(e, MessageEvent)
+        from ftre_agent_core.agent.event import AgentEvent, AssistantMessageEvent
+        e = AgentEvent.from_dict({"type": "assistant_message", "data": {"content": "world"}})
+        assert isinstance(e, AssistantMessageEvent)
         assert e.content == "world"
 
     def test_agent_event_no_dict_access(self):
