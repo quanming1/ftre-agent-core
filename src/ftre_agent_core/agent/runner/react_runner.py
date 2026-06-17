@@ -34,10 +34,10 @@ from .tool_handler import ToolHandler
 from ..event import (
     DoneReason,
     AgentEvent,
-    message_event,
+    assistant_message_event,
     reasoning_event,
     reasoning_complete_event,
-    message_complete_event,
+    assistant_message_complete_event,
     done_event,
     usage_update_event,
     error_event,
@@ -235,7 +235,7 @@ class ReActRunner:
 
                 if isinstance(event, TextDelta):
                     text_parts.append(event.text)
-                    yield message_event(content=event.text)
+                    yield assistant_message_event(content=event.text)
 
                 elif isinstance(event, ReasoningDelta):
                     reasoning_parts.append(event.text)
@@ -269,7 +269,7 @@ class ReActRunner:
         if full_reasoning:
             yield reasoning_complete_event(content=full_reasoning)
         if full_text:
-            yield message_complete_event(content=full_text)
+            yield assistant_message_complete_event(content=full_text)
 
         # 阶段 3：没有工具调用的纯文本 turn。
         if not tool_calls:
@@ -297,29 +297,30 @@ class ReActRunner:
             )
         )
         events: list[AgentEvent] = []
+        # 工具返回的 UserMessageEvent 需在所有 tool_result 之后追加，
+        # 否则会打断 assistant(tool_calls) → tool(...) → tool(...) 顺序，
+        # 导致 provider 报 "tool call result does not follow tool call"。
+        pending_user_messages: list[AgentEvent] = []
+
         for tc, result in zip(tool_calls, results):
+            # 写入 tool_result 到 memory
+            self.agent.memory.add_tool_result(
+                tc.id, result.result or f"[{tc.name}] 已完成"
+            )
+            # yield tool_call + tool_result
+            events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
+            events.append(tool_result_event(
+                id=result.call_id, name=result.name, result=result.result or f"[{tc.name}] 已完成",
+                error=result.error, status=result.status,
+            ))
+            # 收集 UserMessageEvent（延后追加）
             if result.event is not None:
-                # 工具返回了 AgentEvent → 写入 tool_result + event 到 memory
-                self.agent.memory.add_tool_result(
-                    tc.id, result.result or f"[{tc.name}] 已完成"
-                )
-                self.agent.memory.add_raw(result.event.to_openai_message())
-                # yield: tool_call + tool_result + event（LLM 下一轮看到 event）
-                events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
-                events.append(tool_result_event(
-                    id=result.call_id, name=result.name,
-                    result=result.result or f"[{tc.name}] 已完成",
-                    error=result.error, status=result.status,
-                ))
-                events.append(result.event)
-            else:
-                # 正常 str 路径
-                self.agent.memory.add_tool_result(tc.id, result.result)
-                events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
-                events.append(tool_result_event(
-                    id=result.call_id, name=result.name, result=result.result,
-                    error=result.error, status=result.status,
-                ))
+                pending_user_messages.append(result.event)
+
+        # 统一追加 UserMessageEvent：确保在 tool_result 之后，消息顺序合法
+        for ev in pending_user_messages:
+            self.agent.memory.add_raw(ev.to_openai_message())
+            events.append(ev)
 
         for event in events:
             yield event

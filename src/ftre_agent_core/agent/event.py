@@ -15,8 +15,8 @@ from typing import Any, TypedDict
 class EventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    MESSAGE = "message"
-    MESSAGE_COMPLETE = "message_complete"
+    ASSISTANT_MESSAGE = "assistant_message"
+    ASSISTANT_MESSAGE_COMPLETE = "assistant_message_complete"
     REASONING = "reasoning"
     REASONING_COMPLETE = "reasoning_complete"
     ERROR = "error"
@@ -52,11 +52,11 @@ class ToolResultData(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
-class MessageData(TypedDict):
+class AssistantMessageData(TypedDict):
     content: str
 
 
-class MessageCompleteData(TypedDict):
+class AssistantMessageCompleteData(TypedDict):
     content: str
 
 
@@ -163,22 +163,22 @@ class ToolResultEvent(AgentEvent):
 
 
 @dataclass
-class MessageEvent(AgentEvent):
+class AssistantMessageEvent(AgentEvent):
     content: str
 
     def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.MESSAGE)
+        object.__setattr__(self, 'type', EventType.ASSISTANT_MESSAGE)
 
     def _data_dict(self) -> dict:
         return {"content": self.content}
 
 
 @dataclass
-class MessageCompleteEvent(AgentEvent):
+class AssistantMessageCompleteEvent(AgentEvent):
     content: str
 
     def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.MESSAGE_COMPLETE)
+        object.__setattr__(self, 'type', EventType.ASSISTANT_MESSAGE_COMPLETE)
 
     def _data_dict(self) -> dict:
         return {"content": self.content}
@@ -312,10 +312,10 @@ def _from_type(t: str, data: dict) -> AgentEvent:
             error_code=data.get("error_code"),
             metadata=data.get("metadata"),
         )
-    elif t == EventType.MESSAGE:
-        return MessageEvent(content=data.get("content", ""))
-    elif t == EventType.MESSAGE_COMPLETE:
-        return MessageCompleteEvent(content=data.get("content", ""))
+    elif t == EventType.ASSISTANT_MESSAGE:
+        return AssistantMessageEvent(content=data.get("content", ""))
+    elif t == EventType.ASSISTANT_MESSAGE_COMPLETE:
+        return AssistantMessageCompleteEvent(content=data.get("content", ""))
     elif t == EventType.REASONING:
         return ReasoningEvent(content=data.get("content", ""))
     elif t == EventType.REASONING_COMPLETE:
@@ -395,8 +395,8 @@ def tool_result_event(
     )
 
 
-def message_event(content: str) -> AgentEvent:
-    return MessageEvent(content=content)
+def assistant_message_event(content: str) -> AgentEvent:
+    return AssistantMessageEvent(content=content)
 
 
 def reasoning_event(content: str) -> AgentEvent:
@@ -408,8 +408,8 @@ def reasoning_complete_event(content: str) -> AgentEvent:
     return ReasoningCompleteEvent(content=content)
 
 
-def message_complete_event(content: str) -> AgentEvent:
-    return MessageCompleteEvent(content=content)
+def assistant_message_complete_event(content: str) -> AgentEvent:
+    return AssistantMessageCompleteEvent(content=content)
 
 
 def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> AgentEvent:
