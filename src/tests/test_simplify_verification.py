@@ -317,12 +317,39 @@ class TestToolBaseStillWorks:
 # ─── 7. AgentEvent 类型 ──────────────────────────────────────
 
 class TestAgentEventType:
-    """AgentEvent 现在是 dict 别名"""
+    """AgentEvent 已从 dict 别名升级为 dataclass 基类"""
 
-    def test_agent_event_is_dict(self):
-        from ftre_agent_core.agent.event import AgentEvent
-        # AgentEvent 应该是 dict 类型别名
-        assert AgentEvent is dict
+    def test_agent_event_is_class(self):
+        from ftre_agent_core.agent.event import AgentEvent, AgentEventDict
+        # AgentEvent 现在是 dataclass 基类（不再是 dict 别名）
+        assert isinstance(AgentEvent, type)
+        assert AgentEvent is not dict
+        # AgentEventDict 保留作为向后兼容别名
+        assert AgentEventDict is dict
+
+    def test_agent_event_to_dict(self):
+        from ftre_agent_core.agent.event import message_event, EventType
+        e = message_event("hello")
+        d = e.to_dict()
+        assert d == {"type": EventType.MESSAGE, "data": {"content": "hello"}}
+
+    def test_agent_event_from_dict(self):
+        from ftre_agent_core.agent.event import AgentEvent, EventType
+        e = AgentEvent.from_dict({"type": EventType.MESSAGE, "data": {"content": "world"}})
+        assert e["type"] == EventType.MESSAGE
+        assert e["data"]["content"] == "world"
+
+    def test_agent_event_dict_backward_compat(self):
+        """从构造函数得到的实例仍支持 event['type'] 和 event['data'] 访问"""
+        from ftre_agent_core.agent.event import done_event, EventType, DoneReason
+        e = done_event(success=True, reason=DoneReason.COMPLETED)
+        # dict-style access 仍然有效
+        assert e["type"] == EventType.DONE
+        assert e["data"]["success"] is True
+        assert e["data"]["reason"] == DoneReason.COMPLETED
+        # .get() 也仍然有效
+        assert e.get("type") == EventType.DONE
+        assert e.get("data", {})["success"] is True
 
 
 # ─── 8. ftre 后端引用无断裂 ──────────────────────────────────
