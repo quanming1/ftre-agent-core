@@ -21,6 +21,7 @@ from .event import (
     RetryEvent,
     ToolCallStreamingEvent,
     UsageUpdateEvent,
+    UserMessageEvent,
 )
 from .runner import (
     RunState,
@@ -53,6 +54,7 @@ __all__ = [
     "RetryEvent",
     "ToolCallStreamingEvent",
     "UsageUpdateEvent",
+    "UserMessageEvent",
     # Runner
     "RunState",
     "RunStatus",
