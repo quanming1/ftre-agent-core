@@ -24,6 +24,7 @@ class EventType(str, Enum):
     DONE = "done"
     TOOL_CALL_STREAMING = "tool_call_streaming"
     USAGE_UPDATE = "usage_update"
+    USER_MESSAGE = "user_message"
 
 
 class DoneReason(str, Enum):
@@ -269,6 +270,28 @@ class UsageUpdateEvent(AgentEvent):
         return {"usage": self.usage}
 
 
+@dataclass
+class UserMessageEvent(AgentEvent):
+    """工具注入的 user message：LLM 可见，前端隐藏。
+
+    Fields:
+        content: str（文字）或 list[dict]（多模态 image_url）
+        metadata: dict，默认 {"hide": True}
+    """
+    content: str | list[dict]
+    metadata: dict[str, Any] = field(default_factory=lambda: {"hide": True})
+
+    def __post_init__(self):
+        object.__setattr__(self, 'type', EventType.USER_MESSAGE)
+
+    def to_openai_message(self) -> dict:
+        """转为 OpenAI 格式 user message，可直接追加到 memory。"""
+        return {"role": "user", "content": self.content}
+
+    def _data_dict(self) -> dict:
+        return {"content": self.content, "metadata": self.metadata}
+
+
 # ─── _from_type 分发工厂 ─────────────────────────────────────────
 
 def _from_type(t: str, data: dict) -> AgentEvent:
@@ -319,6 +342,11 @@ def _from_type(t: str, data: dict) -> AgentEvent:
         return ToolCallStreamingEvent(tool_calls=data.get("tool_calls", []))
     elif t == EventType.USAGE_UPDATE:
         return UsageUpdateEvent(usage=data.get("usage", {}))
+    elif t == EventType.USER_MESSAGE:
+        return UserMessageEvent(
+            content=data.get("content", ""),
+            metadata=data.get("metadata", {"hide": True}),
+        )
     else:
         raise ValueError(f"Unknown event type: {t!r}")
 
@@ -390,6 +418,13 @@ def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> 
 
 def usage_update_event(usage: dict) -> AgentEvent:
     return UsageUpdateEvent(usage=usage)
+
+
+def user_message_event(
+    content: str | list[dict], metadata: dict[str, Any] | None = None
+) -> UserMessageEvent:
+    """构造 UserMessageEvent。metadata.hide=True 表示前端不渲染。"""
+    return UserMessageEvent(content=content, metadata=metadata or {"hide": True})
 
 
 def error_event(message: str, code: str = "unknown") -> AgentEvent:
