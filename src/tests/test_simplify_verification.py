@@ -161,76 +161,88 @@ class TestEventTypeEnum:
 # ─── 4. 事件构造函数 ──────────────────────────────────────────
 
 class TestEventConstructors:
-    """每个构造函数产出正确的 type + data 结构"""
+    """每个构造函数产出正确的 dataclass 实例"""
 
     def test_tool_call_event(self):
-        from ftre_agent_core.agent.event import tool_call_event, EventType
+        from ftre_agent_core.agent.event import tool_call_event, EventType, ToolCallEvent
         e = tool_call_event(id="c1", name="bash", arguments={"command": "ls"})
-        assert e["type"] == EventType.TOOL_CALL
-        assert e["data"]["id"] == "c1"
-        assert e["data"]["name"] == "bash"
+        assert isinstance(e, ToolCallEvent)
+        assert e.type == EventType.TOOL_CALL
+        assert e.tool_id == "c1"
+        assert e.tool_name == "bash"
 
     def test_tool_result_event(self):
-        from ftre_agent_core.agent.event import tool_result_event, EventType
+        from ftre_agent_core.agent.event import tool_result_event, EventType, ToolResultEvent
         e = tool_result_event(id="c1", name="bash", result="file1\nfile2")
-        assert e["type"] == EventType.TOOL_RESULT
-        assert e["data"]["status"] == "completed"
+        assert isinstance(e, ToolResultEvent)
+        assert e.type == EventType.TOOL_RESULT
+        assert e.status == "completed"
 
     def test_tool_result_event_with_error(self):
-        from ftre_agent_core.agent.event import tool_result_event
+        from ftre_agent_core.agent.event import tool_result_event, ToolResultEvent
         e = tool_result_event(id="c1", name="bash", result="err", error="fail", status="failed")
-        assert e["data"]["error"] == "fail"
-        assert e["data"]["status"] == "failed"
+        assert isinstance(e, ToolResultEvent)
+        assert e.error == "fail"
+        assert e.status == "failed"
 
     def test_message_event(self):
-        from ftre_agent_core.agent.event import message_event, EventType
+        from ftre_agent_core.agent.event import message_event, EventType, MessageEvent
         e = message_event("hello")
-        assert e["type"] == EventType.MESSAGE
-        assert e["data"]["content"] == "hello"
+        assert isinstance(e, MessageEvent)
+        assert e.type == EventType.MESSAGE
+        assert e.content == "hello"
 
     def test_reasoning_event(self):
-        from ftre_agent_core.agent.event import reasoning_event, EventType
+        from ftre_agent_core.agent.event import reasoning_event, EventType, ReasoningEvent
         e = reasoning_event("thinking...")
-        assert e["type"] == EventType.REASONING
+        assert isinstance(e, ReasoningEvent)
+        assert e.type == EventType.REASONING
 
     def test_done_event(self):
-        from ftre_agent_core.agent.event import done_event, EventType, DoneReason
+        from ftre_agent_core.agent.event import done_event, EventType, DoneReason, DoneEvent
         e = done_event(success=True, reason=DoneReason.COMPLETED)
-        assert e["type"] == EventType.DONE
-        assert e["data"]["success"] is True
-        assert e["data"]["reason"] == DoneReason.COMPLETED
+        assert isinstance(e, DoneEvent)
+        assert e.type == EventType.DONE
+        assert e.success is True
+        assert e.reason == DoneReason.COMPLETED
 
     def test_done_event_with_usage(self):
-        from ftre_agent_core.agent.event import done_event, DoneReason
+        from ftre_agent_core.agent.event import done_event, DoneReason, DoneEvent
         e = done_event(success=True, reason=DoneReason.COMPLETED, usage={"prompt_tokens": 100})
-        assert e["data"]["usage"]["prompt_tokens"] == 100
+        assert isinstance(e, DoneEvent)
+        assert e.usage["prompt_tokens"] == 100
 
     def test_error_event(self):
-        from ftre_agent_core.agent.event import error_event, EventType
+        from ftre_agent_core.agent.event import error_event, EventType, ErrorEvent
         e = error_event(message="boom", code="timeout")
-        assert e["type"] == EventType.ERROR
-        assert e["data"]["code"] == "timeout"
+        assert isinstance(e, ErrorEvent)
+        assert e.type == EventType.ERROR
+        assert e.code == "timeout"
 
     def test_retry_event(self):
-        from ftre_agent_core.agent.event import retry_event, EventType
+        from ftre_agent_core.agent.event import retry_event, EventType, RetryEvent
         e = retry_event(code="timeout", message="retrying", attempt=1, max_attempts=3)
-        assert e["type"] == EventType.RETRY
-        assert e["data"]["attempt"] == 1
+        assert isinstance(e, RetryEvent)
+        assert e.type == EventType.RETRY
+        assert e.attempt == 1
 
     def test_usage_update_event(self):
-        from ftre_agent_core.agent.event import usage_update_event, EventType
+        from ftre_agent_core.agent.event import usage_update_event, EventType, UsageUpdateEvent
         e = usage_update_event({"total_tokens": 500})
-        assert e["type"] == EventType.USAGE_UPDATE
+        assert isinstance(e, UsageUpdateEvent)
+        assert e.type == EventType.USAGE_UPDATE
 
     def test_reasoning_complete_event(self):
-        from ftre_agent_core.agent.event import reasoning_complete_event, EventType
+        from ftre_agent_core.agent.event import reasoning_complete_event, EventType, ReasoningCompleteEvent
         e = reasoning_complete_event("full reasoning text")
-        assert e["type"] == EventType.REASONING_COMPLETE
+        assert isinstance(e, ReasoningCompleteEvent)
+        assert e.type == EventType.REASONING_COMPLETE
 
     def test_message_complete_event(self):
-        from ftre_agent_core.agent.event import message_complete_event, EventType
+        from ftre_agent_core.agent.event import message_complete_event, EventType, MessageCompleteEvent
         e = message_complete_event("full message")
-        assert e["type"] == EventType.MESSAGE_COMPLETE
+        assert isinstance(e, MessageCompleteEvent)
+        assert e.type == EventType.MESSAGE_COMPLETE
 
 
 # ─── 5. 已删除项确认 ──────────────────────────────────────────
@@ -334,22 +346,20 @@ class TestAgentEventType:
         assert d == {"type": EventType.MESSAGE, "data": {"content": "hello"}}
 
     def test_agent_event_from_dict(self):
-        from ftre_agent_core.agent.event import AgentEvent, EventType
-        e = AgentEvent.from_dict({"type": EventType.MESSAGE, "data": {"content": "world"}})
-        assert e["type"] == EventType.MESSAGE
-        assert e["data"]["content"] == "world"
+        from ftre_agent_core.agent.event import AgentEvent, MessageEvent
+        e = AgentEvent.from_dict({"type": "message", "data": {"content": "world"}})
+        assert isinstance(e, MessageEvent)
+        assert e.content == "world"
 
-    def test_agent_event_dict_backward_compat(self):
-        """从构造函数得到的实例仍支持 event['type'] 和 event['data'] 访问"""
-        from ftre_agent_core.agent.event import done_event, EventType, DoneReason
+    def test_agent_event_no_dict_access(self):
+        """AgentEvent 实例不再支持 dict 风格访问"""
+        from ftre_agent_core.agent.event import done_event, DoneReason
+        import pytest
         e = done_event(success=True, reason=DoneReason.COMPLETED)
-        # dict-style access 仍然有效
-        assert e["type"] == EventType.DONE
-        assert e["data"]["success"] is True
-        assert e["data"]["reason"] == DoneReason.COMPLETED
-        # .get() 也仍然有效
-        assert e.get("type") == EventType.DONE
-        assert e.get("data", {})["success"] is True
+        with pytest.raises(TypeError):
+            _ = e["type"]
+        with pytest.raises(AttributeError):
+            _ = e.get("type")
 
 
 # ─── 8. ftre 后端引用无断裂 ──────────────────────────────────
