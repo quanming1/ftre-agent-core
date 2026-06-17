@@ -72,6 +72,17 @@ class LLMError(Exception):
             if code:
                 return LLMError(message=str(exc), code=code)
 
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None) if response is not None else None
+        if status_code == 400:
+            return LLMError(message=str(exc), code="bad_request")
+
+        message_lower = str(exc).lower()
+        if "invalidparameter" in message_lower or "invalid parameter" in message_lower:
+            return LLMError(message=str(exc), code="bad_request")
+
         # 按异常类型映射
         for exc_type, code in LLMError._TYPE_MAP.items():
             if isinstance(exc, exc_type):

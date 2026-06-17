@@ -19,6 +19,7 @@ memory 写入和事件 yield。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -45,12 +46,31 @@ from ..event import (
     tool_call_streaming_event,
     tool_call_event,
     tool_result_event,
+    user_message_event,
 )
 
 if TYPE_CHECKING:
     from ..react import ReActAgent
 
 logger = logging.getLogger(__name__)
+
+LENGTH_CONTINUATION_PROMPT = (
+    "输出长度达到上限。请从刚才中断的位置继续，不要重述已经说过的内容，也不要道歉。"
+)
+
+FINALIZATION_RETRY_PROMPT = (
+    "请根据上面的对话，直接给出回复用户的最终内容。"
+)
+
+EMPTY_FINAL_RESPONSE_MESSAGE = (
+    "模型多次重试后仍未生成可见的最终文本回复。"
+)
+
+MAX_EMPTY_RESPONSE_RETRIES = 2
+
+ACTIVE_CONTINUATION_PROMPT = (
+    "请继续完成用户的请求。需要时使用工具，只有在任务真正完成后才停止。"
+)
 
 
 # 运行状态
@@ -73,6 +93,9 @@ class RunState:
     error: str | None = None
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     runtime_context: dict = field(default_factory=dict)
+    empty_content_retries: int = 0
+    force_no_tools_once: bool = False
+    finalization_retrying: bool = False
 
     @property
     def is_cancelled(self) -> bool:
@@ -87,6 +110,9 @@ class RunState:
         self.iteration = 0
         self.error = None
         self.cancel_token = CancellationToken()
+        self.empty_content_retries = 0
+        self.force_no_tools_once = False
+        self.finalization_retrying = False
 
     def cancel(self) -> None:
         if self.status != RunStatus.RUNNING:
@@ -164,7 +190,8 @@ class ReActRunner:
           - 有工具调用，状态保持 RUNNING，外层循环继续下一轮。
         """
         messages = self.agent.memory.get_messages()
-        tools = self.agent.tools.to_openai_tools() or None
+        tools = None if self.state.force_no_tools_once else self.agent.tools.to_openai_tools() or None
+        self.state.force_no_tools_once = False
         max_attempts = 1 + self.agent.max_retries
 
         for attempt in range(max_attempts):
@@ -183,7 +210,7 @@ class ReActRunner:
                 err = exc if isinstance(exc, LLMError) else LLMError.classify(exc)
                 is_last = attempt >= max_attempts - 1
                 logger.warning(
-                    "LLM call failed [%s] %s (attempt %d/%d)",
+                    "LLM 调用失败 [%s] %s (第 %d/%d 次尝试)",
                     err.code, err.message[:200], attempt + 1, max_attempts,
                 )
                 if err.code in LLMError.UNRETRYABLE_CODES or is_last:
@@ -273,25 +300,111 @@ class ReActRunner:
 
         # 阶段 3：没有工具调用的 turn。
         if not tool_calls:
-            if full_text:
+            if full_text.strip():
+                self.state.empty_content_retries = 0
+                self.state.finalization_retrying = False
                 self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
                 if finish_reason == "length":
-                    # 输出被截断，保存部分内容，外层循环会继续请求后续内容。
+                    yield self._append_internal_user_message(
+                        LENGTH_CONTINUATION_PROMPT,
+                        reason="length_recovery",
+                    )
                     return
+
+                pending_user_messages = await self._drain_pending_user_messages()
+                if pending_user_messages:
+                    logger.info(
+                        "[react_runner] 疑似最终回复后取出 %s 条待注入用户消息",
+                        len(pending_user_messages),
+                    )
+                    for ev in pending_user_messages:
+                        self.agent.memory.add_raw(ev.to_openai_message())
+                        yield ev
+                    return
+
+                if await self._is_continuation_active():
+                    logger.info(
+                        "[react_runner] 疑似最终回复后检测到活跃 continuation 请求; "
+                        "迭代=%s finish_reason=%s",
+                        self.state.iteration,
+                        finish_reason,
+                    )
+                    yield self._append_internal_user_message(
+                        self._active_continuation_prompt(),
+                        reason="active_continuation",
+                    )
+                    return
+
                 yield done_event(success=True, reason=DoneReason.COMPLETED)
                 self.state.status = RunStatus.COMPLETED
                 return
-            # 无文本但模型仍在思考或流被截断 → 继续下一轮
-            if full_reasoning or finish_reason == "length":
-                if full_reasoning:
-                    self.agent.memory.add_assistant("", reasoning=full_reasoning)
+
+            if finish_reason == "length":
+                yield self._append_internal_user_message(
+                    LENGTH_CONTINUATION_PROMPT,
+                    reason="length_recovery",
+                )
                 return
-            # 真正空 turn：无文本、无推理、无工具调用
-            yield done_event(success=True, reason=DoneReason.COMPLETED)
-            self.state.status = RunStatus.COMPLETED
+
+            pending_user_messages = await self._drain_pending_user_messages()
+            if pending_user_messages:
+                logger.info(
+                    "[react_runner] 空响应后取出 %s 条待注入用户消息",
+                    len(pending_user_messages),
+                )
+                for ev in pending_user_messages:
+                    self.agent.memory.add_raw(ev.to_openai_message())
+                    yield ev
+                return
+            if await self._is_continuation_active():
+                logger.info(
+                    "[react_runner] 空响应后检测到活跃 continuation 请求; 迭代=%s",
+                    self.state.iteration,
+                )
+                yield self._append_internal_user_message(
+                    self._active_continuation_prompt(),
+                    reason="active_continuation",
+                )
+                return
+
+            if self.state.finalization_retrying:
+                yield error_event(message=EMPTY_FINAL_RESPONSE_MESSAGE, code="empty_response")
+                yield done_event(success=False, reason=DoneReason.ERROR)
+                self.state.status = RunStatus.ERROR
+                self.state.error = EMPTY_FINAL_RESPONSE_MESSAGE
+                return
+
+            self.state.empty_content_retries += 1
+            if self.state.empty_content_retries < MAX_EMPTY_RESPONSE_RETRIES:
+                logger.warning(
+                    "[react_runner] 空响应重试; 迭代=%s 第 %s/%s 次 finish_reason=%s 有推理=%s",
+                    self.state.iteration,
+                    self.state.empty_content_retries,
+                    MAX_EMPTY_RESPONSE_RETRIES,
+                    finish_reason,
+                    bool(full_reasoning),
+                )
+                return
+
+            logger.warning(
+                "[react_runner] 空响应重试 %s 次后仍失败，请求最终回复; "
+                "迭代=%s finish_reason=%s 有推理=%s",
+                self.state.empty_content_retries,
+                self.state.iteration,
+                finish_reason,
+                bool(full_reasoning),
+            )
+            self.state.finalization_retrying = True
+            self.state.force_no_tools_once = True
+            yield self._append_internal_user_message(
+                FINALIZATION_RETRY_PROMPT,
+                reason="empty_finalization_retry",
+            )
             return
 
         # 阶段 4：等待全部工具完成、按顺序归并结果（含取消处理）。
+        self.state.empty_content_retries = 0
+        self.state.finalization_retrying = False
         results, cancelled = await self.tool_handler.gather_results(
             tool_calls, tool_tasks, self.state
         )
@@ -338,6 +451,107 @@ class ReActRunner:
             raise CancelledError()
 
         # 工具已执行，本轮不标记完成，外层循环会进入下一轮。
+
+    def _append_internal_user_message(self, content: str, *, reason: str) -> AgentEvent:
+        ev = user_message_event(
+            content,
+            metadata={"hide": True, "internal": True, "reason": reason},
+        )
+        self.agent.memory.add_raw(ev.to_openai_message())
+        return ev
+
+    def _active_continuation_prompt(self) -> str:
+        ctx = self.state.runtime_context or {}
+        return str(
+            ctx.get("continuation_message")
+            or ctx.get("goal_continue_message")
+            or ACTIVE_CONTINUATION_PROMPT
+        )
+
+    async def _is_continuation_active(self) -> bool:
+        ctx = self.state.runtime_context or {}
+        for key in (
+            "continuation_active",
+            "continue_active",
+            "goal_active",
+            "sustained_goal_active",
+            "goal_active_predicate",
+        ):
+            if key not in ctx:
+                continue
+            value = ctx.get(key)
+            if callable(value):
+                value = value()
+            if inspect.isawaitable(value):
+                value = await value
+            if bool(value):
+                return True
+        return False
+
+    async def _drain_pending_user_messages(self) -> list[AgentEvent]:
+        ctx = self.state.runtime_context or {}
+        raw_messages: list = []
+
+        drain = ctx.get("drain_pending_user_messages")
+        if callable(drain):
+            drained = drain()
+            if inspect.isawaitable(drained):
+                drained = await drained
+            raw_messages.extend(self._coerce_pending_message_list(drained))
+
+        for key in ("pending_user_messages", "injected_user_messages"):
+            if key not in ctx:
+                continue
+            value = ctx.get(key)
+            if callable(value):
+                value = value()
+                if inspect.isawaitable(value):
+                    value = await value
+                raw_messages.extend(self._coerce_pending_message_list(value))
+                continue
+            if isinstance(value, list):
+                raw_messages.extend(value)
+                value.clear()
+            else:
+                raw_messages.extend(self._coerce_pending_message_list(value))
+
+        events: list[AgentEvent] = []
+        for item in raw_messages:
+            ev = self._coerce_pending_user_message(item)
+            if ev is not None:
+                events.append(ev)
+        return events
+
+    @staticmethod
+    def _coerce_pending_message_list(value) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(value)
+        return [value]
+
+    @staticmethod
+    def _coerce_pending_user_message(item) -> AgentEvent | None:
+        if hasattr(item, "to_openai_message") and getattr(item, "type", None):
+            return item
+        if isinstance(item, dict):
+            if item.get("role") == "user":
+                return user_message_event(
+                    item.get("content", ""),
+                    metadata=item.get("metadata") or {"hide": True, "internal": True},
+                )
+            if "content" in item:
+                return user_message_event(
+                    item.get("content", ""),
+                    metadata=item.get("metadata") or {"hide": True, "internal": True},
+                )
+            return None
+        if isinstance(item, str):
+            return user_message_event(
+                item,
+                metadata={"hide": True, "internal": True, "reason": "pending_user_message"},
+            )
+        return None
 
     # 辅助函数
     def _repair_dangling_tool_calls(self) -> None:
