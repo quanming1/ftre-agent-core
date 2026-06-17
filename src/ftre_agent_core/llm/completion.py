@@ -248,6 +248,7 @@ class LLMHandler:
         self.model = model
         self._active_stream = None
         self._active_loop: asyncio.AbstractEventLoop | None = None
+        self._cancelled: bool = False
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
@@ -256,21 +257,17 @@ class LLMHandler:
         )
 
     def cancel(self) -> None:
-        """取消当前请求，并尽快关闭正在读取的 HTTP stream。"""
-        stream = self._active_stream
-        if stream is None:
+        """取消当前请求：设置 flag 让 stream 循环主动退出。
+
+        在主循环化之后，cancel() 在主循环的同步上下文里被调用，
+        而 stream() 也在同一个循环里 await。所以不需要
+        call_soon_threadsafe 跨循环投递——只需设置 _cancelled flag，
+        stream 循环会在下一个 chunk 到达时检查 flag 并主动 break。
+        """
+        if self._active_stream is None:
             return
+        self._cancelled = True
         self._active_stream = None
-        loop = self._active_loop
-        if loop is None or loop.is_closed():
-            return
-
-        async def close_stream() -> None:
-            close_result = stream.close()
-            if inspect.isawaitable(close_result):
-                await close_result
-
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(close_stream()))
 
     async def stream(
         self,
@@ -301,6 +298,10 @@ class LLMHandler:
             finish_reason: str = "stop"
 
             async for chunk in response:
+                if self._cancelled:
+                    logger.info("[completion] stream cancelled by cancel()")
+                    break
+
                 llm_log.log_chunk(chunk)
 
                 # OpenAI 会在最后额外返回一个 usage-only chunk。
@@ -353,6 +354,7 @@ class LLMHandler:
         finally:
             self._active_stream = None
             self._active_loop = None
+            self._cancelled = False
             if response is not None:
                 close_result = response.close()
                 if inspect.isawaitable(close_result):
