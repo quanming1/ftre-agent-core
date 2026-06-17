@@ -271,13 +271,20 @@ class ReActRunner:
         if full_text:
             yield assistant_message_complete_event(content=full_text)
 
-        # 阶段 3：没有工具调用的纯文本 turn。
+        # 阶段 3：没有工具调用的 turn。
         if not tool_calls:
             if full_text:
                 self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
                 if finish_reason == "length":
                     # 输出被截断，保存部分内容，外层循环会继续请求后续内容。
                     return
+                yield done_event(success=True, reason=DoneReason.COMPLETED)
+                self.state.status = RunStatus.COMPLETED
+                return
+            # 无文本但模型仍在思考或流被截断 → 继续下一轮
+            if full_reasoning or finish_reason == "length":
+                return
+            # 真正空 turn：无文本、无推理、无工具调用
             yield done_event(success=True, reason=DoneReason.COMPLETED)
             self.state.status = RunStatus.COMPLETED
             return
