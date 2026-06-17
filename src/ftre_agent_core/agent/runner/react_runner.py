@@ -248,7 +248,7 @@ class ReActRunner:
         """
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
-        finish_reason: str = "stop"
+        finish_reason: str = "unknown"
 
         # tool_call_id 到工具任务的映射；保持确定性的写入顺序。
         tool_tasks: dict[str, asyncio.Task] = {}
@@ -297,6 +297,15 @@ class ReActRunner:
             yield reasoning_complete_event(content=full_reasoning)
         if full_text:
             yield assistant_message_complete_event(content=full_text)
+        if finish_reason == "unknown":
+            logger.warning(
+                "[react_runner] provider 未返回明确 finish_reason，保持 ReAct Loop 继续; "
+                "迭代=%s has_text=%s has_reasoning=%s has_tool_calls=%s",
+                self.state.iteration,
+                bool(full_text.strip()),
+                bool(full_reasoning.strip()),
+                bool(tool_calls),
+            )
 
         # 阶段 3：没有工具调用的 turn。
         if not tool_calls:
@@ -335,6 +344,9 @@ class ReActRunner:
                     )
                     return
 
+                if finish_reason == "unknown":
+                    return
+
                 yield done_event(success=True, reason=DoneReason.COMPLETED)
                 self.state.status = RunStatus.COMPLETED
                 return
@@ -365,6 +377,8 @@ class ReActRunner:
                     self._active_continuation_prompt(),
                     reason="active_continuation",
                 )
+                return
+            if finish_reason == "unknown":
                 return
 
             if self.state.finalization_retrying:
