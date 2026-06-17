@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from ftre_agent_core.agent import EventType, ReActAgent
@@ -13,6 +15,10 @@ def make_agent(tools=None, max_iterations=3):
         tools=tools or [],
         max_iterations=max_iterations,
     )
+
+
+def test_step_finish_defaults_to_unknown():
+    assert StepFinish().finish_reason == "unknown"
 
 
 @pytest.mark.asyncio
@@ -77,6 +83,69 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     assert agent.memory.messages[1]["role"] == "user"
     assert "直接给出回复用户的最终内容" in agent.memory.messages[1]["content"]
     assert agent.memory.messages[2] == {"role": "assistant", "content": "final"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_finish_with_text_logs_and_continues(caplog):
+    agent = make_agent(max_iterations=3)
+    calls = 0
+
+    async def fake_stream(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield TextDelta(text="partial but eof")
+            yield StepFinish(finish_reason="unknown")
+        else:
+            assert messages[-1] == {"role": "assistant", "content": "partial but eof"}
+            yield TextDelta(text="final")
+            yield StepFinish(finish_reason="stop")
+
+    agent.runner.llm.stream = fake_stream
+
+    with caplog.at_level(logging.WARNING, logger="ftre_agent_core.agent.runner.react_runner"):
+        events = [event async for event in agent.run("start")]
+
+    types = [event.type for event in events]
+
+    assert calls == 2
+    assert types.count(EventType.DONE) == 1
+    assert agent.memory.messages[1] == {"role": "assistant", "content": "partial but eof"}
+    assert agent.memory.messages[2] == {"role": "assistant", "content": "final"}
+    assert "provider 未返回明确 finish_reason" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unknown_finish_with_empty_response_continues_without_finalization(caplog):
+    @tool(description="Echo text")
+    def echo(text: str) -> str:
+        return f"echo:{text}"
+
+    agent = make_agent(tools=[echo], max_iterations=3)
+    calls = 0
+
+    async def fake_stream(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield StepFinish(finish_reason="unknown")
+        else:
+            assert tools is not None
+            yield TextDelta(text="final")
+            yield StepFinish(finish_reason="stop")
+
+    agent.runner.llm.stream = fake_stream
+
+    with caplog.at_level(logging.WARNING, logger="ftre_agent_core.agent.runner.react_runner"):
+        events = [event async for event in agent.run("start")]
+
+    types = [event.type for event in events]
+
+    assert calls == 2
+    assert types.count(EventType.USER_MESSAGE) == 0
+    assert types.count(EventType.DONE) == 1
+    assert agent.memory.messages[1] == {"role": "assistant", "content": "final"}
+    assert "provider 未返回明确 finish_reason" in caplog.text
 
 
 @pytest.mark.asyncio
