@@ -3,6 +3,8 @@ MemoryManager - 对话消息管理器
 """
 from typing import Any
 
+from .reasoning import attach_reasoning
+
 
 class MemoryManager:
     """管理单次 ReAct 循环中的消息列表。"""
@@ -33,10 +35,8 @@ class MemoryManager:
 
     def add_assistant(self, content: str, usage=None, reasoning: str | None = None) -> None:
         msg: dict[str, Any] = {"role": "assistant", "content": content}
-        # 部分 thinking 模型（DeepSeek-R1 / 千问 QwQ 等）要求多轮间把
-        # reasoning_content 透传回去，否则下一次请求会被拒。
-        if reasoning:
-            msg["reasoning_content"] = reasoning
+        # 把 thinking 内容按 Zed 兼容格式合并进 assistant.content。
+        attach_reasoning(msg, reasoning)
         self._messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, content: str, **kwargs) -> None:
