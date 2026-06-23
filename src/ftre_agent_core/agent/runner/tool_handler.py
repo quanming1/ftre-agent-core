@@ -25,6 +25,7 @@ from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 from ftre_agent_core.agent.event import AgentEvent
+from ftre_agent_core.reasoning import attach_reasoning
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
 if TYPE_CHECKING:
@@ -274,8 +275,7 @@ class ToolHandler:
                 for tc in tool_calls
             ],
         }
-        if reasoning:
-            msg["reasoning_content"] = reasoning
+        attach_reasoning(msg, reasoning)
         return msg
 
     # 工具中间件

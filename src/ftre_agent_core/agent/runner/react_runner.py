@@ -143,7 +143,7 @@ class ReActRunner:
             agent.api_key,
             agent.api_base,
             agent.api_type,
-            max_tokens=99999,
+            max_tokens=agent.max_tokens,
         )
         self.tool_handler = ToolHandler(agent.tools)
 
