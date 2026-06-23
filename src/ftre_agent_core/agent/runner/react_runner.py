@@ -527,16 +527,7 @@ class ReActRunner:
                     )
                     return
 
-                # 分支 3b：finish_reason=stop 但文本以冒号结尾，
-                # 可能是模型想继续说话被 provider 截断了 → 继续循环。
-                if finish_reason == "stop" and full_text.rstrip().endswith((':', '：')):
-                    logger.info(
-                        "[react_runner] finish_reason=stop 但文本以冒号结尾，继续循环; 迭代=%s",
-                        self.state.iteration,
-                    )
-                    return
-
-                # 分支 3c：检查是否有调用方注入的 pending user messages。
+                # 分支 3b：检查是否有调用方注入的 pending user messages。
                 # 这些消息在模型给出最终回复后才追加到 memory，避免打断 ReAct 流程。
                 pending_user_messages = await self._drain_pending_user_messages()
                 if pending_user_messages:
