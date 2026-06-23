@@ -78,6 +78,10 @@ class LLMError(Exception):
             status_code = getattr(response, "status_code", None) if response is not None else None
         if status_code == 400:
             return LLMError(message=str(exc), code="bad_request")
+        if status_code in (401, 402):
+            return LLMError(message=str(exc), code="auth_error" if status_code == 401 else "bad_request")
+        if status_code == 403:
+            return LLMError(message=str(exc), code="content_filter")
 
         message_lower = str(exc).lower()
         if "invalidparameter" in message_lower or "invalid parameter" in message_lower:
@@ -141,6 +145,7 @@ class StepFinish:
     type: str = field(default="step-finish", init=False)
     finish_reason: str = "unknown"
     usage: dict | None = None
+    response_metadata: dict = field(default_factory=dict)
 
 
 # 统一事件类型别名。
@@ -250,6 +255,7 @@ class LLMHandler:
         api_type: str = "completions",
         timeout: float = 120.0,
         max_retries: int = 3,
+        max_tokens: int | None = None,
     ):
         if api_type != "completions":
             logger.warning(
@@ -257,6 +263,7 @@ class LLMHandler:
             )
 
         self.model = model
+        self.max_tokens = max_tokens
         self._active_stream = None
         self._active_loop: asyncio.AbstractEventLoop | None = None
         self._cancelled: bool = False
@@ -295,6 +302,8 @@ class LLMHandler:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.max_tokens is not None:
+            params["max_tokens"] = max(1, int(self.max_tokens))
         if tools:
             params["tools"] = tools
 
@@ -307,6 +316,7 @@ class LLMHandler:
             accumulator = _ToolCallAccumulator()
             usage: dict | None = None
             finish_reason: str = "unknown"
+            response_metadata: dict[str, Any] = {}
 
             async for chunk in response:
                 if self._cancelled:
@@ -314,6 +324,11 @@ class LLMHandler:
                     break
 
                 llm_log.log_chunk(chunk)
+
+                for key in ("id", "model", "created", "system_fingerprint"):
+                    value = _get_attr(chunk, key)
+                    if value is not None:
+                        response_metadata[key] = value
 
                 # OpenAI 会在最后额外返回一个 usage-only chunk。
                 chunk_usage = normalize_usage(_get_attr(chunk, "usage"))
@@ -352,13 +367,19 @@ class LLMHandler:
             for tc in accumulator.finalize():
                 yield tc
 
-            logger.info(
-                "[completion] stream ended: finish_reason=%s has_tool_calls=%s",
-                finish_reason,
-                accumulator.has_data,
-            )
+            # 仅在异常 finish_reason 时打印（正常 stop / tool_calls 不打印）
+            if finish_reason not in ("stop", "tool_calls", "length"):
+                logger.warning(
+                    "[completion] stream ended: finish_reason=%s has_tool_calls=%s",
+                    finish_reason,
+                    accumulator.has_data,
+                )
 
-            yield StepFinish(finish_reason=finish_reason, usage=usage)
+            yield StepFinish(
+                finish_reason=finish_reason,
+                usage=usage,
+                response_metadata=response_metadata,
+            )
 
         except Exception as exc:
             raise LLMError.classify(exc) from exc

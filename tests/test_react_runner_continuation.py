@@ -179,6 +179,49 @@ async def test_tool_call_turn_does_not_emit_done_before_followup_turn():
 
 
 @pytest.mark.asyncio
+async def test_multi_tool_call_events_are_emitted_before_results():
+    @tool(description="Echo text")
+    def echo(text: str) -> str:
+        return f"echo:{text}"
+
+    @tool(description="Uppercase text")
+    def upper(text: str) -> str:
+        return text.upper()
+
+    agent = make_agent(tools=[echo, upper])
+    calls = 0
+
+    async def fake_stream(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield ToolCall(id="call_echo", name="echo", input={"text": "x"})
+            yield ToolCall(id="call_upper", name="upper", input={"text": "y"})
+            yield StepFinish(finish_reason="tool_calls")
+        else:
+            yield TextDelta(text="finished")
+            yield StepFinish(finish_reason="stop")
+
+    agent.runner.llm.stream = fake_stream
+
+    events = [event async for event in agent.run("start")]
+    types = [event.type for event in events]
+
+    first_result = types.index(EventType.TOOL_RESULT)
+    assert types[:first_result].count(EventType.TOOL_CALL) == 2
+    assert types[first_result:first_result + 2] == [
+        EventType.TOOL_RESULT,
+        EventType.TOOL_RESULT,
+    ]
+    assistant_tool_message = agent.memory.messages[1]
+    assert assistant_tool_message["role"] == "assistant"
+    assert [tc["id"] for tc in assistant_tool_message["tool_calls"]] == [
+        "call_echo",
+        "call_upper",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_length_finish_adds_hidden_user_continuation():
     agent = make_agent()
     calls = 0
