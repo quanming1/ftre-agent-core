@@ -58,6 +58,7 @@ LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，
 | `llm/` | LLM 客户端适配（completions / responses 协议） |
 | `memory.py` | 消息历史管理、token 计数 |
 | `threading.py` | 全局线程池（按用途分组） |
+| `tracing.py` | Agent / LLM / Tool 树状追踪与 exporter |
 
 ## 与 LangChain / AutoGen 的区别
 
@@ -137,6 +138,38 @@ pip install -e ../ftre-agent-core
 
 editable 模式下，修改 `ftre-agent-core` 的代码会立即生效，不需要重新安装。
 
+## Tracing
+
+Tracing 默认关闭。显式配置 exporter 后，每次执行会生成一棵
+`agent -> llm/tool` run 树，记录输入输出、耗时、状态、错误、usage、
+`finish_reason` 和 provider 返回的响应元数据。
+
+```python
+from ftre_agent_core import JsonlTraceExporter, Tracer
+from ftre_agent_core.agent import ReActAgent
+
+tracer = Tracer([JsonlTraceExporter(".ftre/traces.jsonl")])
+agent = ReActAgent(
+    model="gpt-4.1",
+    api_key="sk-xxx",
+    tracer=tracer,
+)
+
+async for event in agent.run(
+    "完成任务",
+    runtime_context={
+        "trace_name": "session-turn",
+        "trace_tags": ["desktop"],
+        "trace_metadata": {"session_id": "sess_123"},
+    },
+):
+    print(event.type)
+```
+
+测试或嵌入式调用可使用 `InMemoryTraceExporter.get_trace(trace_id)` 读取完整
+run 树。Exporter 异常只写日志，不会中断 Agent。Trace 会包含完整消息和工具
+输入输出，启用持久化 exporter 时应按部署环境处理访问控制和敏感信息。
+
 ## 路线图
 
 - [x] ReAct Agent 基础循环
@@ -144,6 +177,7 @@ editable 模式下，修改 `ftre-agent-core` 的代码会立即生效，不需�
 - [x] LLM 协议适配（completions / responses）
 - [x] 流式事件输出
 - [x] 运行时取消（CancellationToken）
+- [x] Agent / LLM / Tool 树状 tracing
 - [ ] Checkpoint 快照与恢复
 - [ ] 多 Agent 协作
 - [ ] 更多 LLM 适配器（Anthropic native、Gemini）
