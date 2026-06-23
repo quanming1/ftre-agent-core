@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 
 from ftre_agent_core.tool import Tool, ToolRegistry
 from ftre_agent_core.memory import MemoryManager
+from ftre_agent_core.tracing import Tracer
 from .event import AgentEvent
 from .runner import ReActRunner
 import logging
@@ -23,17 +24,21 @@ class ReActAgent:
         system_prompt: str = "",
         tools: list[Tool] = None,
         max_iterations: int | None = None,
+        max_tokens: int | None = None,
         memory: MemoryManager | None = None,
         max_retries: int = 5,
         retry_delay: float = 3.0,
+        tracer: Tracer | None = None,
     ):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.api_type = api_type
         self.max_iterations = max_iterations
+        self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.tracer = tracer or Tracer()
 
         if memory is not None:
             self.memory = memory
