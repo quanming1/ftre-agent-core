@@ -25,6 +25,7 @@ from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 from ftre_agent_core.agent.event import AgentEvent
+from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
 if TYPE_CHECKING:
     from .react_runner import RunState
@@ -120,18 +121,75 @@ class ToolHandler:
         return self._run_after(ctx, result)
 
     # ── 并发调度 ──────────────────────────────────────────────
-    def spawn(self, call: ToolCall, state: "RunState") -> asyncio.Task:
+    def spawn(
+        self,
+        call: ToolCall,
+        state: "RunState",
+        parent_span: TraceSpan | None = None,
+    ) -> asyncio.Task:
         """为一个 ToolCall 创建并发执行任务。立即返回，不在此 await。"""
+        span = parent_span.child(
+            call.name,
+            RunType.TOOL,
+            inputs={"arguments": call.input},
+            metadata={"call_id": call.id},
+        ) if parent_span else None
         return asyncio.create_task(
-            self.run_one(
+            self._run_one_traced(
                 call_id=call.id,
                 name=call.name,
                 arguments=call.input if call.input is not None else {},
                 state=state,
                 parse_failed=(call.input is None),
+                span=span,
             ),
             name=f"tool-{call.id}",
         )
+
+    async def _run_one_traced(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        arguments: dict,
+        state: "RunState",
+        parse_failed: bool,
+        span: TraceSpan | None,
+    ) -> ToolResult:
+        try:
+            result = await self.run_one(
+                call_id=call_id,
+                name=name,
+                arguments=arguments,
+                state=state,
+                parse_failed=parse_failed,
+            )
+        except BaseException as exc:
+            if span and not span.ended:
+                if isinstance(exc, asyncio.CancelledError):
+                    span.end(status=TraceRunStatus.CANCELLED)
+                else:
+                    span.end(error=exc)
+            raise
+
+        if span and not span.ended:
+            status = (
+                TraceRunStatus.CANCELLED
+                if result.status == "cancelled"
+                else TraceRunStatus.ERROR
+                if result.status == "failed"
+                else TraceRunStatus.COMPLETED
+            )
+            span.end(
+                status=status,
+                error=result.error if result.status == "failed" else None,
+                outputs={
+                    "result": result.result,
+                    "status": result.status,
+                    "error": result.error,
+                },
+            )
+        return result
 
     @staticmethod
     async def drain(tasks: dict[str, asyncio.Task]) -> None:

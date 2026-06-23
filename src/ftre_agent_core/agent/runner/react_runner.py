@@ -31,10 +31,12 @@ from ftre_agent_core.llm import (
     ToolCall, StepFinish,
 )
 from ftre_agent_core.tool import CancellationToken, ToolCancelledError
+from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 from .tool_handler import ToolHandler
 from ..event import (
     DoneReason,
     AgentEvent,
+    EventType,
     assistant_message_event,
     reasoning_event,
     reasoning_complete_event,
@@ -73,6 +75,7 @@ ACTIVE_CONTINUATION_PROMPT = (
 )
 
 
+
 # 运行状态
 class RunStatus(str, Enum):
     IDLE = "idle"
@@ -96,6 +99,7 @@ class RunState:
     empty_content_retries: int = 0
     force_no_tools_once: bool = False
     finalization_retrying: bool = False
+    trace_span: TraceSpan | None = None
 
     @property
     def is_cancelled(self) -> bool:
@@ -113,6 +117,7 @@ class RunState:
         self.empty_content_retries = 0
         self.force_no_tools_once = False
         self.finalization_retrying = False
+        self.trace_span = None
 
     def cancel(self) -> None:
         if self.status != RunStatus.RUNNING:
@@ -133,7 +138,13 @@ class ReActRunner:
     def __init__(self, agent: "ReActAgent"):
         self.agent = agent
         self.state = RunState()
-        self.llm = LLMHandler(agent.model, agent.api_key, agent.api_base, agent.api_type)
+        self.llm = LLMHandler(
+            agent.model,
+            agent.api_key,
+            agent.api_base,
+            agent.api_type,
+            max_tokens=99999,
+        )
         self.tool_handler = ToolHandler(agent.tools)
 
     async def run(
@@ -141,6 +152,32 @@ class ReActRunner:
     ) -> AsyncGenerator[AgentEvent, None]:
         self.state.start()
         self.state.runtime_context = runtime_context or {}
+
+        # 从 runtime_context 读取调用方传入的 trace 元数据，兜底为非 dict 时包一层。
+        trace_metadata = self.state.runtime_context.get("trace_metadata") or {}
+        if not isinstance(trace_metadata, dict):
+            trace_metadata = {"value": trace_metadata}
+        # 强制带上 model / api_type，调用方自定义字段可覆盖默认值。
+        trace_metadata = {
+            "model": self.agent.model,
+            "api_type": self.agent.api_type,
+            **trace_metadata,
+        }
+        # tags 允许传字符串，统一规整成 list。
+        trace_tags = self.state.runtime_context.get("trace_tags") or []
+        if isinstance(trace_tags, str):
+            trace_tags = [trace_tags]
+        # 开启本次执行的根 span（AGENT 节点）；tracer 未配置 exporter 时为空操作。
+        self.state.trace_span = self.agent.tracer.start_run(
+            str(self.state.runtime_context.get("trace_name") or "react_agent"),
+            RunType.AGENT,
+            inputs={"message": message},
+            metadata=trace_metadata,
+            tags=list(trace_tags),
+        )
+        # 记录最终结束原因/成败，供 finally 写入根 span 输出。
+        done_reason = None
+        done_success = None
 
         if isinstance(message, str):
             self.agent.memory.add_user(message)
@@ -150,8 +187,47 @@ class ReActRunner:
                     continue
                 self.agent.memory.add_raw(msg)
 
-        async for event in self._loop():
-            yield event
+        try:
+            async for event in self._loop():
+                # 捕获终止事件，提取成败与原因，留待 finally 写入根 span。
+                if event.type == EventType.DONE:
+                    done_reason = event.reason.value
+                    done_success = event.success
+                yield event
+        except BaseException as exc:
+            # 异常路径：区分「取消」与「真实错误」，分别落不同的 trace 状态。
+            if self.state.trace_span and not self.state.trace_span.ended:
+                if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+                    self.state.trace_span.end(
+                        status=TraceRunStatus.CANCELLED,
+                        outputs={"iterations": self.state.iteration},
+                    )
+                else:
+                    self.state.trace_span.end(
+                        error=exc,
+                        outputs={"iterations": self.state.iteration},
+                    )
+            raise
+        finally:
+            # 正常路径收尾：依据 RunState 推断最终 trace 状态并关闭根 span。
+            # （异常路径已在 except 中提前 end，这里因 ended 判断而跳过。）
+            if self.state.trace_span and not self.state.trace_span.ended:
+                trace_status = (
+                    TraceRunStatus.CANCELLED
+                    if self.state.status == RunStatus.CANCELLED
+                    else TraceRunStatus.ERROR
+                    if self.state.status == RunStatus.ERROR
+                    else TraceRunStatus.COMPLETED
+                )
+                self.state.trace_span.end(
+                    status=trace_status,
+                    outputs={
+                        "success": done_success,
+                        "done_reason": done_reason,
+                        "iterations": self.state.iteration,
+                    },
+                    error=self.state.error if self.state.status == RunStatus.ERROR else None,
+                )
 
     def cancel(self) -> None:
         self.state.cancel()
@@ -180,6 +256,7 @@ class ReActRunner:
 
         except CancelledError:
             yield done_event(success=False, reason=DoneReason.CANCELLED)
+            self.state.status = RunStatus.CANCELLED
 
     # 单轮 LLM 调用，带重试。重试使用 for 循环，避免递归放大重试次数。
     async def _run_turn(self) -> AsyncGenerator[AgentEvent, None]:
@@ -195,15 +272,33 @@ class ReActRunner:
         max_attempts = 1 + self.agent.max_retries
 
         for attempt in range(max_attempts):
+            # 每次尝试创建一个 LLM 子 span，挂在根 AGENT span 下；attempt 用于区分重试。
+            llm_span = self.state.trace_span.child(
+                "llm",
+                RunType.LLM,
+                inputs={"messages": messages, "tools": tools},
+                metadata={
+                    "model": self.agent.model,
+                    "api_type": self.agent.api_type,
+                    "iteration": self.state.iteration,
+                    "attempt": attempt + 1,
+                },
+            ) if self.state.trace_span else None
             try:
-                async for event in self._stream_turn(messages, tools):
+                async for event in self._stream_turn(messages, tools, llm_span=llm_span):
                     yield event
                 return
 
             except CancelledError:
+                # 取消：标记 LLM span 为 CANCELLED 后继续向上传播。
+                if llm_span and not llm_span.ended:
+                    llm_span.end(status=TraceRunStatus.CANCELLED)
                 raise
 
             except Exception as exc:
+                # 出错：先记录到 LLM span（正常完成路径已在 _stream_turn 内 end）。
+                if llm_span and not llm_span.ended:
+                    llm_span.end(error=exc)
                 if self.state.is_cancelled:
                     raise CancelledError() from exc
                 # _stream_turn 抛出的 provider 异常已经是 LLMError；其他异常在此分类。
@@ -238,6 +333,7 @@ class ReActRunner:
         self,
         messages: list[dict],
         tools: list[dict] | None,
+        llm_span: TraceSpan | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """流式消费 LLM 输出，并在收齐工具调用后执行工具。
 
@@ -249,6 +345,8 @@ class ReActRunner:
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         finish_reason: str = "unknown"
+        usage: dict | None = None
+        response_metadata: dict = {}
 
         # tool_call_id 到工具任务的映射；保持确定性的写入顺序。
         tool_tasks: dict[str, asyncio.Task] = {}
@@ -279,11 +377,18 @@ class ReActRunner:
                 elif isinstance(event, ToolCall):
                     tool_calls.append(event)
                     # 立即并发执行，不在这里 await。
-                    tool_tasks[event.id] = self.tool_handler.spawn(event, self.state)
+                    tool_tasks[event.id] = self.tool_handler.spawn(
+                        event,
+                        self.state,
+                        parent_span=self.state.trace_span,
+                    )
 
                 elif isinstance(event, StepFinish):
                     finish_reason = event.finish_reason
+                    # provider 响应元数据（实际路由模型 / system_fingerprint 等），写入 LLM span。
+                    response_metadata = event.response_metadata
                     if event.usage:
+                        usage = event.usage
                         yield usage_update_event(event.usage)
 
         except BaseException:
@@ -297,6 +402,19 @@ class ReActRunner:
             yield reasoning_complete_event(content=full_reasoning)
         if full_text:
             yield assistant_message_complete_event(content=full_text)
+        if llm_span and not llm_span.ended:
+            llm_span.end(outputs={
+                "text": full_text,
+                "reasoning": full_reasoning,
+                "finish_reason": finish_reason,
+                "has_tool_calls": bool(tool_calls),
+                "tool_calls": [
+                    {"id": call.id, "name": call.name, "arguments": call.input}
+                    for call in tool_calls
+                ],
+                "usage": usage,
+                "response_metadata": response_metadata,
+            })
         if finish_reason == "unknown":
             logger.warning(
                 "[react_runner] provider 未返回明确 finish_reason，保持 ReAct Loop 继续; "
@@ -317,6 +435,13 @@ class ReActRunner:
                     yield self._append_internal_user_message(
                         LENGTH_CONTINUATION_PROMPT,
                         reason="length_recovery",
+                    )
+                    return
+
+                if finish_reason == "stop" and full_text.rstrip().endswith((':', '：')):
+                    logger.info(
+                        "[react_runner] finish_reason=stop 但文本以冒号结尾，继续循环; 迭代=%s",
+                        self.state.iteration,
                     )
                     return
 
@@ -443,15 +568,18 @@ class ReActRunner:
             self.agent.memory.add_tool_result(
                 tc.id, result.result or f"[{tc.name}] 已完成"
             )
-            # yield tool_call + tool_result
+            # 收集 UserMessageEvent（延后追加）
+            if result.event is not None:
+                pending_user_messages.append(result.event)
+
+        for tc in tool_calls:
             events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
+
+        for tc, result in zip(tool_calls, results):
             events.append(tool_result_event(
                 id=result.call_id, name=result.name, result=result.result or f"[{tc.name}] 已完成",
                 error=result.error, status=result.status,
             ))
-            # 收集 UserMessageEvent（延后追加）
-            if result.event is not None:
-                pending_user_messages.append(result.event)
 
         # 统一追加 UserMessageEvent：确保在 tool_result 之后，消息顺序合法
         for ev in pending_user_messages:
