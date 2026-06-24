@@ -43,7 +43,11 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
 
     assert calls == 2
     assert types.count(EventType.DONE) == 1
-    assert agent.memory.messages[1] == {"role": "assistant", "content": "done"}
+    assert agent.memory.messages[1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "done"}],
+        "reasoning_content": "",
+    }
 
 
 @pytest.mark.asyncio
@@ -82,7 +86,11 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     assert types.count(EventType.DONE) == 1
     assert agent.memory.messages[1]["role"] == "user"
     assert "直接给出回复用户的最终内容" in agent.memory.messages[1]["content"]
-    assert agent.memory.messages[2] == {"role": "assistant", "content": "final"}
+    assert agent.memory.messages[2] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "final"}],
+        "reasoning_content": "",
+    }
 
 
 @pytest.mark.asyncio
@@ -97,7 +105,11 @@ async def test_unknown_finish_with_text_logs_and_continues(caplog):
             yield TextDelta(text="partial but eof")
             yield StepFinish(finish_reason="unknown")
         else:
-            assert messages[-1] == {"role": "assistant", "content": "partial but eof"}
+            assert messages[-1] == {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "partial but eof"}],
+                "reasoning_content": "",
+            }
             yield TextDelta(text="final")
             yield StepFinish(finish_reason="stop")
 
@@ -110,8 +122,16 @@ async def test_unknown_finish_with_text_logs_and_continues(caplog):
 
     assert calls == 2
     assert types.count(EventType.DONE) == 1
-    assert agent.memory.messages[1] == {"role": "assistant", "content": "partial but eof"}
-    assert agent.memory.messages[2] == {"role": "assistant", "content": "final"}
+    assert agent.memory.messages[1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "partial but eof"}],
+        "reasoning_content": "",
+    }
+    assert agent.memory.messages[2] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "final"}],
+        "reasoning_content": "",
+    }
     assert "provider 未返回明确 finish_reason" in caplog.text
 
 
@@ -144,7 +164,11 @@ async def test_unknown_finish_with_empty_response_continues_without_finalization
     assert calls == 2
     assert types.count(EventType.USER_MESSAGE) == 0
     assert types.count(EventType.DONE) == 1
-    assert agent.memory.messages[1] == {"role": "assistant", "content": "final"}
+    assert agent.memory.messages[1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "final"}],
+        "reasoning_content": "",
+    }
     assert "provider 未返回明确 finish_reason" in caplog.text
 
 
@@ -245,7 +269,7 @@ async def test_length_finish_adds_hidden_user_continuation():
 
     assert calls == 2
     assert types.count(EventType.DONE) == 1
-    assert agent.memory.messages[1]["content"] == "partial"
+    assert agent.memory.messages[1]["content"] == [{"type": "text", "text": "partial"}]
     assert agent.memory.messages[2]["role"] == "user"
     assert "从刚才中断的位置继续" in agent.memory.messages[2]["content"]
 
