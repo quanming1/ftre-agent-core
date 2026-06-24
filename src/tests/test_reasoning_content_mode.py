@@ -6,7 +6,7 @@ from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.tool import ToolRegistry
 
 
-def test_memory_merges_reasoning_into_content():
+def test_memory_keeps_reasoning_separate_from_content():
     memory = MemoryManager()
 
     memory.add_assistant("answer", reasoning="thinking")
@@ -15,10 +15,9 @@ def test_memory_merges_reasoning_into_content():
         {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "thinking"},
                 {"type": "text", "text": "answer"},
             ],
-            "reasoning_content": "",
+            "reasoning_content": "thinking",
         }
     ]
 
@@ -45,4 +44,16 @@ def test_tool_call_message_preserves_visible_content_as_parts():
 
     assert msg["content"] == [{"type": "text", "text": "visible answer"}]
     assert msg["reasoning_content"] == "thinking"
+    assert msg["tool_calls"][0]["id"] == "call_1"
+
+
+def test_tool_call_message_with_visible_content_without_reasoning():
+    handler = ToolHandler(ToolRegistry())
+    msg = handler.build_assistant_message(
+        [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
+        content="visible answer",
+    )
+
+    assert msg["content"] == [{"type": "text", "text": "visible answer"}]
+    assert msg["reasoning_content"] == ""
     assert msg["tool_calls"][0]["id"] == "call_1"
