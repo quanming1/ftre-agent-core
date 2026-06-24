@@ -33,3 +33,16 @@ def test_tool_call_message_preserves_reasoning_content():
     assert msg["content"] == ""
     assert msg["reasoning_content"] == "thinking"
     assert msg["tool_calls"][0]["id"] == "call_1"
+
+
+def test_tool_call_message_preserves_visible_content_as_parts():
+    handler = ToolHandler(ToolRegistry())
+    msg = handler.build_assistant_message(
+        [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
+        content="visible answer",
+        reasoning="thinking",
+    )
+
+    assert msg["content"] == [{"type": "text", "text": "visible answer"}]
+    assert msg["reasoning_content"] == "thinking"
+    assert msg["tool_calls"][0]["id"] == "call_1"
