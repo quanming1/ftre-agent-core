@@ -25,6 +25,7 @@ from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 from ftre_agent_core.agent.event import AgentEvent
+from ftre_agent_core.reasoning import preserve_tool_call_reasoning
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
 if TYPE_CHECKING:
@@ -260,7 +261,7 @@ class ToolHandler:
         """
         msg: dict = {
             "role": "assistant",
-            "content": content,
+            "content": content or "",
             "tool_calls": [
                 {
                     "id": tc.id,
@@ -274,16 +275,7 @@ class ToolHandler:
                 for tc in tool_calls
             ],
         }
-        if reasoning:
-            parts: list[dict[str, str]] = [{"type": "text", "text": reasoning}]
-            _c = msg.get("content")
-            if isinstance(_c, list):
-                for _item in _c:
-                    parts.append(_item if isinstance(_item, dict) else {"type": "text", "text": str(_item)})
-            elif _c not in (None, ""):
-                parts.append({"type": "text", "text": str(_c)})
-            msg["content"] = parts
-            msg["reasoning_content"] = ""
+        preserve_tool_call_reasoning(msg, reasoning)
         return msg
 
     # 工具中间件

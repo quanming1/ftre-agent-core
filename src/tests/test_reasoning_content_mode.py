@@ -23,13 +23,13 @@ def test_memory_merges_reasoning_into_content():
     ]
 
 
-def test_tool_call_message_merges_reasoning_into_content():
+def test_tool_call_message_preserves_reasoning_content():
     handler = ToolHandler(ToolRegistry())
     msg = handler.build_assistant_message(
         [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
         reasoning="thinking",
     )
 
-    assert msg["content"] == [{"type": "text", "text": "thinking"}]
-    assert msg["reasoning_content"] == ""
+    assert msg["content"] == ""
+    assert msg["reasoning_content"] == "thinking"
     assert msg["tool_calls"][0]["id"] == "call_1"
