@@ -1,14 +1,8 @@
-"""Helpers for formatting reasoning in OpenAI-compatible messages."""
+"""Helpers for formatting assistant messages in OpenAI-compatible history."""
 
 from __future__ import annotations
 
 from typing import Any
-
-
-def content_with_reasoning(content: Any, reasoning: str) -> list[dict[str, str]]:
-    parts: list[dict[str, str]] = [{"type": "text", "text": reasoning}]
-    parts.extend(content_parts(content))
-    return parts
 
 
 def content_parts(content: Any) -> list[dict[str, str]]:
@@ -22,18 +16,23 @@ def content_parts(content: Any) -> list[dict[str, str]]:
     return [{"type": "text", "text": str(content)}]
 
 
-def merge_reasoning_into_content(msg: dict[str, Any], reasoning: str | None) -> None:
-    if not reasoning:
-        return
-    msg["content"] = content_with_reasoning(msg.get("content"), reasoning)
-    msg["reasoning_content"] = ""
+def format_assistant_message(
+    *,
+    content: Any = None,
+    reasoning: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """尽量把同一轮模型输出还原为一条 assistant 消息。
 
-
-def preserve_tool_call_reasoning(msg: dict[str, Any], reasoning: str | None) -> None:
-    content = msg.get("content")
-    if content in (None, ""):
-        msg["content"] = ""
-    else:
-        msg["content"] = content_parts(content)
-    if reasoning:
-        msg["reasoning_content"] = reasoning
+    推理内容只写入 reasoning_content，正文只写入 content，工具调用只写入
+    tool_calls。这样 DeepSeek / BigModel 这类原生推理网关可以继续识别真实的
+    reasoning_content，同时正文不会和推理内容混在一起。
+    """
+    msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": content_parts(content) or "",
+        "reasoning_content": reasoning or "",
+    }
+    if tool_calls is not None:
+        msg["tool_calls"] = tool_calls
+    return msg

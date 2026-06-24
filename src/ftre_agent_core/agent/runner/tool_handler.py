@@ -25,7 +25,7 @@ from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 from ftre_agent_core.agent.event import AgentEvent
-from ftre_agent_core.reasoning import preserve_tool_call_reasoning
+from ftre_agent_core.reasoning import format_assistant_message
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
 if TYPE_CHECKING:
@@ -259,24 +259,23 @@ class ToolHandler:
         assistant 消息只包含 tool_calls；对应的 role="tool" 结果消息由
         react_runner 在所有工具完成后统一写入。
         """
-        msg: dict = {
-            "role": "assistant",
-            "content": content or "",
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.input, ensure_ascii=False)
-                        if tc.input is not None else "{}",
-                    },
-                }
-                for tc in tool_calls
-            ],
-        }
-        preserve_tool_call_reasoning(msg, reasoning)
-        return msg
+        formatted_tool_calls = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.input, ensure_ascii=False)
+                    if tc.input is not None else "{}",
+                },
+            }
+            for tc in tool_calls
+        ]
+        return format_assistant_message(
+            content=content,
+            reasoning=reasoning,
+            tool_calls=formatted_tool_calls,
+        )
 
     # 工具中间件
     def _run_before(self, ctx: ToolContext) -> ToolContext:

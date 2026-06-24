@@ -527,6 +527,9 @@ class ReActRunner:
                     )
                     return
 
+                if finish_reason == "unknown":
+                    return
+
                 # 分支 3b：检查是否有调用方注入的 pending user messages。
                 # 这些消息在模型给出最终回复后才追加到 memory，避免打断 ReAct 流程。
                 pending_user_messages = await self._drain_pending_user_messages()
@@ -559,11 +562,6 @@ class ReActRunner:
                 return
 
             # ── 以下处理空文本（full_text 为空）的情况 ──
-
-            # 只有 reasoning 没有正文：模型还在思考，继续下一轮。
-            if full_reasoning.strip():
-                self.agent.memory.add_assistant("", reasoning=full_reasoning)
-                return
 
             # finish_reason=length 但文本为空：可能是 max_tokens 设太小，
             # provider 返回了空 content。直接结束，避免无限循环。

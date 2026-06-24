@@ -3,7 +3,7 @@ MemoryManager - 对话消息管理器
 """
 from typing import Any
 
-from .reasoning import merge_reasoning_into_content
+from .reasoning import format_assistant_message
 
 
 class MemoryManager:
@@ -34,9 +34,7 @@ class MemoryManager:
         self._messages.append({"role": "user", "content": content})
 
     def add_assistant(self, content: str, usage=None, reasoning: str | None = None) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": content}
-        # 把 thinking 内容按 Zed 兼容格式合并进 assistant.content。
-        merge_reasoning_into_content(msg, reasoning)
+        msg: dict[str, Any] = format_assistant_message(content=content, reasoning=reasoning)
         self._messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, content: str, **kwargs) -> None:
