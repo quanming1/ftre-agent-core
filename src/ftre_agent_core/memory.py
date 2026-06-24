@@ -3,6 +3,8 @@ MemoryManager - 对话消息管理器
 """
 from typing import Any
 
+from .reasoning import merge_reasoning_into_content
+
 
 class MemoryManager:
     """管理单次 ReAct 循环中的消息列表。"""
@@ -34,16 +36,7 @@ class MemoryManager:
     def add_assistant(self, content: str, usage=None, reasoning: str | None = None) -> None:
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         # 把 thinking 内容按 Zed 兼容格式合并进 assistant.content。
-        if reasoning:
-            parts: list[dict[str, str]] = [{"type": "text", "text": reasoning}]
-            _c = msg.get("content")
-            if isinstance(_c, list):
-                for _item in _c:
-                    parts.append(_item if isinstance(_item, dict) else {"type": "text", "text": str(_item)})
-            elif _c not in (None, ""):
-                parts.append({"type": "text", "text": str(_c)})
-            msg["content"] = parts
-            msg["reasoning_content"] = ""
+        merge_reasoning_into_content(msg, reasoning)
         self._messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, content: str, **kwargs) -> None:
