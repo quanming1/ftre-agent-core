@@ -256,6 +256,7 @@ class LLMHandler:
         timeout: float = 120.0,
         max_retries: int = 3,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ):
         if api_type != "completions":
             logger.warning(
@@ -264,6 +265,7 @@ class LLMHandler:
 
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
         self._active_stream = None
         self._active_loop: asyncio.AbstractEventLoop | None = None
         self._cancelled: bool = False
@@ -304,6 +306,8 @@ class LLMHandler:
         }
         if self.max_tokens is not None:
             params["max_tokens"] = max(1, int(self.max_tokens))
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
         if tools:
             params["tools"] = tools
 
