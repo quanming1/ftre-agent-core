@@ -429,6 +429,28 @@ class ReActRunner:
         tool_tasks: dict[str, asyncio.Task] = {}
         tool_calls: list[ToolCall] = []
 
+        def _build_complete_events(persist_memory: bool = False) -> list:
+            """把已累积的文本/推理拼成 complete 事件列表。
+
+            正常结束和取消/异常路径共用：取消时已累积的半截内容也会被 emit，
+            从而和正常结束一样被上层持久化（文本与推理对称处理）。两条路径互斥，
+            正常情况下只会有一处调用。
+
+            persist_memory=True 时（取消/异常路径）顺便把半截内容写入 memory，
+            让后续用同一 session 续跑时模型能看到这段被中断的输出。正常路径
+            （persist_memory=False）的 memory 写入仍由阶段 3 统一处理，避免重复写。
+            """
+            full_reasoning = "".join(reasoning_parts)
+            full_text = "".join(text_parts)
+            if persist_memory and full_text.strip():
+                self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
+            events: list = []
+            if full_reasoning:
+                events.append(reasoning_complete_event(content=full_reasoning))
+            if full_text:
+                events.append(assistant_message_complete_event(content=full_text))
+            return events
+
         # ── 阶段 1：消费 LLM 流 ──
         # 这里如果发生异常（含 provider LLMError），
         # 必须先取消已启动的工具任务再向外传播。
@@ -473,17 +495,18 @@ class ReActRunner:
                         yield usage_update_event(event.usage)
 
         except BaseException:
-            # 异常时必须清理已启动的工具任务，防止泄露。
+            # 取消/异常：先 flush 已累积的半截文本与推理（让上层能持久化，并写入
+            # memory 以便续跑时可见），再清理已启动的工具任务，最后向上传播。
+            for ev in _build_complete_events(persist_memory=True):
+                yield ev
             await self.tool_handler.drain(tool_tasks)
             raise
 
         # ── 阶段 2：输出完整文本/reasoning 事件 ──
         full_text = "".join(text_parts)
         full_reasoning = "".join(reasoning_parts)
-        if full_reasoning:
-            yield reasoning_complete_event(content=full_reasoning)
-        if full_text:
-            yield assistant_message_complete_event(content=full_text)
+        for ev in _build_complete_events():
+            yield ev
 
         # 关闭 LLM span（记录本轮完整输出）。
         if llm_span and not llm_span.ended:
