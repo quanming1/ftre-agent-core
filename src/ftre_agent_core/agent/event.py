@@ -285,11 +285,47 @@ class UserMessageEvent(AgentEvent):
         object.__setattr__(self, 'type', EventType.USER_MESSAGE)
 
     def to_openai_message(self) -> dict:
-        """转为 OpenAI 格式 user message，可直接追加到 memory。"""
-        return {"role": "user", "content": self.content}
+        """转为 OpenAI 格式 user message，可直接追加到 memory。
+
+        content 中的 image_file part 会被转换为 image_url（读文件转 base64），
+        以兼容 OpenAI 多模态格式。其他 part 类型原样保留。
+        """
+        content = self.content
+        if isinstance(content, list):
+            content = [_convert_image_file_part(p) for p in content]
+        return {"role": "user", "content": content}
 
     def _data_dict(self) -> dict:
         return {"content": self.content, "metadata": self.metadata}
+
+
+def _convert_image_file_part(part: dict) -> dict:
+    """将 image_file part 转换为 image_url（读文件转 base64 data URL）。
+
+    agent-core 不能依赖 ftre 的 image_store，因此用标准库 base64 直接读取。
+    文件不存在或读取失败时降级为文本提示，不抛异常。
+    """
+    if not isinstance(part, dict):
+        return part
+    if part.get("type") != "image_file":
+        return part
+
+    path = part.get("path", "")
+    mime = part.get("mime_type", "image/png")
+    if not path:
+        return {"type": "text", "text": "[图片加载失败: 无文件路径]"}
+
+    try:
+        import base64 as _b64
+        with open(path, "rb") as f:
+            raw = f.read()
+        b64 = _b64.b64encode(raw).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+        }
+    except Exception as e:
+        return {"type": "text", "text": f"[图片加载失败: {path} ({e})]"}
 
 
 # ─── _from_type 分发工厂 ─────────────────────────────────────────
