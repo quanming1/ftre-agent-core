@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypedDict
+import uuid
 
 
 class EventType(str, Enum):
@@ -103,17 +104,24 @@ class AgentEvent:
     这是因为 dataclass 不允许不带默认值的字段出现在有默认值字段之后。
     """
     type: EventType = field(init=False)
+    event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16], init=False)
 
     def to_dict(self) -> dict:
         """序列化为 {"type": "...", "data": {...}}，与旧格式 100% 兼容。"""
-        return {"type": self.type, "data": self._data_dict()}
+        return {"type": self.type, "event_id": self.event_id, "data": self._data_dict()}
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentEvent:
         """从 {"type": "...", "data": {...}} 反序列化。"""
         t = d["type"]
         data = d.get("data", {})
-        return _from_type(t, data)
+        event = _from_type(t, data)
+        event_id = d.get("event_id")
+        if not event_id and isinstance(data, dict):
+            event_id = data.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            object.__setattr__(event, "event_id", event_id)
+        return event
 
     def _data_dict(self) -> dict:
         """子类覆盖：返回 data 段内容。"""
