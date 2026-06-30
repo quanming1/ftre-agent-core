@@ -143,10 +143,10 @@ class TestEventTypeEnum:
         from ftre_agent_core.agent.event import EventType
         expected = {
             "tool_call", "tool_result",
-            "message", "message_complete",
+            "assistant_message", "assistant_message_complete",
             "reasoning", "reasoning_complete",
             "error", "retry", "done",
-            "tool_call_streaming", "usage_update",
+            "tool_call_streaming", "usage_update", "user_message",
         }
         actual = {e.value for e in EventType}
         assert actual == expected
@@ -343,13 +343,29 @@ class TestAgentEventType:
         from ftre_agent_core.agent.event import assistant_message_event, EventType
         e = assistant_message_event("hello")
         d = e.to_dict()
-        assert d == {"type": EventType.MESSAGE, "data": {"content": "hello"}}
+        assert d["type"] == EventType.ASSISTANT_MESSAGE
+        assert d["data"] == {"content": "hello"}
+        assert isinstance(d["event_id"], str)
+        assert len(d["event_id"]) == 16
 
     def test_agent_event_from_dict(self):
         from ftre_agent_core.agent.event import AgentEvent, AssistantMessageEvent
-        e = AgentEvent.from_dict({"type": "assistant_message", "data": {"content": "world"}})
+        e = AgentEvent.from_dict({
+            "type": "assistant_message",
+            "event_id": "evt_top_level",
+            "data": {"content": "world"},
+        })
         assert isinstance(e, AssistantMessageEvent)
         assert e.content == "world"
+        assert e.event_id == "evt_top_level"
+
+    def test_agent_event_from_legacy_data_event_id(self):
+        from ftre_agent_core.agent.event import AgentEvent
+        e = AgentEvent.from_dict({
+            "type": "assistant_message",
+            "data": {"content": "world", "event_id": "evt_from_data"},
+        })
+        assert e.event_id == "evt_from_data"
 
     def test_agent_event_no_dict_access(self):
         """AgentEvent 实例不再支持 dict 风格访问"""
