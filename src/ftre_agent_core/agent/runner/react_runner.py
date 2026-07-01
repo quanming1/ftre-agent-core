@@ -229,10 +229,10 @@ class ReActRunner:
         if isinstance(message, str):
             self.agent.memory.add_user(message)
         else:
-            # 列表形式：跳过 system 消息（system_prompt 由 memory 单独管理），其余原样写入。
+            # 列表形式：原样写入 memory。
+            # system 消息（如插件通过 BEFORE_AGENT_RUN hook 注入的 MCP/Skill 提示）
+            # 也会被写入 _messages，最终在 get_messages() 中出现在 memory.system_prompt 之后。
             for msg in message:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    continue
                 self.agent.memory.add_raw(msg)
 
         # ── 主循环 + 异常/收尾处理 ──
