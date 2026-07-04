@@ -129,6 +129,10 @@ class ToolRegistry:
     def to_openai_tools(self) -> list[dict]:
         return [tool.to_openai_dict() for tool in self._tools.values()]
 
+    def snapshot(self) -> list[Tool]:
+        """返回当前已注册工具的快照（按注册顺序）。"""
+        return list(self._tools.values())
+
     @property
     def names(self) -> list[str]:
         return list(self._tools.keys())
