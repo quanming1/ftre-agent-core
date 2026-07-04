@@ -3,7 +3,7 @@ ReAct Agent - 异步推理与行动循环
 """
 from typing import AsyncGenerator
 
-from ftre_agent_core.tool import Tool, ToolRegistry
+from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.tracing import Tracer
 from .event import AgentEvent
@@ -70,12 +70,6 @@ class ReActAgent:
     @property
     def state(self):
         return self._runner.state
-
-    def add_tool(self, tool: Tool) -> None:
-        self._registry.register(tool)
-
-    def remove_tool(self, name: str) -> None:
-        self._registry.unregister(name)
 
     async def run(
         self, message, runtime_context: dict | None = None
