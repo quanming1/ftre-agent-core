@@ -92,9 +92,11 @@ class ToolHandler:
         try:
             tool = self.registry.get(name)
             if tool is not None and tool.is_async():
-                # 异步工具必须直接 await 底层协程函数，不能走 Tool.execute()。
-                # Tool.execute() 面向同步调用方，会使用 asyncio.run()。
-                raw = await tool._get_callable()(**ctx.arguments)
+                # 异步工具直接 await 底层协程函数，但需要先解析 Injected 依赖注入。
+                resolved_kwargs = self.registry._resolve_injections(
+                    name, ctx.arguments, ctx.metadata.get("runtime_context"),
+                )
+                raw = await tool._get_callable()(**resolved_kwargs)
             else:
                 raw = await asyncio.to_thread(
                     self.registry.execute,
