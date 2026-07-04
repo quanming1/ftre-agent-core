@@ -22,7 +22,7 @@ class ReActAgent:
         api_base: str | None = None,
         api_type: str = "completions",
         system_prompt: str = "",
-        tools: list[Tool] = None,
+        tools: ToolRegistry | None = None,
         max_iterations: int | None = None,
         max_tokens: int | None = None,
         memory: MemoryManager | None = None,
@@ -47,10 +47,7 @@ class ReActAgent:
         else:
             self.memory = MemoryManager({"system_prompt": system_prompt})
 
-        self._registry = ToolRegistry()
-        if tools:
-            for t in tools:
-                self._registry.register(t)
+        self._registry = tools if tools is not None else ToolRegistry()
 
         self._runner = ReActRunner(self)
 
