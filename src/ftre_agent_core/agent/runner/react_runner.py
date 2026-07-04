@@ -174,7 +174,7 @@ class ReActRunner:
             max_tokens=agent.max_tokens,
         )
         # ToolHandler 负责工具的并发调度、取消传播和结果归并。
-        self.tool_handler = ToolHandler(agent.tools)
+        self.tool_handler = ToolHandler(agent.tool_registry)
 
     # ── 入口：run() ────────────────────────────────────────────────────────
 
@@ -334,7 +334,7 @@ class ReActRunner:
         """
         messages = self.agent.memory.get_messages()
         # force_no_tools_once 用于空响应最终化：强制模型不带工具，只输出文本。
-        tools = None if self.state.force_no_tools_once else self.agent.tools.to_openai_tools() or None
+        tools = None if self.state.force_no_tools_once else self.agent.tool_registry.to_openai_tools() or None
         self.state.force_no_tools_once = False
         max_attempts = 1 + self.agent.max_retries  # 首次 + 重试次数
 
