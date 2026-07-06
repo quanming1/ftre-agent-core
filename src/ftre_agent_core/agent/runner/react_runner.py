@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncGenerator, TYPE_CHECKING
@@ -37,15 +38,10 @@ from ..event import (
     AgentEvent,
     EventType,
     assistant_message_event,
-    reasoning_event,
-    reasoning_complete_event,
     assistant_message_complete_event,
     done_event,
-    usage_update_event,
     error_event,
     retry_event,
-    tool_call_streaming_event,
-    tool_call_event,
     tool_result_event,
     user_message_event,
 )
@@ -112,6 +108,7 @@ class RunState:
     force_no_tools_once: bool = False               # 下一轮强制不带 tools（用于空响应最终化）
     finalization_retrying: bool = False             # 是否已进入"强制最终化"阶段
     trace_span: TraceSpan | None = None             # 本次执行的根 trace span
+    partial_content: list[dict] = field(default_factory=list)  # 跨轮累积的 content[]，用于流式 assistant_message
 
     @property
     def is_cancelled(self) -> bool:
@@ -132,6 +129,7 @@ class RunState:
         self.force_no_tools_once = False
         self.finalization_retrying = False
         self.trace_span = None
+        self.partial_content = []
 
     def cancel(self) -> None:
         """标记为取消，同时触发 cancel_token 通知正在执行的工具。"""
@@ -429,8 +427,17 @@ class ReActRunner:
         tool_tasks: dict[str, asyncio.Task] = {}
         tool_calls: list[ToolCall] = []
 
+        # partial_content 跨轮累积，放在 RunState 中以便 ReAct 多轮拼接。
+        partial_content = self.state.partial_content
+
+        def _emit_streaming() -> AgentEvent:
+            """yield 当前 partial_content 的快照作为流式 assistant_message。"""
+            return assistant_message_event(
+                content=[dict(p) for p in partial_content]
+            )
+
         def _build_complete_events(persist_memory: bool = False, kind: str = "final") -> list:
-            """把已累积的文本/推理拼成 complete 事件列表。
+            """把本轮内容拼成单个 assistant_message_complete 事件。
 
             正常结束和取消/异常路径共用：取消时已累积的半截内容也会被 emit，
             从而和正常结束一样被上层持久化（文本与推理对称处理）。两条路径互斥，
@@ -442,14 +449,30 @@ class ReActRunner:
             """
             full_reasoning = "".join(reasoning_parts)
             full_text = "".join(text_parts)
+            if not full_reasoning and not full_text and not tool_calls:
+                return []
+
+            content: list[dict] = []
+            if full_reasoning:
+                content.append({"type": "thinking", "thinking": full_reasoning, "event_id": uuid.uuid4().hex[:16]})
+            if full_text:
+                content.append({"type": "text", "text": full_text, "event_id": uuid.uuid4().hex[:16]})
+            for tc in tool_calls:
+                content.append({"type": "toolCall", "id": tc.id, "name": tc.name, "arguments": tc.input or {}, "event_id": uuid.uuid4().hex[:16]})
+
             if persist_memory and full_text.strip():
                 self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
-            events: list = []
-            if full_reasoning:
-                events.append(reasoning_complete_event(content=full_reasoning))
-            if full_text:
-                events.append(assistant_message_complete_event(content=full_text, kind=kind))
-            return events
+
+            metadata: dict[str, Any] = {"kind": kind}
+            if usage:
+                metadata["usage"] = usage
+            if finish_reason and finish_reason != "unknown":
+                metadata["stopReason"] = finish_reason
+            if response_metadata:
+                metadata["responseId"] = response_metadata.get("id")
+                metadata["model"] = response_metadata.get("model")
+
+            return [assistant_message_complete_event(content=content, metadata=metadata)]
 
         # ── 阶段 1：消费 LLM 流 ──
         # 这里如果发生异常（含 provider LLMError），
@@ -459,27 +482,58 @@ class ReActRunner:
                 self.state.check_cancel()
 
                 if isinstance(event, TextDelta):
-                    # 文本增量：实时 yield 给 UI 展示。
+                    # 文本增量：累积到 partial_content，yield 完整快照。
                     text_parts.append(event.text)
-                    yield assistant_message_event(content=event.text)
+                    if partial_content and partial_content[-1].get("type") == "text":
+                        partial_content[-1]["text"] = partial_content[-1].get("text", "") + event.text
+                    else:
+                        partial_content.append({"type": "text", "text": event.text})
+                    yield _emit_streaming()
 
                 elif isinstance(event, ReasoningDelta):
-                    # 推理增量（thinking model 的 chain-of-thought）：实时 yield。
+                    # 推理增量（thinking model 的 chain-of-thought）：累积到 partial_content。
                     reasoning_parts.append(event.text)
-                    yield reasoning_event(content=event.text)
+                    if partial_content and partial_content[-1].get("type") == "thinking":
+                        partial_content[-1]["thinking"] = partial_content[-1].get("thinking", "") + event.text
+                    else:
+                        partial_content.append({"type": "thinking", "thinking": event.text})
+                    yield _emit_streaming()
 
                 elif isinstance(event, ToolInputDelta):
-                    # 工具参数 JSON 片段：给 UI 实时展示工具调用正在输入。
-                    yield tool_call_streaming_event([{
-                        "id": event.id,
-                        "name": event.name,
-                        "arguments_delta": event.text,
-                    }])
+                    # 工具参数 JSON 片段：累积到 partial_content 中对应的 toolCall part。
+                    _accumulated = False
+                    for p in reversed(partial_content):
+                        if p.get("type") == "toolCall" and p.get("id") == event.id:
+                            p["arguments"] = p.get("arguments", "") + event.text
+                            if event.name:
+                                p["name"] = event.name
+                            _accumulated = True
+                            break
+                    if not _accumulated:
+                        partial_content.append({
+                            "type": "toolCall", "id": event.id,
+                            "name": event.name or "", "arguments": event.text,
+                        })
+                    yield _emit_streaming()
 
                 elif isinstance(event, ToolCall):
                     # 完整的工具调用：立即 spawn 异步任务，不在这里 await。
-                    # 这样多个工具调用可以并发执行。
+                    # 同时更新 partial_content 中对应 toolCall 的 arguments 为完整 dict。
                     tool_calls.append(event)
+                    _updated = False
+                    for p in reversed(partial_content):
+                        if p.get("type") == "toolCall" and p.get("id") == event.id:
+                            p["name"] = event.name
+                            p["arguments"] = event.input or {}
+                            _updated = True
+                            break
+                    if not _updated:
+                        partial_content.append({
+                            "type": "toolCall", "id": event.id,
+                            "name": event.name, "arguments": event.input or {},
+                        })
+                    yield _emit_streaming()
+
                     tool_tasks[event.id] = self.tool_handler.spawn(
                         event,
                         self.state,
@@ -492,13 +546,13 @@ class ReActRunner:
                     response_metadata = event.response_metadata
                     if event.usage:
                         usage = event.usage
-                        yield usage_update_event(event.usage)
 
         except BaseException:
             # 取消/异常：先 flush 已累积的半截文本与推理（让上层能持久化，并写入
             # memory 以便续跑时可见），再清理已启动的工具任务，最后向上传播。
             for ev in _build_complete_events(persist_memory=True):
                 yield ev
+            self.state.partial_content = []
             await self.tool_handler.drain(tool_tasks)
             raise
 
@@ -508,6 +562,7 @@ class ReActRunner:
         _kind = "block" if tool_calls else "final"
         for ev in _build_complete_events(kind=_kind):
             yield ev
+        self.state.partial_content = []
 
         # 关闭 LLM span（记录本轮完整输出）。
         if llm_span and not llm_span.ended:
@@ -671,9 +726,9 @@ class ReActRunner:
             if result.event is not None:
                 pending_user_messages.append(result.event)
 
-        # 构建向外 yield 的事件列表（tool_call → tool_result → pending_user_messages）
-        for tc in tool_calls:
-            events.append(tool_call_event(id=tc.id, name=tc.name, arguments=tc.input or {}))
+        # 构建向外 yield 的事件列表（tool_result → pending_user_messages）
+        # tool_call 已嵌入 assistant_message_complete（阶段 2），不再独立 yield。
+        events: list[AgentEvent] = []
 
         for tc, result in zip(tool_calls, results):
             events.append(tool_result_event(

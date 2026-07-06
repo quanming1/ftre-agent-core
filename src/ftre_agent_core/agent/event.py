@@ -14,17 +14,12 @@ import uuid
 
 
 class EventType(str, Enum):
-    TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     ASSISTANT_MESSAGE = "assistant_message"
     ASSISTANT_MESSAGE_COMPLETE = "assistant_message_complete"
-    REASONING = "reasoning"
-    REASONING_COMPLETE = "reasoning_complete"
     ERROR = "error"
     RETRY = "retry"
     DONE = "done"
-    TOOL_CALL_STREAMING = "tool_call_streaming"
-    USAGE_UPDATE = "usage_update"
     USER_MESSAGE = "user_message"
 
 
@@ -37,12 +32,6 @@ class DoneReason(str, Enum):
 
 # ─── TypedDict（保留，外部可能 import）──────────────────────────
 
-class ToolCallData(TypedDict):
-    id: str
-    name: str
-    arguments: dict[str, Any]
-
-
 class ToolResultData(TypedDict, total=False):
     id: str
     name: str
@@ -54,22 +43,17 @@ class ToolResultData(TypedDict, total=False):
 
 
 class AssistantMessageData(TypedDict):
-    content: str
+    content: list[dict]
 
 
 class AssistantMessageCompleteData(TypedDict, total=False):
-    content: str
-    kind: str
+    content: list[dict]
+    metadata: dict
 
 
 class DoneData(TypedDict, total=False):
     success: bool
     reason: DoneReason
-    usage: dict
-
-
-class UsageUpdateData(TypedDict):
-    usage: dict
 
 
 class ErrorData(TypedDict):
@@ -83,9 +67,6 @@ class RetryData(TypedDict):
     attempt: int
     max_attempts: int
 
-
-class ToolCallStreamingData(TypedDict):
-    tool_calls: list[dict]
 
 
 # ─── 向后兼容别名 ───────────────────────────────────────────────
@@ -132,19 +113,6 @@ class AgentEvent:
 # ─── 具体事件子类 ────────────────────────────────────────────────
 
 @dataclass
-class ToolCallEvent(AgentEvent):
-    tool_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.TOOL_CALL)
-
-    def _data_dict(self) -> dict:
-        return {"id": self.tool_id, "name": self.tool_name, "arguments": self.arguments}
-
-
-@dataclass
 class ToolResultEvent(AgentEvent):
     tool_id: str
     tool_name: str
@@ -173,7 +141,8 @@ class ToolResultEvent(AgentEvent):
 
 @dataclass
 class AssistantMessageEvent(AgentEvent):
-    content: str
+    """流式累积事件 —— 每次携带到当前为止的完整 content[]。"""
+    content: list[dict]
 
     def __post_init__(self):
         object.__setattr__(self, 'type', EventType.ASSISTANT_MESSAGE)
@@ -184,52 +153,35 @@ class AssistantMessageEvent(AgentEvent):
 
 @dataclass
 class AssistantMessageCompleteEvent(AgentEvent):
-    content: str
-    kind: str = "final"
+    """一轮 LLM 输出的完整消息。
+
+    content 是内容块数组，混合 text / thinking / toolCall，
+    对齐 OpenAI Chat Completions API 的 message content 格式。
+
+    metadata 携带 usage、kind、stopReason 等元信息，
+    取代旧的 usage_update / reasoning_complete / tool_call 独立事件。
+    """
+    content: list[dict]
+    metadata: dict
 
     def __post_init__(self):
         object.__setattr__(self, 'type', EventType.ASSISTANT_MESSAGE_COMPLETE)
 
     def _data_dict(self) -> dict:
-        return {"content": self.content, "kind": self.kind}
+        return {"content": self.content, "metadata": self.metadata}
 
-
-@dataclass
-class ReasoningEvent(AgentEvent):
-    content: str
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.REASONING)
-
-    def _data_dict(self) -> dict:
-        return {"content": self.content}
-
-
-@dataclass
-class ReasoningCompleteEvent(AgentEvent):
-    content: str
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.REASONING_COMPLETE)
-
-    def _data_dict(self) -> dict:
-        return {"content": self.content}
 
 
 @dataclass
 class DoneEvent(AgentEvent):
     success: bool
     reason: DoneReason
-    usage: dict | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'type', EventType.DONE)
 
     def _data_dict(self) -> dict:
-        d: dict[str, Any] = {"success": self.success, "reason": self.reason}
-        if self.usage:
-            d["usage"] = self.usage
-        return d
+        return {"success": self.success, "reason": self.reason}
 
 
 @dataclass
@@ -257,27 +209,6 @@ class RetryEvent(AgentEvent):
     def _data_dict(self) -> dict:
         return {"code": self.code, "message": self.message, "attempt": self.attempt, "max_attempts": self.max_attempts}
 
-
-@dataclass
-class ToolCallStreamingEvent(AgentEvent):
-    tool_calls: list[dict]
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.TOOL_CALL_STREAMING)
-
-    def _data_dict(self) -> dict:
-        return {"tool_calls": self.tool_calls}
-
-
-@dataclass
-class UsageUpdateEvent(AgentEvent):
-    usage: dict
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.USAGE_UPDATE)
-
-    def _data_dict(self) -> dict:
-        return {"usage": self.usage}
 
 
 @dataclass
@@ -342,13 +273,7 @@ def _convert_image_file_part(part: dict) -> dict:
 
 def _from_type(t: str, data: dict) -> AgentEvent:
     """根据 type 字符串分派到对应 dataclass 子类。"""
-    if t == EventType.TOOL_CALL:
-        return ToolCallEvent(
-            tool_id=data["id"],
-            tool_name=data["name"],
-            arguments=data["arguments"],
-        )
-    elif t == EventType.TOOL_RESULT:
+    if t == EventType.TOOL_RESULT:
         return ToolResultEvent(
             tool_id=data.get("id", ""),
             tool_name=data.get("name", ""),
@@ -359,21 +284,16 @@ def _from_type(t: str, data: dict) -> AgentEvent:
             metadata=data.get("metadata"),
         )
     elif t == EventType.ASSISTANT_MESSAGE:
-        return AssistantMessageEvent(content=data.get("content", ""))
+        return AssistantMessageEvent(content=data.get("content", []))
     elif t == EventType.ASSISTANT_MESSAGE_COMPLETE:
         return AssistantMessageCompleteEvent(
-            content=data.get("content", ""),
-            kind=data.get("kind", "final"),
+            content=data.get("content", []),
+            metadata=data.get("metadata", {}),
         )
-    elif t == EventType.REASONING:
-        return ReasoningEvent(content=data.get("content", ""))
-    elif t == EventType.REASONING_COMPLETE:
-        return ReasoningCompleteEvent(content=data.get("content", ""))
     elif t == EventType.DONE:
         return DoneEvent(
             success=data.get("success", False),
             reason=data.get("reason", DoneReason.COMPLETED),
-            usage=data.get("usage"),
         )
     elif t == EventType.ERROR:
         return ErrorEvent(
@@ -387,10 +307,6 @@ def _from_type(t: str, data: dict) -> AgentEvent:
             attempt=data.get("attempt", 0),
             max_attempts=data.get("max_attempts", 0),
         )
-    elif t == EventType.TOOL_CALL_STREAMING:
-        return ToolCallStreamingEvent(tool_calls=data.get("tool_calls", []))
-    elif t == EventType.USAGE_UPDATE:
-        return UsageUpdateEvent(usage=data.get("usage", {}))
     elif t == EventType.USER_MESSAGE:
         return UserMessageEvent(
             content=data.get("content", ""),
@@ -402,25 +318,8 @@ def _from_type(t: str, data: dict) -> AgentEvent:
 
 # ─── 事件构造函数（签名不变，返回 dataclass 实例）───────────────
 
-def tool_call_streaming_event(chunks: list) -> AgentEvent:
-    """从 ToolCallDeltaChunk 列表或 dict 构造流式工具调用事件。"""
-    result = []
-    for c in chunks:
-        if isinstance(c, dict):
-            entry = {k: v for k, v in c.items() if v is not None}
-        else:
-            entry = {k: v for k, v in {
-                "index": c.index,
-                "id": c.id,
-                "name": c.name,
-                "arguments_delta": c.arguments_delta,
-            }.items() if v is not None}
-        result.append(entry)
-    return ToolCallStreamingEvent(tool_calls=result)
-
-
-def tool_call_event(id: str, name: str, arguments: dict[str, Any]) -> AgentEvent:
-    return ToolCallEvent(tool_id=id, tool_name=name, arguments=arguments)
+def assistant_message_event(content: list[dict]) -> AgentEvent:
+    return AssistantMessageEvent(content=content)
 
 
 def tool_result_event(
@@ -444,29 +343,24 @@ def tool_result_event(
     )
 
 
-def assistant_message_event(content: str) -> AgentEvent:
-    return AssistantMessageEvent(content=content)
+def assistant_message_complete_event(
+    content: list[dict],
+    metadata: dict | None = None,
+) -> AgentEvent:
+    """构造一轮 LLM 输出的完整消息事件。
+
+    Args:
+        content: 内容块数组，如 [{type:"text",text:"..."}, {type:"toolCall",...}]
+        metadata: 元信息，如 {kind, usage, stopReason, provider, model, responseId}
+    """
+    return AssistantMessageCompleteEvent(
+        content=content,
+        metadata=metadata or {},
+    )
 
 
-def reasoning_event(content: str) -> AgentEvent:
-    return ReasoningEvent(content=content)
-
-
-def reasoning_complete_event(content: str) -> AgentEvent:
-    """一轮 LLM reasoning 的完整文本，用于持久化和多轮回放。"""
-    return ReasoningCompleteEvent(content=content)
-
-
-def assistant_message_complete_event(content: str, kind: str = "final") -> AgentEvent:
-    return AssistantMessageCompleteEvent(content=content, kind=kind)
-
-
-def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> AgentEvent:
-    return DoneEvent(success=success, reason=reason, usage=usage)
-
-
-def usage_update_event(usage: dict) -> AgentEvent:
-    return UsageUpdateEvent(usage=usage)
+def done_event(success: bool, reason: DoneReason) -> AgentEvent:
+    return DoneEvent(success=success, reason=reason)
 
 
 def user_message_event(
