@@ -429,7 +429,7 @@ class ReActRunner:
         tool_tasks: dict[str, asyncio.Task] = {}
         tool_calls: list[ToolCall] = []
 
-        def _build_complete_events(persist_memory: bool = False) -> list:
+        def _build_complete_events(persist_memory: bool = False, kind: str = "final") -> list:
             """把已累积的文本/推理拼成 complete 事件列表。
 
             正常结束和取消/异常路径共用：取消时已累积的半截内容也会被 emit，
@@ -448,7 +448,7 @@ class ReActRunner:
             if full_reasoning:
                 events.append(reasoning_complete_event(content=full_reasoning))
             if full_text:
-                events.append(assistant_message_complete_event(content=full_text))
+                events.append(assistant_message_complete_event(content=full_text, kind=kind))
             return events
 
         # ── 阶段 1：消费 LLM 流 ──
@@ -505,7 +505,8 @@ class ReActRunner:
         # ── 阶段 2：输出完整文本/reasoning 事件 ──
         full_text = "".join(text_parts)
         full_reasoning = "".join(reasoning_parts)
-        for ev in _build_complete_events():
+        _kind = "block" if tool_calls else "final"
+        for ev in _build_complete_events(kind=_kind):
             yield ev
 
         # 关闭 LLM span（记录本轮完整输出）。

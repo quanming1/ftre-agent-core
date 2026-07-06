@@ -57,8 +57,9 @@ class AssistantMessageData(TypedDict):
     content: str
 
 
-class AssistantMessageCompleteData(TypedDict):
+class AssistantMessageCompleteData(TypedDict, total=False):
     content: str
+    kind: str
 
 
 class DoneData(TypedDict, total=False):
@@ -184,12 +185,13 @@ class AssistantMessageEvent(AgentEvent):
 @dataclass
 class AssistantMessageCompleteEvent(AgentEvent):
     content: str
+    kind: str = "final"
 
     def __post_init__(self):
         object.__setattr__(self, 'type', EventType.ASSISTANT_MESSAGE_COMPLETE)
 
     def _data_dict(self) -> dict:
-        return {"content": self.content}
+        return {"content": self.content, "kind": self.kind}
 
 
 @dataclass
@@ -359,7 +361,10 @@ def _from_type(t: str, data: dict) -> AgentEvent:
     elif t == EventType.ASSISTANT_MESSAGE:
         return AssistantMessageEvent(content=data.get("content", ""))
     elif t == EventType.ASSISTANT_MESSAGE_COMPLETE:
-        return AssistantMessageCompleteEvent(content=data.get("content", ""))
+        return AssistantMessageCompleteEvent(
+            content=data.get("content", ""),
+            kind=data.get("kind", "final"),
+        )
     elif t == EventType.REASONING:
         return ReasoningEvent(content=data.get("content", ""))
     elif t == EventType.REASONING_COMPLETE:
@@ -452,8 +457,8 @@ def reasoning_complete_event(content: str) -> AgentEvent:
     return ReasoningCompleteEvent(content=content)
 
 
-def assistant_message_complete_event(content: str) -> AgentEvent:
-    return AssistantMessageCompleteEvent(content=content)
+def assistant_message_complete_event(content: str, kind: str = "final") -> AgentEvent:
+    return AssistantMessageCompleteEvent(content=content, kind=kind)
 
 
 def done_event(success: bool, reason: DoneReason, usage: dict | None = None) -> AgentEvent:
