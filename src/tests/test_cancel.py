@@ -177,8 +177,10 @@ class TestCancelWithTools:
         def consume():
             for event in agent.run("执行一个耗时5秒的操作"):
                 events.append(event)
-                if event["type"] == EventType.TOOL_CALL:
-                    print(f"工具调用: {event['data']['name']}")
+                if event["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE:
+                    tool_calls = [b for b in event["data"]["content"] if b.get("type") == "toolCall"]
+                    if tool_calls:
+                        print(f"工具调用: {tool_calls[0]['name']}")
 
         thread = threading.Thread(target=consume)
         thread.start()

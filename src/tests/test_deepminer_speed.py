@@ -342,8 +342,9 @@ class TestToolCallSpeed:
         tool_result_seen = False
 
         for ts, event in timed_events:
-            if event["type"] == EventType.TOOL_CALL and tool_call_ts is None:
-                tool_call_ts = ts
+            if event["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE and tool_call_ts is None:
+                if any(b.get("type") == "toolCall" for b in event["data"]["content"]):
+                    tool_call_ts = ts
             elif event["type"] == EventType.TOOL_RESULT and tool_result_ts is None:
                 tool_result_ts = ts
                 tool_result_seen = True
@@ -370,7 +371,12 @@ class TestToolCallSpeed:
             )
 
         event_types = [e["type"] for _, e in timed_events]
-        assert EventType.TOOL_CALL in event_types, "未触发工具调用"
+        has_tool_call = any(
+            e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
+            and any(b.get("type") == "toolCall" for b in e["data"]["content"])
+            for _, e in timed_events
+        )
+        assert has_tool_call, "未触发工具调用"
         assert EventType.TOOL_RESULT in event_types, "未收到工具结果"
         assert EventType.DONE in event_types, "未正常结束"
 
@@ -418,7 +424,9 @@ class TestToolCallSpeed:
         total = time.perf_counter() - start
 
         tool_calls = [
-            (ts, e) for ts, e in timed_events if e["type"] == EventType.TOOL_CALL
+            (ts, e) for ts, e in timed_events
+            if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
+            and any(b.get("type") == "toolCall" for b in e["data"]["content"])
         ]
         tool_results = [
             (ts, e) for ts, e in timed_events if e["type"] == EventType.TOOL_RESULT
@@ -690,7 +698,10 @@ class TestSummaryBenchmark:
         events3 = _collect_events(agent3, "深圳天气")
         elapsed3 = time.perf_counter() - start
         tool_call_ts = next(
-            (ts for ts, e in events3 if e["type"] == EventType.TOOL_CALL), None
+            (ts for ts, e in events3
+             if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
+             and any(b.get("type") == "toolCall" for b in e["data"]["content"])),
+            None
         )
         tool_result_ts = next(
             (ts for ts, e in events3 if e["type"] == EventType.TOOL_RESULT), None

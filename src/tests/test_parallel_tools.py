@@ -57,18 +57,18 @@ def main():
         etype = event["type"].value
         data = event.get("data", {})
 
-        if etype == "message":
+        if etype == "assistant_message":
             print(data.get("content", ""), end="", flush=True)
-        elif etype == "tool_call":
-            tool_calls.append(data)
-            print(f"  [TOOL_CALL] {data['name']}({data['arguments']})")
+        elif etype == "assistant_message_complete":
+            for b in data.get("content", []):
+                if b.get("type") == "toolCall":
+                    tool_calls.append(b)
+                    print(f"  [TOOL_CALL] {b['name']}({b['arguments']})")
         elif etype == "tool_result":
             tool_results.append(data)
             print(f"  [TOOL_RESULT] {data['name']} → {data['result']}")
         elif etype == "done":
             print(f"\n  [DONE] success={data.get('success')}")
-        elif etype == "usage_update":
-            pass  # 静默
 
     elapsed = time.perf_counter() - start
 
