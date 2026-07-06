@@ -46,8 +46,10 @@ for event in agent.run("调用 slow_a fast_b medium_c，参数都是 test"):
     t = time.perf_counter() - start
     data = event.get("data", {})
 
-    if etype == "tool_call":
-        print(f"  [{t:.1f}s] TOOL_CALL: {data['name']}")
+    if etype == "assistant_message_complete":
+        for b in data.get("content", []):
+            if b.get("type") == "toolCall":
+                print(f"  [{t:.1f}s] TOOL_CALL: {b['name']}")
     elif etype == "tool_result":
         print(f"  [{t:.1f}s] TOOL_RESULT: {data['name']} -> {data['result']}")
     elif etype == "done":

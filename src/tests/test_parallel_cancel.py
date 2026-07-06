@@ -47,9 +47,11 @@ async def main():
             etype = event["type"].value
             data = event.get("data", {})
 
-            if etype == "tool_call":
-                print(f"  [{t:.1f}s] TOOL_CALL: {data['name']}")
-                tool_calls_seen.set()
+            if etype == "assistant_message_complete":
+                tool_call_blocks = [b for b in data.get("content", []) if b.get("type") == "toolCall"]
+                for tc in tool_call_blocks:
+                    print(f"  [{t:.1f}s] TOOL_CALL: {tc['name']}")
+                    tool_calls_seen.set()
             elif etype == "tool_result":
                 print(f"  [{t:.1f}s] TOOL_RESULT: {data['name']} status={data.get('status')} result={data.get('result')}")
             elif etype == "message":
@@ -75,7 +77,7 @@ async def main():
     print(f"\n--- 结果 ---")
     print(f"取消延迟: {(cancel_done - cancel_start)*1000:.1f}ms")
     print(f"总事件数: {len(events)}")
-    print(f"TOOL_CALL 数: {sum(1 for e in events if e['type'] == EventType.TOOL_CALL)}")
+    print(f"含 toolCall 的 AMC 数: {sum(1 for e in events if e['type'] == EventType.ASSISTANT_MESSAGE_COMPLETE and any(b.get('type') == 'toolCall' for b in e['data']['content']))}")
     print(f"TOOL_RESULT 数: {sum(1 for e in events if e['type'] == EventType.TOOL_RESULT)}")
     tool_results = [e for e in events if e["type"] == EventType.TOOL_RESULT]
     for tr in tool_results:

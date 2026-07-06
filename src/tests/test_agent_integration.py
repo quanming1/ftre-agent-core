@@ -52,7 +52,7 @@ class TestAgentBasic:
         events = list(agent.run("你好"))
 
         event_types = [e["type"] for e in events]
-        assert EventType.MESSAGE in event_types or EventType.MESSAGE_COMPLETE in event_types
+        assert EventType.ASSISTANT_MESSAGE_COMPLETE in event_types
         assert EventType.DONE in event_types
 
     def test_tool_call(self, simple_tools):
@@ -68,12 +68,14 @@ class TestAgentBasic:
         events = list(agent.run("北京天气怎么样？"))
 
         event_types = [e["type"] for e in events]
-        assert EventType.TOOL_CALL in event_types
         assert EventType.TOOL_RESULT in event_types
         assert EventType.DONE in event_types
 
-        tool_call_event = next(e for e in events if e["type"] == EventType.TOOL_CALL)
-        assert tool_call_event["data"]["name"] == "get_weather"
+        # tool_call 现在嵌入 assistant_message_complete 的 content[] 中
+        amc = next(e for e in events if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE)
+        tool_call_blocks = [b for b in amc["data"]["content"] if b.get("type") == "toolCall"]
+        assert len(tool_call_blocks) > 0
+        assert tool_call_blocks[0]["name"] == "get_weather"
 
     def test_tool_result_in_response(self, simple_tools):
         """验证工具结果被正确使用"""
@@ -107,7 +109,7 @@ class TestAgentBasic:
         events = list(agent.run("计算 123 * 456"))
 
         event_types = [e["type"] for e in events]
-        assert EventType.TOOL_CALL in event_types
+        assert EventType.TOOL_RESULT in event_types
 
         tool_result_event = next(
             (e for e in events if e["type"] == EventType.TOOL_RESULT),
@@ -134,11 +136,16 @@ class TestAgentMultiTurn:
 
         events = list(agent.run("我叫什么名字？"))
 
-        message_events = [
+        amc_events = [
             e for e in events
-            if e["type"] == EventType.MESSAGE and e["data"]["content"]
+            if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
         ]
-        full_response = "".join(e["data"]["content"] for e in message_events)
+        # 从 content[] 中提取所有 text 块
+        full_response = ""
+        for e in amc_events:
+            for block in e["data"]["content"]:
+                if block.get("type") == "text":
+                    full_response += block["text"]
         assert "小明" in full_response or "明" in full_response
 
 

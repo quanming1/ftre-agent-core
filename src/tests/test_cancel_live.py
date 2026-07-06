@@ -49,9 +49,11 @@ def test_cancel_during_tool():
 
             if etype == "message":
                 print(data.get("content", ""), end="", flush=True)
-            elif etype == "tool_call":
-                print(f"\n  [TOOL_CALL] {data['name']}({data['arguments']})")
-                tool_call_seen.set()
+            elif etype == "assistant_message_complete":
+                for b in data.get("content", []):
+                    if b.get("type") == "toolCall":
+                        print(f"\n  [TOOL_CALL] {b['name']}({b['arguments']})")
+                        tool_call_seen.set()
             elif etype == "tool_result":
                 print(f"  [TOOL_RESULT] status={data.get('status')}, result={data.get('result')[:50]}...")
             elif etype == "done":
@@ -76,14 +78,16 @@ def test_cancel_during_tool():
 
     # 统计
     latency_ms = (cancel_done - cancel_start) * 1000
-    tool_calls = [e for e in events if e["type"] == EventType.TOOL_CALL]
+    # tool_call 现在嵌入 assistant_message_complete 的 content[]
+    amc_with_tools = [e for e in events if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
+                      and any(b.get("type") == "toolCall" for b in e["data"]["content"])]
     tool_results = [e for e in events if e["type"] == EventType.TOOL_RESULT]
     done_events = [e for e in events if e["type"] == EventType.DONE]
 
     print(f"\n--- 工具取消测试结果 ---")
     print(f"取消延迟: {latency_ms:.1f}ms")
     print(f"总事件数: {len(events)}")
-    print(f"TOOL_CALL 事件: {len(tool_calls)}")
+    print(f"含 toolCall 的 AMC 事件: {len(amc_with_tools)}")
     print(f"TOOL_RESULT 事件: {len(tool_results)}")
     if tool_results:
         print(f"  status: {tool_results[0]['data'].get('status')}")
