@@ -42,8 +42,10 @@ print("--- 测试1: 除零错误 ---")
 for event in agent.run("计算 10 除以 0"):
     etype = event["type"].value
     data = event.get("data", {})
-    if etype == "tool_call":
-        print(f"  [TOOL_CALL] {data['name']}({data['arguments']})")
+    if etype == "assistant_message_complete":
+        for b in data.get("content", []):
+            if b.get("type") == "toolCall":
+                print(f"  [TOOL_CALL] {b['name']}({b['arguments']})")
     elif etype == "tool_result":
         print(f"  [TOOL_RESULT] status={data.get('status')}")
         print(f"    result: {data.get('result')}")
@@ -61,8 +63,10 @@ print("\n--- 测试2: 文件不存在 ---")
 for event in agent.run("读取文件 /nonexistent/path.txt"):
     etype = event["type"].value
     data = event.get("data", {})
-    if etype == "tool_call":
-        print(f"  [TOOL_CALL] {data['name']}({data['arguments']})")
+    if etype == "assistant_message_complete":
+        for b in data.get("content", []):
+            if b.get("type") == "toolCall":
+                print(f"  [TOOL_CALL] {b['name']}({b['arguments']})")
     elif etype == "tool_result":
         print(f"  [TOOL_RESULT] status={data.get('status')}")
         print(f"    result: {data.get('result')[:100]}")
@@ -79,8 +83,10 @@ print("\n--- 测试3: 工具内部 raise RuntimeError ---")
 for event in agent.run("调用 crash_tool，参数 msg 为 'boom'"):
     etype = event["type"].value
     data = event.get("data", {})
-    if etype == "tool_call":
-        print(f"  [TOOL_CALL] {data['name']}({data['arguments']})")
+    if etype == "assistant_message_complete":
+        for b in data.get("content", []):
+            if b.get("type") == "toolCall":
+                print(f"  [TOOL_CALL] {b['name']}({b['arguments']})")
     elif etype == "tool_result":
         print(f"  [TOOL_RESULT] status={data.get('status')}")
         print(f"    result: {data.get('result')}")
