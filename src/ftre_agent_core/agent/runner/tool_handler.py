@@ -82,7 +82,7 @@ class ToolHandler:
         ctx.cancel_token = state.cancel_token
         ctx.metadata["runtime_context"] = state.runtime_context
 
-        # 执行 before 中间件链。
+        # 执行 before 中间件链
         ctx = self._run_before(ctx)
 
         if ctx.skipped:
@@ -106,6 +106,9 @@ class ToolHandler:
                 )
             if isinstance(raw, AgentEvent):
                 result = ToolResult(call_id=call_id, name=name, result="", event=raw)
+            elif isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], str) and isinstance(raw[1], dict):
+                # 工具返回 (result_str, metadata) — edit/write 返回 diff metadata
+                result = ToolResult(call_id=call_id, name=name, result=raw[0], metadata=raw[1])
             else:
                 result = ToolResult(call_id=call_id, name=name, result=str(raw))
         except asyncio.CancelledError:

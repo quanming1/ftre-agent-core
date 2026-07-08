@@ -5,17 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 
-def content_parts(content: Any) -> list[dict[str, str]]:
-    if isinstance(content, list):
-        return [
-            item if isinstance(item, dict) else {"type": "text", "text": str(item)}
-            for item in content
-        ]
-    if content in (None, ""):
-        return []
-    return [{"type": "text", "text": str(content)}]
-
-
 def format_assistant_message(
     *,
     content: Any = None,
@@ -36,3 +25,14 @@ def format_assistant_message(
     if tool_calls is not None:
         msg["tool_calls"] = tool_calls
     return msg
+
+
+def content_parts(content: Any) -> list[dict[str, str]]:
+    if isinstance(content, list):
+        return [
+            item if isinstance(item, dict) else {"type": "text", "text": str(item)}
+            for item in content
+        ]
+    if content in (None, ""):
+        return []
+    return [{"type": "text", "text": str(content)}]
