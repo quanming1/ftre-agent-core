@@ -734,6 +734,7 @@ class ReActRunner:
             events.append(tool_result_event(
                 id=result.call_id, name=result.name, result=result.result or f"[{tc.name}] 已完成",
                 error=result.error, status=result.status,
+                metadata=result.metadata or None,
             ))
 
         # 统一追加 UserMessageEvent：确保在 tool_result 之后，消息顺序合法
