@@ -1,7 +1,7 @@
 """
 Agent 事件定义。
 
-事件统一结构：{"type": EventType, "data": <TypedDict>}
+事件统一结构：{"type": EventType, "event_id": str, "timestamp": float, "turn_id": str, "data": <TypedDict>}
 
 事件现已从裸 dict 迁移为 @dataclass 子类，通过 to_dict() 保持序列化兼容。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypedDict
+import time
 import uuid
 
 
@@ -17,13 +18,19 @@ class EventType(str, Enum):
     TOOL_RESULT = "tool_result"
     ASSISTANT_MESSAGE = "assistant_message"
     ASSISTANT_MESSAGE_COMPLETE = "assistant_message_complete"
-    ERROR = "error"
+    STEP = "step"
     RETRY = "retry"
-    DONE = "done"
     USER_MESSAGE = "user_message"
 
 
+class StepPhase(str, Enum):
+    """Step 事件的阶段标识。"""
+    TURN_START = "turn_start"
+    TURN_END = "turn_end"
+
+
 class DoneReason(str, Enum):
+    """StepEvent.turn_end 时的结束原因。"""
     COMPLETED = "completed"
     MAX_ITERATIONS = "max_iterations"
     ERROR = "error"
@@ -51,27 +58,12 @@ class AssistantMessageCompleteData(TypedDict, total=False):
     metadata: dict
 
 
-class DoneData(TypedDict, total=False):
-    success: bool
-    reason: DoneReason
-
-
-class ErrorData(TypedDict):
-    message: str
-    code: str
-
-
 class RetryData(TypedDict):
     code: str
     message: str
     attempt: int
     max_attempts: int
 
-
-
-# ─── 向后兼容别名 ───────────────────────────────────────────────
-
-AgentEventDict = dict
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -84,13 +76,28 @@ class AgentEvent:
 
     子类在 __post_init__ 中通过 object.__setattr__ 设置 type 字段，
     这是因为 dataclass 不允许不带默认值的字段出现在有默认值字段之后。
+
+    顶层字段：
+        event_id  — 事件唯一标识（自动生成）
+        timestamp — 事件创建时间戳（Unix 秒，自动生成）
+        turn_id   — 所属 Turn 的标识（空串表示不在 turn 内；由 runner 统一盖戳）
     """
     type: EventType = field(init=False)
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16], init=False)
+    timestamp: float = field(default_factory=time.time, init=False)
+    turn_id: str = field(default="", init=False)
 
     def to_dict(self) -> dict:
-        """序列化为 {"type": "...", "data": {...}}，与旧格式 100% 兼容。"""
-        return {"type": self.type, "event_id": self.event_id, "data": self._data_dict()}
+        """序列化为 {"type": "...", "event_id": "...", "timestamp": ..., "turn_id": "...", "data": {...}}。"""
+        d: dict[str, Any] = {
+            "type": self.type,
+            "event_id": self.event_id,
+            "timestamp": self.timestamp,
+            "data": self._data_dict(),
+        }
+        if self.turn_id:
+            d["turn_id"] = self.turn_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentEvent:
@@ -103,6 +110,12 @@ class AgentEvent:
             event_id = data.get("event_id")
         if isinstance(event_id, str) and event_id:
             object.__setattr__(event, "event_id", event_id)
+        ts = d.get("timestamp")
+        if isinstance(ts, (int, float)):
+            object.__setattr__(event, "timestamp", float(ts))
+        tid = d.get("turn_id")
+        if isinstance(tid, str) and tid:
+            object.__setattr__(event, "turn_id", tid)
         return event
 
     def _data_dict(self) -> dict:
@@ -173,27 +186,54 @@ class AssistantMessageCompleteEvent(AgentEvent):
 
 
 @dataclass
-class DoneEvent(AgentEvent):
-    success: bool
-    reason: DoneReason
+class StepEvent(AgentEvent):
+    """Turn 生命周期事件。
+
+    phase=turn_start: Turn 开始
+      - start_trigger: 触发来源（"user" / 未来扩展）
+    phase=turn_end:   Turn 结束
+      - reason="completed"     → 正常完成
+      - reason="max_iterations" → 达到迭代上限
+      - reason="cancelled"      → 用户取消
+      - reason="error"          → LLM 错误（携带 error_message / error_code）
+      - token_usage: 本轮累积的 token 用量统计
+    """
+    phase: StepPhase
+    success: bool = True
+    reason: str = ""
+    iterations: int = 0
+    error_message: str = ""
+    error_code: str = ""
+    start_trigger: str = ""
+    token_usage: dict[str, Any] | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.DONE)
+        object.__setattr__(self, 'type', EventType.STEP)
+
+    @property
+    def is_turn_end(self) -> bool:
+        return self.phase == StepPhase.TURN_END
+
+    @property
+    def is_error(self) -> bool:
+        return self.reason == DoneReason.ERROR
 
     def _data_dict(self) -> dict:
-        return {"success": self.success, "reason": self.reason}
-
-
-@dataclass
-class ErrorEvent(AgentEvent):
-    message: str
-    code: str = "unknown"
-
-    def __post_init__(self):
-        object.__setattr__(self, 'type', EventType.ERROR)
-
-    def _data_dict(self) -> dict:
-        return {"message": self.message, "code": self.code}
+        d: dict[str, Any] = {
+            "phase": self.phase,
+            "success": self.success,
+            "reason": self.reason,
+            "iterations": self.iterations,
+        }
+        if self.error_message:
+            d["error_message"] = self.error_message
+        if self.error_code:
+            d["error_code"] = self.error_code
+        if self.start_trigger:
+            d["start_trigger"] = self.start_trigger
+        if self.token_usage:
+            d["token_usage"] = self.token_usage
+        return d
 
 
 @dataclass
@@ -290,15 +330,16 @@ def _from_type(t: str, data: dict) -> AgentEvent:
             content=data.get("content", []),
             metadata=data.get("metadata", {}),
         )
-    elif t == EventType.DONE:
-        return DoneEvent(
-            success=data.get("success", False),
-            reason=data.get("reason", DoneReason.COMPLETED),
-        )
-    elif t == EventType.ERROR:
-        return ErrorEvent(
-            message=data.get("message", ""),
-            code=data.get("code", "unknown"),
+    elif t == EventType.STEP:
+        return StepEvent(
+            phase=StepPhase(data.get("phase", "turn_end")),
+            success=data.get("success", True),
+            reason=data.get("reason", ""),
+            iterations=data.get("iterations", 0),
+            error_message=data.get("error_message", ""),
+            error_code=data.get("error_code", ""),
+            start_trigger=data.get("start_trigger", ""),
+            token_usage=data.get("token_usage"),
         )
     elif t == EventType.RETRY:
         return RetryEvent(
@@ -359,8 +400,28 @@ def assistant_message_complete_event(
     )
 
 
-def done_event(success: bool, reason: DoneReason) -> AgentEvent:
-    return DoneEvent(success=success, reason=reason)
+def step_event(
+    phase: StepPhase,
+    *,
+    success: bool = True,
+    reason: str = "",
+    iterations: int = 0,
+    error_message: str = "",
+    error_code: str = "",
+    start_trigger: str = "",
+    token_usage: dict[str, Any] | None = None,
+) -> AgentEvent:
+    """构造 StepEvent（统一 Turn 生命周期事件）。"""
+    return StepEvent(
+        phase=phase,
+        success=success,
+        reason=reason,
+        iterations=iterations,
+        error_message=error_message,
+        error_code=error_code,
+        start_trigger=start_trigger,
+        token_usage=token_usage,
+    )
 
 
 def user_message_event(
@@ -368,10 +429,6 @@ def user_message_event(
 ) -> UserMessageEvent:
     """构造 UserMessageEvent。metadata.hide=True 表示前端不渲染。"""
     return UserMessageEvent(content=content, metadata=metadata or {"hide": True})
-
-
-def error_event(message: str, code: str = "unknown") -> AgentEvent:
-    return ErrorEvent(message=message, code=code)
 
 
 def retry_event(code: str, message: str, attempt: int, max_attempts: int) -> AgentEvent:
