@@ -56,8 +56,10 @@ def test_cancel_during_tool():
                         tool_call_seen.set()
             elif etype == "tool_result":
                 print(f"  [TOOL_RESULT] status={data.get('status')}, result={data.get('result')[:50]}...")
-            elif etype == "done":
-                print(f"\n  [DONE] success={data.get('success')}, reason={data.get('reason')}")
+            elif etype == "step":
+                phase = data.get("phase")
+                if phase == "turn_end":
+                    print(f"\n  [STEP] success={data.get('success')}, reason={data.get('reason')}")
 
     # 启动消费线程
     thread = threading.Thread(target=consume)
@@ -82,7 +84,8 @@ def test_cancel_during_tool():
     amc_with_tools = [e for e in events if e["type"] == EventType.ASSISTANT_MESSAGE_COMPLETE
                       and any(b.get("type") == "toolCall" for b in e["data"]["content"])]
     tool_results = [e for e in events if e["type"] == EventType.TOOL_RESULT]
-    done_events = [e for e in events if e["type"] == EventType.DONE]
+    done_events = [e for e in events if e["type"] == EventType.STEP
+                   and e["data"].get("phase") == "turn_end"]
 
     print(f"\n--- 工具取消测试结果 ---")
     print(f"取消延迟: {latency_ms:.1f}ms")
@@ -91,7 +94,7 @@ def test_cancel_during_tool():
     print(f"TOOL_RESULT 事件: {len(tool_results)}")
     if tool_results:
         print(f"  status: {tool_results[0]['data'].get('status')}")
-    print(f"DONE 事件: {len(done_events) > 0}")
+    print(f"STEP turn_end 事件: {len(done_events) > 0}")
     if done_events:
         print(f"  reason: {done_events[0]['data'].get('reason')}")
     print(f"最终状态: {agent.state.status.value}")
