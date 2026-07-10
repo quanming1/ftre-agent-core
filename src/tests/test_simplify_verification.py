@@ -44,11 +44,11 @@ class TestImportReachability:
 
     def test_agent_event_module(self):
         from ftre_agent_core.agent.event import (
-            EventType, DoneReason, AgentEvent,
+            EventType, DoneReason, StepPhase, AgentEvent,
             tool_result_event,
             assistant_message_event,
-            assistant_message_complete_event, done_event,
-            error_event, retry_event,
+            assistant_message_complete_event, step_event,
+            retry_event,
         )
         assert EventType is not None
 
@@ -144,7 +144,7 @@ class TestEventTypeEnum:
         expected = {
             "tool_result",
             "assistant_message", "assistant_message_complete",
-            "error", "retry", "done",
+            "step", "retry",
             "user_message",
         }
         actual = {e.value for e in EventType}
@@ -153,7 +153,8 @@ class TestEventTypeEnum:
     def test_removed_types_not_exist(self):
         from ftre_agent_core.agent.event import EventType
         removed = ["tool_cancel_requested", "tool_cancelled", "tool_timed_out",
-                   "tool_call", "reasoning_complete", "usage_update"]
+                   "tool_call", "reasoning_complete", "usage_update",
+                   "done", "error"]
         for name in removed:
             assert not hasattr(EventType, name.upper()), f"EventType.{name.upper()} 应已删除"
 
@@ -184,26 +185,15 @@ class TestEventConstructors:
         assert e.type == EventType.ASSISTANT_MESSAGE
         assert e.content == [{"type": "text", "text": "hello"}]
 
-    def test_done_event(self):
-        from ftre_agent_core.agent.event import done_event, EventType, DoneReason, DoneEvent
-        e = done_event(success=True, reason=DoneReason.COMPLETED)
-        assert isinstance(e, DoneEvent)
-        assert e.type == EventType.DONE
+    def test_step_event(self):
+        from ftre_agent_core.agent.event import step_event, EventType, StepEvent, StepPhase, DoneReason
+        e = step_event(StepPhase.TURN_END, success=True, reason=DoneReason.COMPLETED, iterations=3)
+        assert isinstance(e, StepEvent)
+        assert e.type == EventType.STEP
         assert e.success is True
         assert e.reason == DoneReason.COMPLETED
-
-    def test_done_event_no_usage_param(self):
-        """done_event 不再接受 usage 参数"""
-        from ftre_agent_core.agent.event import done_event, DoneReason
-        with pytest.raises(TypeError):
-            done_event(success=True, reason=DoneReason.COMPLETED, usage={"prompt_tokens": 100})
-
-    def test_error_event(self):
-        from ftre_agent_core.agent.event import error_event, EventType, ErrorEvent
-        e = error_event(message="boom", code="timeout")
-        assert isinstance(e, ErrorEvent)
-        assert e.type == EventType.ERROR
-        assert e.code == "timeout"
+        assert e.iterations == 3
+        assert e.is_turn_end is True
 
     def test_retry_event(self):
         from ftre_agent_core.agent.event import retry_event, EventType, RetryEvent
@@ -303,6 +293,8 @@ class TestRemovedItems:
         assert not hasattr(ev, "UsageUpdateEvent")
         assert not hasattr(ev, "ReasoningEvent")
         assert not hasattr(ev, "ToolCallStreamingEvent")
+        assert not hasattr(ev, "DoneEvent")
+        assert not hasattr(ev, "ErrorEvent")
 
     def test_removed_event_constructors(self):
         """旧事件构造函数已删除"""
@@ -360,12 +352,10 @@ class TestAgentEventType:
     """AgentEvent 已从 dict 别名升级为 dataclass 基类"""
 
     def test_agent_event_is_class(self):
-        from ftre_agent_core.agent.event import AgentEvent, AgentEventDict
+        from ftre_agent_core.agent.event import AgentEvent
         # AgentEvent 现在是 dataclass 基类（不再是 dict 别名）
         assert isinstance(AgentEvent, type)
         assert AgentEvent is not dict
-        # AgentEventDict 保留作为向后兼容别名
-        assert AgentEventDict is dict
 
     def test_agent_event_to_dict(self):
         from ftre_agent_core.agent.event import assistant_message_event, EventType
@@ -375,6 +365,7 @@ class TestAgentEventType:
         assert d["data"] == {"content": [{"type": "text", "text": "hello"}]}
         assert isinstance(d["event_id"], str)
         assert len(d["event_id"]) == 16
+        assert "timestamp" in d
 
     def test_agent_event_from_dict(self):
         from ftre_agent_core.agent.event import AgentEvent, AssistantMessageEvent
@@ -394,16 +385,6 @@ class TestAgentEventType:
             "data": {"content": [{"type": "text", "text": "world"}], "event_id": "evt_from_data"},
         })
         assert e.event_id == "evt_from_data"
-
-    def test_agent_event_no_dict_access(self):
-        """AgentEvent 实例不再支持 dict 风格访问"""
-        from ftre_agent_core.agent.event import done_event, DoneReason
-        import pytest
-        e = done_event(success=True, reason=DoneReason.COMPLETED)
-        with pytest.raises(TypeError):
-            _ = e["type"]
-        with pytest.raises(AttributeError):
-            _ = e.get("type")
 
     def test_assistant_message_complete_to_dict(self):
         """assistant_message_complete 的 to_dict 产出新格式"""
@@ -433,15 +414,7 @@ class TestAgentEventType:
         assert e.metadata["kind"] == "block"
         assert e.metadata["usage"]["total_tokens"] == 50
 
-    def test_done_event_no_usage_in_data(self):
-        """done 事件不再包含 usage 字段"""
-        from ftre_agent_core.agent.event import done_event, DoneReason
-        e = done_event(success=True, reason=DoneReason.COMPLETED)
-        d = e.to_dict()
-        assert "usage" not in d["data"]
-
-
-# ─── 8. ftre 后端引用无断裂 ──────────────────────────────────
+    # ─── 8. ftre 后端引用无断裂 ──────────────────────────────────
 
 class TestFtreBackendImports:
     """ftre 后端引用的 ftre_agent_core 导出仍然可用"""

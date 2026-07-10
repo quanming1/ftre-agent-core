@@ -56,8 +56,10 @@ async def main():
                 print(f"  [{t:.1f}s] TOOL_RESULT: {data['name']} status={data.get('status')} result={data.get('result')}")
             elif etype == "message":
                 print(data.get("content", ""), end="", flush=True)
-            elif etype == "done":
-                print(f"  [{t:.1f}s] DONE: success={data.get('success')} reason={data.get('reason')}")
+            elif etype == "step":
+                phase = data.get("phase")
+                if phase == "turn_end":
+                    print(f"  [{t:.1f}s] STEP: success={data.get('success')} reason={data.get('reason')}")
 
     print("=== 并行工具执行中取消测试 ===")
     print("3 个工具各 sleep 10s，2s 后取消\n")
@@ -83,9 +85,10 @@ async def main():
     for tr in tool_results:
         d = tr["data"]
         print(f"  {d['name']}: status={d.get('status')}")
-    done_events = [e for e in events if e["type"] == EventType.DONE]
+    done_events = [e for e in events if e["type"] == EventType.STEP
+                   and e["data"].get("phase") == "turn_end"]
     if done_events:
-        print(f"DONE reason: {done_events[0]['data'].get('reason')}")
+        print(f"STEP turn_end reason: {done_events[0]['data'].get('reason')}")
     print(f"最终状态: {agent.state.status.value}")
 
 
