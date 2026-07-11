@@ -204,7 +204,7 @@ class ReActRunner:
                 - continuation_active / pending_user_messages 等控制字段
 
         Yields:
-            AgentEvent：包括文本增量、推理增量、工具调用/结果、done 等。
+            AgentEvent：包括文本增量、推理增量、工具调用/结果、step 等。
         """
         self.state.start()
         self.state.runtime_context = runtime_context or {}
@@ -213,16 +213,6 @@ class ReActRunner:
         turn_start = step_event(StepPhase.TURN_START, start_trigger="user")
         object.__setattr__(turn_start, "turn_id", self.state.turn_id)
         yield turn_start
-
-        # 产出 user_message（在 turn_start 之后，让 Gateway 持久化 + echo）
-        user_input = self.state.runtime_context.get("user_input")
-        if user_input:
-            user_ev = user_message_event(
-                content=user_input["content"],
-                metadata=user_input.get("metadata", {"hide": False}),
-            )
-            object.__setattr__(user_ev, "turn_id", self.state.turn_id)
-            yield user_ev
 
         # ── 准备 tracing 元数据 ──
         # 调用方可以通过 runtime_context 传入自定义 trace 元数据，
