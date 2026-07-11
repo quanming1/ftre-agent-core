@@ -18,7 +18,6 @@ memory 写入和事件 yield。
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -46,6 +45,15 @@ from ..event import (
     tool_result_event,
     user_message_event,
 )
+from ...hooks import (
+    ON_TURN_START,
+    ON_STOP,
+    ON_TURN_END,
+    TurnStartInput,
+    TurnStartOutput,
+    StopInput,
+    TurnEndInput,
+)
 
 if TYPE_CHECKING:
     from ..react import ReActAgent
@@ -71,11 +79,6 @@ EMPTY_FINAL_RESPONSE_MESSAGE = (
 
 # 空响应最多重试次数（不含强制最终化那一次）。
 MAX_EMPTY_RESPONSE_RETRIES = 2
-
-# 主动续跑提示词：当 runtime_context 标记了 continuation_active 时注入。
-ACTIVE_CONTINUATION_PROMPT = (
-    "请继续完成用户的请求。需要时使用工具，只有在任务真正完成后才停止。"
-)
 
 
 # ── 运行状态 ──────────────────────────────────────────────────────────────────
@@ -187,7 +190,7 @@ class ReActRunner:
             max_tokens=agent.max_tokens,
         )
         # ToolHandler 负责工具的并发调度、取消传播和结果归并。
-        self.tool_handler = ToolHandler(agent.tool_registry)
+        self.tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
 
     # ── 入口：run() ────────────────────────────────────────────────────────
 
@@ -201,7 +204,6 @@ class ReActRunner:
             runtime_context: 调用方传入的上下文，可包含：
                 - trace_metadata / trace_tags：tracing 元数据
                 - trace_name：span 名称
-                - continuation_active / pending_user_messages 等控制字段
 
         Yields:
             AgentEvent：包括文本增量、推理增量、工具调用/结果、step 等。
@@ -320,11 +322,37 @@ class ReActRunner:
                 self.state.check_cancel()
                 self.state.iteration += 1
 
+                # ── on_turn_start hook ──
+                ts_output = await self.agent.hook_manager.trigger(
+                    ON_TURN_START,
+                    lambda: TurnStartInput(
+                        session_id=self.state.runtime_context.get("session_id", ""),
+                        turn_id=self.state.turn_id,
+                        iteration=self.state.iteration,
+                        messages=self.agent.memory.get_messages(),
+                        runtime_context=self.state.runtime_context,
+                    ),
+                )
+                if ts_output is not None and isinstance(ts_output, TurnStartOutput):
+                    for msg in ts_output.inject_messages:
+                        self.agent.memory.add_raw(msg)
+
                 async for event in self._run_turn():
                     yield event
 
                 # 纯文本 turn 会在 _run_turn 内标记 COMPLETED；有工具调用时保持 RUNNING。
                 if self.state.is_done:
+                    # ── on_turn_end hook（只读观察）──
+                    await self.agent.hook_manager.trigger(
+                        ON_TURN_END,
+                        lambda: TurnEndInput(
+                            session_id=self.state.runtime_context.get("session_id", ""),
+                            turn_id=self.state.turn_id,
+                            iteration=self.state.iteration,
+                            done_reason=DoneReason.COMPLETED,
+                            runtime_context=self.state.runtime_context,
+                        ),
+                    )
                     return
                 # 仍然 RUNNING 说明本轮执行了工具，继续下一轮让模型读取工具结果。
 
@@ -655,33 +683,32 @@ class ReActRunner:
                 if finish_reason == "unknown":
                     return
 
-                # 分支 3b：检查是否有调用方注入的 pending user messages。
-                # 这些消息在模型给出最终回复后才追加到 memory，避免打断 ReAct 流程。
-                pending_user_messages = await self._drain_pending_user_messages()
-                if pending_user_messages:
+                # 分支 3e：on_stop hook — 外部可阻止 Agent 停止。
+                stop_output = await self.agent.hook_manager.trigger(
+                    ON_STOP,
+                    lambda: StopInput(
+                        session_id=self.state.runtime_context.get("session_id", ""),
+                        turn_id=self.state.turn_id,
+                        iteration=self.state.iteration,
+                        last_assistant_text=full_text,
+                        finish_reason=finish_reason,
+                        token_usage=dict(self.state.token_usage),
+                        runtime_context=self.state.runtime_context,
+                    ),
+                )
+                if stop_output is not None and stop_output.decision == "block":
                     logger.info(
-                        "[react_runner] 疑似最终回复后取出 %s 条待注入用户消息",
-                        len(pending_user_messages),
-                    )
-                    for ev in pending_user_messages:
-                        self.agent.memory.add_raw(ev.to_openai_message())
-                        yield ev
-                    # 有注入消息 → 不结束，让模型处理新消息。
-                    return
-
-                # 分支 3d：检查是否需要主动续跑。
-                if await self._is_continuation_active():
-                    logger.info(
-                        "[react_runner] 主动续跑模式激活，注入续跑提示; 迭代=%s",
+                        "[react_runner] on_stop hook 阻止停止; 迭代=%s reason=%s",
                         self.state.iteration,
+                        stop_output.reason[:100],
                     )
                     yield self._append_internal_user_message(
-                        self._active_continuation_prompt(),
-                        reason="active_continuation",
+                        stop_output.reason or "继续工作。",
+                        reason="stop_hook_block",
                     )
-                    return
+                    return  # 不设 COMPLETED，_loop 继续下一轮
 
-                # 分支 3e：正常结束。
+                # 分支 3f：正常结束。
                 yield step_event(
                     StepPhase.TURN_END,
                     success=True,
@@ -817,7 +844,7 @@ class ReActRunner:
         用于：
           - length 截断后的续写提示
           - 空响应最终化提示
-          - 主动续跑提示
+          - on_stop hook block 时的 continuation prompt
         """
         ev = user_message_event(
             content,
@@ -826,126 +853,4 @@ class ReActRunner:
         self.agent.memory.add_raw(ev.to_openai_message())
         return ev
 
-    def _active_continuation_prompt(self) -> str:
-        """获取主动续跑提示词。优先用 runtime_context 中自定义的，兜底用默认值。"""
-        ctx = self.state.runtime_context or {}
-        return str(
-            ctx.get("continuation_message")
-            or ctx.get("goal_continue_message")
-            or ACTIVE_CONTINUATION_PROMPT
-        )
 
-    async def _is_continuation_active(self) -> bool:
-        """检查是否需要主动续跑。
-
-        检查 runtime_context 中的多个 key（兼容不同调用方的命名）：
-          - continuation_active / continue_active
-          - goal_active / sustained_goal_active
-          - goal_active_predicate
-        值可以是 bool、callable（同步/异步）。
-        """
-        ctx = self.state.runtime_context or {}
-        for key in (
-            "continuation_active",
-            "continue_active",
-            "goal_active",
-            "sustained_goal_active",
-            "goal_active_predicate",
-        ):
-            if key not in ctx:
-                continue
-            value = ctx.get(key)
-            if callable(value):
-                value = value()
-            if inspect.isawaitable(value):
-                value = await value
-            if bool(value):
-                return True
-        return False
-
-    async def _drain_pending_user_messages(self) -> list[AgentEvent]:
-        """从 runtime_context 中取出调用方注入的 pending user messages。
-
-        支持两种来源：
-          1. drain_pending_user_messages：callable，返回消息列表
-          2. pending_user_messages / injected_user_messages：list（取出后清空）
-
-        这些消息通常用于在模型给出最终回复后，追加新的用户指令而不打断 ReAct 流程。
-        """
-        ctx = self.state.runtime_context or {}
-        raw_messages: list = []
-
-        # 来源 1：callable drain 函数
-        drain = ctx.get("drain_pending_user_messages")
-        if callable(drain):
-            drained = drain()
-            if inspect.isawaitable(drained):
-                drained = await drained
-            raw_messages.extend(self._coerce_pending_message_list(drained))
-
-        # 来源 2：list / 单值
-        for key in ("pending_user_messages", "injected_user_messages"):
-            if key not in ctx:
-                continue
-            value = ctx.get(key)
-            if callable(value):
-                value = value()
-                if inspect.isawaitable(value):
-                    value = await value
-                raw_messages.extend(self._coerce_pending_message_list(value))
-                continue
-            if isinstance(value, list):
-                raw_messages.extend(value)
-                value.clear()  # 取出后清空，避免重复消费
-            else:
-                raw_messages.extend(self._coerce_pending_message_list(value))
-
-        # 将原始消息统一转换为 AgentEvent
-        events: list[AgentEvent] = []
-        for item in raw_messages:
-            ev = self._coerce_pending_user_message(item)
-            if ev is not None:
-                events.append(ev)
-        return events
-
-    @staticmethod
-    def _coerce_pending_message_list(value) -> list:
-        """将任意值规整为 list。None → []，非 list → [value]。"""
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return list(value)
-        return [value]
-
-    @staticmethod
-    def _coerce_pending_user_message(item) -> AgentEvent | None:
-        """将单条原始消息转换为 UserMessageEvent。
-
-        支持的输入格式：
-          - 已有 to_openai_message 方法的 AgentEvent（直接返回）
-          - dict: {"role": "user", "content": ...} 或 {"content": ...}
-          - str: 直接作为 content
-        """
-        # 已是 AgentEvent
-        if hasattr(item, "to_openai_message") and getattr(item, "type", None):
-            return item
-        # dict 格式
-        if isinstance(item, dict):
-            if item.get("role") == "user":
-                return user_message_event(
-                    item.get("content", ""),
-                    metadata=item.get("metadata") or {"hide": True, "internal": True},
-                )
-            if "content" in item:
-                return user_message_event(
-                    item.get("content", ""),
-                    metadata=item.get("metadata") or {"hide": True, "internal": True},
-                )
-            return None
-        # 字符串格式
-        if isinstance(item, str):
-            return user_message_event(
-                item,
-                metadata={"hide": True, "internal": True, "reason": "pending_user_message"},
-            )
-        return None
