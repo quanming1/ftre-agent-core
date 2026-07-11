@@ -7,7 +7,7 @@
   - drain(): 取消并回收一组工具任务（用于异常清理）。
   - gather_results(): 等待全部工具任务、处理取消、按 tool_calls 顺序归并结果。
   - build_assistant_message(): 根据 ToolCall 列表构造写入 memory 的 assistant 消息。
-  - 执行工具中间件 before / after 链。
+  - on_pre_tool / on_post_tool hook 集成。
 
 本模块不负责：
   - 决定何时向调用方 yield 事件。
@@ -30,6 +30,7 @@ from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceS
 
 if TYPE_CHECKING:
     from .react_runner import RunState
+    from ..hooks import FtreCoreHookManager
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,9 @@ class ToolResult:
 
 class ToolHandler:
 
-    def __init__(self, registry: ToolRegistry):
+    def __init__(self, registry: ToolRegistry, hook_manager: "FtreCoreHookManager | None" = None):
         self.registry = registry
+        self.hook_manager = hook_manager
 
     # 执行单个工具调用。
     async def run_one(
@@ -78,16 +80,37 @@ class ToolHandler:
                 status="failed",
             )
 
+        # ── on_pre_tool hook ──
+        if self.hook_manager is not None:
+            from ...hooks import ON_PRE_TOOL, PreToolInput, PreToolOutput
+            pre_output = await self.hook_manager.trigger(
+                ON_PRE_TOOL,
+                lambda: PreToolInput(
+                    session_id=state.runtime_context.get("session_id", ""),
+                    turn_id=state.turn_id,
+                    iteration=state.iteration,
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    tool_args=arguments,
+                    runtime_context=state.runtime_context,
+                ),
+            )
+            if pre_output is not None:
+                if pre_output.decision == "block":
+                    return ToolResult(
+                        call_id=call_id,
+                        name=name,
+                        result=pre_output.reason or "被 Hook 拦截",
+                        error=pre_output.reason or "被 Hook 拦截",
+                        status="failed",
+                    )
+                if pre_output.decision == "modify" and isinstance(pre_output, PreToolOutput):
+                    if pre_output.modified_args is not None:
+                        arguments = pre_output.modified_args
+
         ctx = ToolContext(call_id=call_id, name=name, arguments=arguments)
         ctx.cancel_token = state.cancel_token
         ctx.metadata["runtime_context"] = state.runtime_context
-
-        # 执行 before 中间件链
-        ctx = self._run_before(ctx)
-
-        if ctx.skipped:
-            result = ToolResult(call_id=call_id, name=name, result=ctx.skip_result)
-            return self._run_after(ctx, result)
 
         try:
             tool = self.registry.get(name)
@@ -124,7 +147,30 @@ class ToolHandler:
                 result=str(exc), error=str(exc), status="failed",
             )
 
-        return self._run_after(ctx, result)
+        # ── on_post_tool hook ──
+        if self.hook_manager is not None:
+            from ...hooks import ON_POST_TOOL, PostToolInput, PostToolOutput
+            post_output = await self.hook_manager.trigger(
+                ON_POST_TOOL,
+                lambda: PostToolInput(
+                    session_id=state.runtime_context.get("session_id", ""),
+                    turn_id=state.turn_id,
+                    iteration=state.iteration,
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    tool_args=arguments,
+                    result=result.result,
+                    error=result.error,
+                    status=result.status,
+                    metadata=result.metadata,
+                    runtime_context=state.runtime_context,
+                ),
+            )
+            if post_output is not None and post_output.decision == "modify":
+                if isinstance(post_output, PostToolOutput) and post_output.modified_result is not None:
+                    result.result = post_output.modified_result
+
+        return result
 
     # ── 并发调度 ──────────────────────────────────────────────
     def spawn(
@@ -281,16 +327,3 @@ class ToolHandler:
             reasoning=reasoning,
             tool_calls=formatted_tool_calls,
         )
-
-    # 工具中间件
-    def _run_before(self, ctx: ToolContext) -> ToolContext:
-        for mw in self.registry.middlewares:
-            ctx = mw.before(ctx)
-            if ctx.skipped:
-                break
-        return ctx
-
-    def _run_after(self, ctx: ToolContext, result: ToolResult) -> ToolResult:
-        for mw in reversed(self.registry.middlewares):
-            result = mw.after(ctx, result)
-        return result

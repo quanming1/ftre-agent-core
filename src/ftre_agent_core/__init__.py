@@ -10,6 +10,24 @@ from .tracing import (
     TraceSpan,
     Tracer,
 )
+from .hooks import (
+    FtreCoreHookManager,
+    HookInput,
+    HookOutput,
+    TurnStartInput,
+    TurnStartOutput,
+    StopInput,
+    PreToolInput,
+    PreToolOutput,
+    PostToolInput,
+    PostToolOutput,
+    TurnEndInput,
+    ON_TURN_START,
+    ON_PRE_TOOL,
+    ON_POST_TOOL,
+    ON_STOP,
+    ON_TURN_END,
+)
 
 __all__ = [
     "Tracer",
@@ -21,4 +39,21 @@ __all__ = [
     "TraceRunStatus",
     "InMemoryTraceExporter",
     "JsonlTraceExporter",
+    # Hooks
+    "FtreCoreHookManager",
+    "HookInput",
+    "HookOutput",
+    "TurnStartInput",
+    "TurnStartOutput",
+    "StopInput",
+    "PreToolInput",
+    "PreToolOutput",
+    "PostToolInput",
+    "PostToolOutput",
+    "TurnEndInput",
+    "ON_TURN_START",
+    "ON_PRE_TOOL",
+    "ON_POST_TOOL",
+    "ON_STOP",
+    "ON_TURN_END",
 ]
