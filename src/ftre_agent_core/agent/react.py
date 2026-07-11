@@ -8,6 +8,7 @@ from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.tracing import Tracer
 from .event import AgentEvent
 from .runner import ReActRunner
+from ..hooks import FtreCoreHookManager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class ReActAgent:
         max_retries: int = 5,
         retry_delay: float = 3.0,
         tracer: Tracer | None = None,
+        hook_manager: FtreCoreHookManager | None = None,
     ):
         self.model = model
         self.api_key = api_key
@@ -39,6 +41,7 @@ class ReActAgent:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.tracer = tracer or Tracer()
+        self.hook_manager = hook_manager or FtreCoreHookManager()
 
         if memory is not None:
             self.memory = memory

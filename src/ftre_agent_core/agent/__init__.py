@@ -19,6 +19,24 @@ from .runner import (
     RunStatus,
     ReActRunner,
 )
+from ..hooks import (
+    FtreCoreHookManager,
+    HookInput,
+    HookOutput,
+    TurnStartInput,
+    TurnStartOutput,
+    StopInput,
+    PreToolInput,
+    PreToolOutput,
+    PostToolInput,
+    PostToolOutput,
+    TurnEndInput,
+    ON_TURN_START,
+    ON_PRE_TOOL,
+    ON_POST_TOOL,
+    ON_STOP,
+    ON_TURN_END,
+)
 
 __all__ = [
     "ReActAgent",
@@ -41,4 +59,21 @@ __all__ = [
     "RunState",
     "RunStatus",
     "ReActRunner",
+    # Hooks
+    "FtreCoreHookManager",
+    "HookInput",
+    "HookOutput",
+    "TurnStartInput",
+    "TurnStartOutput",
+    "StopInput",
+    "PreToolInput",
+    "PreToolOutput",
+    "PostToolInput",
+    "PostToolOutput",
+    "TurnEndInput",
+    "ON_TURN_START",
+    "ON_PRE_TOOL",
+    "ON_POST_TOOL",
+    "ON_STOP",
+    "ON_TURN_END",
 ]

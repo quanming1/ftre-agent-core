@@ -1,8 +1,7 @@
 """
-ToolRegistry - 工具注册表 + 中间件
+ToolRegistry - 工具注册表
 """
 import inspect
-from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,7 +10,7 @@ from .cancellation import CancellationToken
 
 
 # ============================================================
-# 中间件
+# 调用上下文
 # ============================================================
 
 @dataclass
@@ -23,31 +22,6 @@ class ToolContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
 
-    _skipped: bool = field(default=False, repr=False)
-    _skip_result: str = field(default="", repr=False)
-
-    @property
-    def skipped(self) -> bool:
-        return self._skipped
-
-    @property
-    def skip_result(self) -> str:
-        return self._skip_result
-
-    def skip(self, result: str = "") -> None:
-        self._skipped = True
-        self._skip_result = result
-
-
-class ToolMiddleware(ABC):
-    """Tool 中间件基类"""
-
-    def before(self, context: ToolContext) -> ToolContext:
-        return context
-
-    def after(self, context: ToolContext, result) -> Any:
-        return result
-
 
 # ============================================================
 # 注册表
@@ -58,20 +32,7 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, Tool] = {}
-        self._middlewares: list[ToolMiddleware] = []
         self._inject_map: dict[str, dict[str, str]] = {}
-
-    # --- 中间件 ---
-
-    def add_middleware(self, middleware: ToolMiddleware) -> None:
-        self._middlewares.append(middleware)
-
-    def remove_middleware(self, middleware: ToolMiddleware) -> None:
-        self._middlewares.remove(middleware)
-
-    @property
-    def middlewares(self) -> list[ToolMiddleware]:
-        return list(self._middlewares)
 
     # --- 工具管理 ---
 
