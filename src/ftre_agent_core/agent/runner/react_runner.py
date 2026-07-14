@@ -188,6 +188,7 @@ class ReActRunner:
             agent.api_base,
             agent.api_type,
             max_tokens=agent.max_tokens,
+            reasoning_effort=agent.reasoning_effort,
         )
         # ToolHandler 负责工具的并发调度、取消传播和结果归并。
         self.tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
