@@ -26,6 +26,7 @@ class ReActAgent:
         tool_registry: ToolRegistry | None = None,
         max_iterations: int | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str = "",
         memory: MemoryManager | None = None,
         max_retries: int = 5,
         retry_delay: float = 3.0,
@@ -38,6 +39,7 @@ class ReActAgent:
         self.api_type = api_type
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.tracer = tracer or Tracer()
