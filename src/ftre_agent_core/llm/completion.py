@@ -257,15 +257,13 @@ class LLMHandler:
         max_retries: int = 3,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        reasoning_effort: str = "",
     ):
-        if api_type != "completions":
-            logger.warning(
-                "当前只支持 OpenAI chat completions；忽略 api_type=%s", api_type
-            )
-
         self.model = model
+        self.api_type = api_type
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort or ""
         self._active_stream = None
         self._active_loop: asyncio.AbstractEventLoop | None = None
         self._cancelled: bool = False
@@ -295,6 +293,19 @@ class LLMHandler:
         tools: list[dict] | None = None,
     ) -> AsyncGenerator[LLMEvent, None]:
         """执行一次 provider turn，并产出 LLMEvent。"""
+        if self.api_type == "responses":
+            async for event in self._stream_responses(messages, tools):
+                yield event
+            return
+        async for event in self._stream_completions(messages, tools):
+            yield event
+
+    async def _stream_completions(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[LLMEvent, None]:
+        """OpenAI Chat Completions 流式路径。"""
         llm_log = LLMLogger(self.model)
         llm_log.log_input(messages, tools)
 
@@ -308,6 +319,11 @@ class LLMHandler:
             params["max_tokens"] = max(1, int(self.max_tokens))
         if self.temperature is not None:
             params["temperature"] = self.temperature
+        if self.reasoning_effort:
+            params["reasoning_effort"] = self.reasoning_effort
+            # thinking 参数仅 DeepSeek 模型支持
+            if "deepseek" in self.model.lower():
+                params["extra_body"] = {"thinking": {"type": "enabled"}}
         if tools:
             params["tools"] = tools
 
@@ -377,6 +393,253 @@ class LLMHandler:
                     "[completion] stream ended: finish_reason=%s has_tool_calls=%s",
                     finish_reason,
                     accumulator.has_data,
+                )
+
+            yield StepFinish(
+                finish_reason=finish_reason,
+                usage=usage,
+                response_metadata=response_metadata,
+            )
+
+        except Exception as exc:
+            raise LLMError.classify(exc) from exc
+        finally:
+            self._active_stream = None
+            self._active_loop = None
+            self._cancelled = False
+            if response is not None:
+                close_result = response.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            llm_log.flush()
+
+    # ── Responses API 路径 ──────────────────────────────────────
+
+    @staticmethod
+    def _convert_messages_to_responses_input(
+        messages: list[dict],
+    ) -> tuple[str | None, list[dict]]:
+        """Chat Completions messages → Responses API (instructions, input)。
+
+        转换规则：
+          system       → instructions 参数（多条拼接）
+          user         → {role: user, content}
+          assistant    → {role: assistant, content}（无 tool_calls 时）
+          assistant+tc → 先 assistant content（如有），再若干 function_call 条目
+          tool         → {type: function_call_output, call_id, output}
+        """
+        import json as _json
+
+        instructions: str | None = None
+        input_items: list[dict] = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "system":
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = "\n".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") in ("text", "input_text")
+                    )
+                else:
+                    text = ""
+                if text:
+                    instructions = text if not instructions else f"{instructions}\n\n{text}"
+
+            elif role == "user":
+                input_items.append({"role": "user", "content": content})
+
+            elif role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    if content:
+                        input_items.append({"role": "assistant", "content": content})
+                    for tc in tool_calls:
+                        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                        input_items.append({
+                            "type": "function_call",
+                            "call_id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", ""),
+                        })
+                else:
+                    input_items.append({"role": "assistant", "content": content})
+
+            elif role == "tool":
+                call_id = msg.get("tool_call_id", "")
+                if isinstance(content, str):
+                    output = content
+                else:
+                    output = _json.dumps(content, ensure_ascii=False)
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                })
+
+        return instructions, input_items
+
+    @staticmethod
+    def _convert_tools_to_responses(tools: list[dict]) -> list[dict]:
+        """Chat Completions tools → Responses API tools。
+
+        Chat Completions: {type: function, function: {name, description, parameters}}
+        Responses API:    {type: function, name, description, parameters}
+        """
+        result: list[dict] = []
+        for tool in tools:
+            if tool.get("type") == "function":
+                fn = tool.get("function", {})
+                result.append({
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                })
+        return result
+
+    async def _stream_responses(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[LLMEvent, None]:
+        """OpenAI Responses API 流式路径（支持 reasoning + tools 同时使用）。
+
+        产出与 _stream_completions 相同的 LLMEvent，调用方无需区分。
+        """
+        import json as _json
+
+        llm_log = LLMLogger(self.model)
+        llm_log.log_input(messages, tools)
+
+        instructions, input_items = self._convert_messages_to_responses_input(messages)
+        resp_tools = self._convert_tools_to_responses(tools) if tools else []
+
+        params: dict[str, Any] = {
+            "model": self.model,
+            "input": input_items,
+            "stream": True,
+            "store": False,
+        }
+        if instructions is not None:
+            params["instructions"] = instructions
+        if self.max_tokens is not None:
+            params["max_output_tokens"] = max(1, int(self.max_tokens))
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.reasoning_effort and self.reasoning_effort != "none":
+            params["reasoning"] = {"effort": self.reasoning_effort}
+        if resp_tools:
+            params["tools"] = resp_tools
+
+        response = None
+        try:
+            self._active_loop = asyncio.get_running_loop()
+            response = await self._client.responses.create(**params)
+            self._active_stream = response
+
+            usage: dict | None = None
+            finish_reason: str = "unknown"
+            response_metadata: dict[str, Any] = {}
+            collected_tool_calls: list[ToolCall] = []
+            has_function_call = False
+
+            # item_id → {call_id, name}，从 OutputItemAdded 获取
+            fc_info: dict[str, dict] = {}
+
+            async for event in response:
+                if self._cancelled:
+                    logger.info("[completion] responses stream cancelled by cancel()")
+                    break
+
+                llm_log.log_chunk(event)
+
+                event_type = type(event).__name__
+
+                # ── 文本增量 ──
+                if event_type == "ResponseTextDeltaEvent":
+                    delta = _get_attr(event, "delta")
+                    if delta:
+                        yield TextDelta(text=delta)
+
+                # ── 推理增量（如果网关支持流式返回推理文本）──
+                elif event_type == "ResponseReasoningDeltaEvent":
+                    delta = _get_attr(event, "delta")
+                    if delta:
+                        yield ReasoningDelta(text=delta)
+
+                # ── 工具调用参数增量 ──
+                elif event_type == "ResponseFunctionCallArgumentsDeltaEvent":
+                    item_id = _get_attr(event, "item_id", "")
+                    delta = _get_attr(event, "delta", "")
+                    info = fc_info.get(item_id, {})
+                    if delta:
+                        yield ToolInputDelta(
+                            id=info.get("call_id", ""),
+                            name=info.get("name", ""),
+                            text=delta,
+                        )
+
+                # ── 输出项添加：记录 function_call 的 call_id 和 name ──
+                elif event_type == "ResponseOutputItemAddedEvent":
+                    item = _get_attr(event, "item", {})
+                    if _get_attr(item, "type") == "function_call":
+                        item_id = _get_attr(item, "id", "")
+                        fc_info[item_id] = {
+                            "call_id": _get_attr(item, "call_id", ""),
+                            "name": _get_attr(item, "name", ""),
+                        }
+
+                # ── 输出项完成：收集完整的 function_call ──
+                elif event_type == "ResponseOutputItemDoneEvent":
+                    item = _get_attr(event, "item", {})
+                    if _get_attr(item, "type") == "function_call":
+                        has_function_call = True
+                        call_id = _get_attr(item, "call_id", "")
+                        name = _get_attr(item, "name", "")
+                        arguments = _get_attr(item, "arguments", "")
+                        try:
+                            parsed = _json.loads(arguments) if arguments else {}
+                        except _json.JSONDecodeError:
+                            logger.warning(
+                                "[completion] responses 工具 %s 的 JSON 参数解析失败: %r",
+                                name, arguments[:200],
+                            )
+                            parsed = None
+                        collected_tool_calls.append(
+                            ToolCall(id=call_id, name=name, input=parsed)
+                        )
+
+                # ── 响应完成 ──
+                elif event_type == "ResponseCompletedEvent":
+                    resp = _get_attr(event, "response", {})
+                    usage = normalize_usage(_get_attr(resp, "usage"))
+                    for key in ("id", "model", "created_at"):
+                        value = _get_attr(resp, key)
+                        if value is not None:
+                            response_metadata[key] = value
+                    status = _get_attr(resp, "status", "")
+                    incomplete = _get_attr(resp, "incomplete_details", None)
+                    if incomplete:
+                        finish_reason = "length"
+                    elif has_function_call:
+                        finish_reason = "tool_calls"
+                    elif status == "completed":
+                        finish_reason = "stop"
+
+            # yield 收集到的 tool calls
+            for tc in collected_tool_calls:
+                yield tc
+
+            if finish_reason not in ("stop", "tool_calls", "length"):
+                logger.warning(
+                    "[completion] responses stream ended: finish_reason=%s has_tool_calls=%s",
+                    finish_reason,
+                    bool(collected_tool_calls),
                 )
 
             yield StepFinish(
