@@ -1,5 +1,5 @@
 # ftre workspace
-.ftre/snapshot/
+.ftre/
 
 # Data (logs, cache, etc.)
 src/data/
