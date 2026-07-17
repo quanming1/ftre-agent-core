@@ -1,6 +1,6 @@
 # ftre-agent-core
 
-一个轻量级 Python Agent 框架，从 [ftre](https://github.com/quanming1/ai-base) 项目中抽取的核心运行时。
+一个轻量级 Python Agent 框架，从 [ftre](https://github.com/quanming1/ftre) 项目中抽取的核心运行时。
 
 ## 背景
 
@@ -189,4 +189,4 @@ MIT
 
 ## 相关项目
 
-- [ftre](https://github.com/quanming1/ai-base) - 基于此框架构建的 AI 编程助手
+- [ftre](https://github.com/quanming1/ftre) - 基于此框架构建的 AI 编程助手
