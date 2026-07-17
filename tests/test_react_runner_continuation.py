@@ -52,10 +52,8 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    # 最终应该有 turn_end step 事件
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
-    assert step_events[0].reason == DoneReason.COMPLETED
+    # 验证最终状态
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -91,9 +89,7 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     assert calls == 3
     user_msg_events = [e for e in events if e.type == EventType.USER_MESSAGE]
     assert len(user_msg_events) == 1
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
-    assert step_events[0].reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -117,8 +113,7 @@ async def test_unknown_finish_with_text_logs_and_continues(caplog):
         events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -168,17 +163,10 @@ async def test_tool_call_turn_does_not_emit_turn_end_before_followup_turn():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    # tool_result 事件应该在 turn_end 之前
-    tool_result_idx = None
-    turn_end_idx = None
-    for i, e in enumerate(events):
-        if e.type == EventType.TOOL_RESULT and tool_result_idx is None:
-            tool_result_idx = i
-        if isinstance(e, StepEvent) and e.is_turn_end:
-            turn_end_idx = i
-    assert tool_result_idx is not None
-    assert turn_end_idx is not None
-    assert tool_result_idx < turn_end_idx
+    # tool_result 事件应该存在（agent-core 不再产出 turn_end 事件）
+    tool_results = [e for e in events if e.type == EventType.TOOL_RESULT]
+    assert len(tool_results) == 1
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio

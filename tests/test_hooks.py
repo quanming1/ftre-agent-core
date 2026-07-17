@@ -303,11 +303,8 @@ async def test_on_stop_hook_blocks_and_continues():
     assert "keep going" in msgs[2]["content"]
     assert msgs[3]["role"] == "assistant"
 
-    # 最终应该有 turn_end step 事件
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
-    assert step_events[0].success is True
-    assert step_events[0].reason == DoneReason.COMPLETED
+    # 验证最终状态（agent-core 不再产出 Step 事件，通过 state 检查）
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -333,9 +330,7 @@ async def test_on_stop_hook_allow_lets_agent_stop():
     events = [e async for e in agent.run("start")]
 
     assert hook_calls == 1
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
-    assert step_events[0].reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == DoneReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -625,11 +620,8 @@ async def test_goal_simulation_block_twice_then_allow():
     assert call_count == 3
     assert hook_iterations == [1, 2, 3]
 
-    step_events = [e for e in events if isinstance(e, StepEvent) and e.is_turn_end]
-    assert len(step_events) == 1
-    assert step_events[0].success is True
-    assert step_events[0].reason == DoneReason.COMPLETED
-    assert step_events[0].iterations == 3
+    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.iteration == 3
 
 
 # ═══════════════════════════════════════════════════════════════════

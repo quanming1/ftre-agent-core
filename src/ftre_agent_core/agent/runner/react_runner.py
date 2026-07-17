@@ -34,13 +34,9 @@ from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceS
 from .tool_handler import ToolHandler
 from ..event import (
     DoneReason,
-    StepPhase,
-    StepEvent,
     AgentEvent,
-    EventType,
     assistant_message_event,
     assistant_message_complete_event,
-    step_event,
     retry_event,
     tool_result_event,
     user_message_event,
@@ -106,6 +102,8 @@ class RunState:
     status: RunStatus = RunStatus.IDLE
     iteration: int = 0                              # 当前迭代轮次（从 1 开始）
     error: str | None = None                        # 最终错误描述（ERROR 状态时填充）
+    error_code: str | None = None                   # 错误代码（ERROR 状态时填充）
+    done_reason: DoneReason | None = None           # Turn 结束原因（COMPLETED/MAX_ITERATIONS/ERROR/CANCELLED）
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     runtime_context: dict = field(default_factory=dict)  # 调用方传入的上下文
     empty_content_retries: int = 0                  # 连续空响应计数
@@ -135,13 +133,15 @@ class RunState:
         self.status = RunStatus.RUNNING
         self.iteration = 0
         self.error = None
+        self.error_code = None
+        self.done_reason = None
         self.cancel_token = CancellationToken()
         self.empty_content_retries = 0
         self.force_no_tools_once = False
         self.finalization_retrying = False
         self.trace_span = None
         self.partial_content = []
-        self.turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+        self.turn_id = self.runtime_context.get("turn_id") or f"turn_{uuid.uuid4().hex[:12]}"
         self.token_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -209,13 +209,8 @@ class ReActRunner:
         Yields:
             AgentEvent：包括文本增量、推理增量、工具调用/结果、step 等。
         """
-        self.state.start()
         self.state.runtime_context = runtime_context or {}
-
-        # 产出 turn_start 事件
-        turn_start = step_event(StepPhase.TURN_START, start_trigger="user")
-        object.__setattr__(turn_start, "turn_id", self.state.turn_id)
-        yield turn_start
+        self.state.start()
 
         # ── 准备 tracing 元数据 ──
         # 调用方可以通过 runtime_context 传入自定义 trace 元数据，
@@ -242,10 +237,6 @@ class ReActRunner:
             tags=list(trace_tags),
         )
 
-        # 这两个变量在 finally 中用于写入根 span 的输出。
-        done_reason = None
-        done_success = None
-
         # ── 将用户消息写入 memory ──
         if isinstance(message, str):
             self.agent.memory.add_user(message)
@@ -261,10 +252,6 @@ class ReActRunner:
             async for event in self._loop():
                 # 给每个事件盖 turn_id 戳
                 object.__setattr__(event, "turn_id", self.state.turn_id)
-                # 捕获 STEP turn_end 事件的成败与原因，留待 finally 写入根 span。
-                if event.type == EventType.STEP and isinstance(event, StepEvent) and event.is_turn_end:
-                    done_reason = event.reason
-                    done_success = event.success
                 yield event
 
         except BaseException as exc:
@@ -296,8 +283,8 @@ class ReActRunner:
                 self.state.trace_span.end(
                     status=trace_status,
                     outputs={
-                        "success": done_success,
-                        "done_reason": done_reason,
+                        "success": self.state.status == RunStatus.COMPLETED,
+                        "done_reason": self.state.done_reason,
                         "iterations": self.state.iteration,
                     },
                     error=self.state.error if self.state.status == RunStatus.ERROR else None,
@@ -350,7 +337,7 @@ class ReActRunner:
                             session_id=self.state.runtime_context.get("session_id", ""),
                             turn_id=self.state.turn_id,
                             iteration=self.state.iteration,
-                            done_reason=DoneReason.COMPLETED,
+                            done_reason=self.state.done_reason or DoneReason.COMPLETED,
                             runtime_context=self.state.runtime_context,
                         ),
                     )
@@ -359,23 +346,11 @@ class ReActRunner:
 
             # 达到 max_iterations 上限，标记为完成（非错误）。
             if not self.state.is_done:
-                yield step_event(
-                    StepPhase.TURN_END,
-                    success=False,
-                    reason=DoneReason.MAX_ITERATIONS,
-                    iterations=self.state.iteration,
-                    token_usage=dict(self.state.token_usage),
-                )
+                self.state.done_reason = DoneReason.MAX_ITERATIONS
                 self.state.status = RunStatus.COMPLETED
 
         except CancelledError:
-            yield step_event(
-                StepPhase.TURN_END,
-                success=False,
-                reason=DoneReason.CANCELLED,
-                iterations=self.state.iteration,
-                token_usage=dict(self.state.token_usage),
-            )
+            self.state.done_reason = DoneReason.CANCELLED
             self.state.status = RunStatus.CANCELLED
 
     # ── 单轮调用（带重试）：_run_turn() ────────────────────────────────────
@@ -441,17 +416,10 @@ class ReActRunner:
 
                 # 不可重试或已是最后一次尝试 → 终止。
                 if err.code in LLMError.UNRETRYABLE_CODES or is_last:
-                    yield step_event(
-                        StepPhase.TURN_END,
-                        success=False,
-                        reason=DoneReason.ERROR,
-                        iterations=self.state.iteration,
-                        error_message=err.message,
-                        error_code=err.code,
-                        token_usage=dict(self.state.token_usage),
-                    )
+                    self.state.done_reason = DoneReason.ERROR
                     self.state.status = RunStatus.ERROR
                     self.state.error = f"[{err.code}] {err.message}"
+                    self.state.error_code = err.code
                     return
 
             # 可重试错误：发出 retry 事件，等待一小段时间后进入下一次 attempt。
@@ -710,13 +678,7 @@ class ReActRunner:
                     return  # 不设 COMPLETED，_loop 继续下一轮
 
                 # 分支 3f：正常结束。
-                yield step_event(
-                    StepPhase.TURN_END,
-                    success=True,
-                    reason=DoneReason.COMPLETED,
-                    iterations=self.state.iteration,
-                    token_usage=dict(self.state.token_usage),
-                )
+                self.state.done_reason = DoneReason.COMPLETED
                 self.state.status = RunStatus.COMPLETED
                 return
 
@@ -732,17 +694,10 @@ class ReActRunner:
 
             # 已经在"强制最终化"阶段还是空 → 彻底失败。
             if self.state.finalization_retrying:
-                yield step_event(
-                    StepPhase.TURN_END,
-                    success=False,
-                    reason=DoneReason.ERROR,
-                    iterations=self.state.iteration,
-                    error_message=EMPTY_FINAL_RESPONSE_MESSAGE,
-                    error_code="empty_response",
-                    token_usage=dict(self.state.token_usage),
-                )
+                self.state.done_reason = DoneReason.ERROR
                 self.state.status = RunStatus.ERROR
                 self.state.error = EMPTY_FINAL_RESPONSE_MESSAGE
+                self.state.error_code = "empty_response"
                 return
 
             # 空响应重试：计数 +1，未达上限则继续下一轮（让模型重新生成）。
