@@ -1,32 +1,34 @@
 # ftre-agent-core
 
-一个轻量级 Python Agent 框架，从 [ftre](https://github.com/quanming1/ftre) 项目中抽取的核心运行时。
+English | [中文](README.zh-CN.md)
 
-## 背景
+A lightweight Python Agent framework, extracted from the [ftre](https://github.com/quanming1/ftre) project as the core runtime.
 
-ftre 是一个本地运行的 AI 编程助手，类似 Cursor / Windsurf，但完全开源、可自托管。在开发 ftre 的过程中，我们发现 Agent 的核心能力（ReAct 循环、工具系统、LLM 适配、消息管理）是通用的，不应该和 ftre 的业务逻辑耦合在一起。
+## Background
 
-于是我们把这部分抽取出来，形成了 `ftre-agent-core`。
+ftre is a local-first AI coding assistant, similar to Cursor / Windsurf, but fully open-source and self-hostable. While developing ftre, we found that the core Agent capabilities (ReAct loop, tool system, LLM adaptation, message management) are generic and shouldn't be coupled with ftre's business logic.
 
-## 设计理念
+So we extracted this part into `ftre-agent-core`.
 
-**1. 不造轮子，只做胶水**
+## Design Principles
 
-LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，不发明 DSL。尽量让用户用熟悉的方式写代码。
+**1. Don't reinvent wheels, just glue**
 
-**2. 流式优先**
+LLM calls use the OpenAI SDK — no custom HTTP wrappers. Tool definitions use JSON Schema — no invented DSL. We let users write code in familiar ways.
 
-所有 Agent 执行都是流式的，通过 Generator 逐步 yield 事件。前端可以实时展示思考过程、工具调用、中间结果。
+**2. Streaming first**
 
-**3. 可中断**
+All Agent execution is streaming, yielding events step by step via a Generator. Frontends can display reasoning, tool calls, and intermediate results in real time.
 
-支持运行时取消（`CancellationToken`），工具执行中可随时中断。通过线程安全的取消信号，主循环和工具执行器协同响应用户取消请求。
+**3. Interruptible**
 
-**4. 协议适配**
+Supports runtime cancellation via `CancellationToken`. Tools can be interrupted at any time during execution. Thread-safe cancel signals coordinate between the main loop and tool executors.
 
-不同 LLM 厂商的 API 协议不一样（OpenAI completions vs responses），`ftre-agent-core` 在底层做适配，上层统一用 OpenAI SDK 的接口。
+**4. Protocol adaptation**
 
-## 架构
+Different LLM vendors have different API protocols (OpenAI completions vs responses). `ftre-agent-core` adapts at the lower layer, exposing a unified OpenAI SDK interface upstream.
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -35,114 +37,108 @@ LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，
 │  │                   ReActRunner                     │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │  │
 │  │  │ LLMHandler  │  │ ToolHandler │  │  Memory   │  │  │
-│  │  │  (流式调用)  │  │  (工具执行)  │  │ (消息管理) │  │  │
+│  │  │ (streaming) │  │ (execution) │  │ (messages) │  │  │
 │  │  └─────────────┘  └─────────────┘  └───────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
                            │
-           ┌───────────────┼───────────────┐
-           ▼               ▼               ▼
-    ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
-    │   LLM 层    │ │  Tool 层    │ │ Cancellation │
-    │ (协议适配)   │ │ (注册/执行)  │ │  (取消信号)   │
-    └─────────────┘ └─────────────┘ └──────────────┘
+            ┌───────────────┼───────────────┐
+            ▼               ▼               ▼
+     ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
+     │  LLM Layer  │ │ Tool Layer  │ │ Cancellation │
+     │ (protocol)  │ │ (registry)  │ │   (signal)   │
+     └─────────────┘ └─────────────┘ └──────────────┘
 ```
 
-### 核心模块
+### Core Modules
 
-| 模块 | 职责 |
+| Module | Role |
 |------|------|
-| `agent/` | Agent 抽象和 ReAct 实现 |
-| `agent/runner/` | 执行引擎：LLM 调用、工具执行、事件分发 |
-| `tool/` | 工具定义、注册、中间件、依赖注入 |
-| `llm/` | LLM 客户端适配（completions / responses 协议） |
-| `memory.py` | 消息历史管理、token 计数 |
-| `threading.py` | 全局线程池（按用途分组） |
-| `tracing.py` | Agent / LLM / Tool 树状追踪与 exporter |
+| `agent/` | Agent abstraction and ReAct implementation |
+| `agent/runner/` | Execution engine: LLM calls, tool execution, event dispatch |
+| `tool/` | Tool definition, registration, middleware, dependency injection |
+| `llm/` | LLM client adapters (completions / responses protocol) |
+| `memory.py` | Message history management, token counting |
+| `threading.py` | Global thread pool (grouped by purpose) |
+| `tracing.py` | Agent / LLM / Tool tree-shaped tracing and exporters |
 
-## 与 LangChain / AutoGen 的区别
+## Comparison with LangChain / AutoGen
 
 | | ftre-agent-core | LangChain | AutoGen |
 |---|---|---|---|
-| 定位 | 轻量运行时 | 全家桶 | 多 Agent 协作 |
-| 依赖 | 只依赖 openai, httpx | 依赖树很深 | 依赖 openai |
-| 流式 | 原生支持 | 需要额外配置 | 支持 |
-| 工具定义 | `@tool` 装饰器 | 多种方式 | 函数注解 |
-| 学习成本 | 低 | 高 | 中 |
+| Focus | Lightweight runtime | All-in-one toolkit | Multi-agent collaboration |
+| Dependencies | Only openai, httpx | Deep dependency tree | Depends on openai |
+| Streaming | Native | Requires extra config | Supported |
+| Tool definition | `@tool` decorator | Multiple approaches | Function annotations |
+| Learning curve | Low | High | Medium |
 
-我们不追求功能全面，只做好 Agent 执行这一件事。
+We don't aim to be feature-complete — we just do Agent execution well.
 
-## 安装
+## Installation
 
 ```bash
-# 从 GitHub 安装
+# Install from GitHub
 pip install git+https://github.com/quanming1/ftre-agent-core.git
 
-# 本地开发（editable 模式，改代码立即生效）
+# Local development (editable mode)
 git clone https://github.com/quanming1/ftre-agent-core.git
 pip install -e ./ftre-agent-core
 ```
 
-## 快速开始
+## Quick Start
 
 ```python
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.tool import tool
 from ftre_agent_core.llm import create_client
 
-# 定义工具
-@tool(description="读取文件内容")
+# Define tools
+@tool(description="Read file contents")
 def read_file(path: str) -> str:
-    """path: 文件路径"""
+    """path: file path"""
     return open(path).read()
 
-@tool(description="写入文件")
+@tool(description="Write file")
 def write_file(path: str, content: str) -> str:
-    """path: 文件路径, content: 文件内容"""
+    """path: file path, content: file content"""
     open(path, 'w').write(content)
-    return f"已写入 {path}"
+    return f"Written to {path}"
 
-# 创建客户端
+# Create client
 client = create_client(
     api_key="sk-xxx",
     base_url="https://api.openai.com/v1",
 )
 
-# 创建 Agent
+# Create Agent
 agent = ReActAgent(
     client=client,
     model="gpt-4",
-    system_prompt="你是一个文件处理助手",
+    system_prompt="You are a file processing assistant",
     tools=[read_file, write_file],
     max_iterations=20,
 )
 
-# 流式执行
-for event in agent.stream("读取 config.json 并格式化"):
+# Stream execution
+for event in agent.stream("Read config.json and format it"):
     print(event.type, event.data)
 ```
 
-## 本地开发
+## Local Development
 
 ```bash
-# 克隆
 git clone https://github.com/quanming1/ftre-agent-core.git
 cd ftre-agent-core
-
-# editable 安装
 pip install -e .
-
-# 在其他项目中引用（假设在同级目录）
-pip install -e ../ftre-agent-core
 ```
 
-editable 模式下，修改 `ftre-agent-core` 的代码会立即生效，不需要重新安装。
+In editable mode, changes to `ftre-agent-core` code take effect immediately without reinstalling.
 
 ## Tracing
 
-Tracing 默认关闭。显式配置 exporter 后，每次执行会生成一棵
-`agent -> llm/tool` run 树，记录输入输出、耗时、状态、错误、usage、
-`finish_reason` 和 provider 返回的响应元数据。
+Tracing is disabled by default. When an exporter is explicitly configured, each execution generates an
+`agent -> llm/tool` run tree recording inputs, outputs, duration, status, errors, usage,
+`finish_reason`, and provider response metadata.
 
 ```python
 from ftre_agent_core import JsonlTraceExporter, Tracer
@@ -156,7 +152,7 @@ agent = ReActAgent(
 )
 
 async for event in agent.run(
-    "完成任务",
+    "Complete the task",
     runtime_context={
         "trace_name": "session-turn",
         "trace_tags": ["desktop"],
@@ -166,27 +162,28 @@ async for event in agent.run(
     print(event.type)
 ```
 
-测试或嵌入式调用可使用 `InMemoryTraceExporter.get_trace(trace_id)` 读取完整
-run 树。Exporter 异常只写日志，不会中断 Agent。Trace 会包含完整消息和工具
-输入输出，启用持久化 exporter 时应按部署环境处理访问控制和敏感信息。
+For testing or embedded usage, use `InMemoryTraceExporter.get_trace(trace_id)` to read the full
+run tree. Exporter exceptions only log and never interrupt the Agent. Traces contain full messages
+and tool inputs/outputs — handle access control and sensitive information appropriately when
+enabling persistent exporters.
 
-## 路线图
+## Roadmap
 
-- [x] ReAct Agent 基础循环
-- [x] 工具系统（定义、注册、中间件）
-- [x] LLM 协议适配（completions / responses）
-- [x] 流式事件输出
-- [x] 运行时取消（CancellationToken）
-- [x] Agent / LLM / Tool 树状 tracing
-- [ ] Checkpoint 快照与恢复
-- [ ] 多 Agent 协作
-- [ ] 更多 LLM 适配器（Anthropic native、Gemini）
-- [ ] 可视化调试工具
+- [x] ReAct Agent core loop
+- [x] Tool system (definition, registration, middleware)
+- [x] LLM protocol adaptation (completions / responses)
+- [x] Streaming event output
+- [x] Runtime cancellation (CancellationToken)
+- [x] Agent / LLM / Tool tree-shaped tracing
+- [ ] Checkpoint snapshot and restore
+- [ ] Multi-agent collaboration
+- [ ] More LLM adapters (Anthropic native, Gemini)
+- [ ] Visual debugging tools
 
 ## License
 
 MIT
 
-## 相关项目
+## Related Projects
 
-- [ftre](https://github.com/quanming1/ftre) - 基于此框架构建的 AI 编程助手
+- [ftre](https://github.com/quanming1/ftre) - AI coding assistant built on this framework
