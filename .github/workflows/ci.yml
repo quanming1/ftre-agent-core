@@ -33,6 +33,4 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest tests/ -q \
-            --ignore=tests/test_fake_llm.py \
-            --ignore=tests/test_probe_real_model.py \
-            --ignore=tests/test_tracing.py
+            --ignore=tests/test_probe_real_model.py
