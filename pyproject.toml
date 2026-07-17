@@ -9,7 +9,7 @@ authors = [
     {name = "quanming1"}
 ]
 dependencies = [
-    "litellm>=1.0.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
