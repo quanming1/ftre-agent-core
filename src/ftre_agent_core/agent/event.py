@@ -25,6 +25,11 @@ class EventType(str, Enum):
 
 class StepPhase(str, Enum):
     """Step 事件的阶段标识。"""
+    PIPELINE_START = "pipeline_start"
+    PIPELINE_END = "pipeline_end"
+    COMPACT_START = "compact_start"
+    COMPACT_END = "compact_end"
+    COMMAND_MATCHED = "command_matched"
     TURN_START = "turn_start"
     TURN_END = "turn_end"
 
@@ -206,6 +211,10 @@ class StepEvent(AgentEvent):
     error_code: str = ""
     start_trigger: str = ""
     token_usage: dict[str, Any] | None = None
+    turn_type: str = ""
+    duration_ms: int | None = None
+    compact_triggered: bool = False
+    command_name: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'type', EventType.STEP)
@@ -233,6 +242,14 @@ class StepEvent(AgentEvent):
             d["start_trigger"] = self.start_trigger
         if self.token_usage:
             d["token_usage"] = self.token_usage
+        if self.turn_type:
+            d["turn_type"] = self.turn_type
+        if self.duration_ms is not None:
+            d["duration_ms"] = self.duration_ms
+        if self.compact_triggered:
+            d["compact_triggered"] = self.compact_triggered
+        if self.command_name:
+            d["command_name"] = self.command_name
         return d
 
 
