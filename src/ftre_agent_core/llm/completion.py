@@ -29,6 +29,26 @@ from .utils import LLMLogger
 
 logger = logging.getLogger(__name__)
 
+def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
+    """复制并规范化 Chat Completions 消息，不污染调用方的 memory/history。
+
+    遵循 OpenAI-compatible 工具调用语义：
+    - assistant 有 tool_calls 但无正文：content=None
+    - assistant 无 tool_calls 且无正文（包括 reasoning-only）：content="(empty)"
+    """
+    normalized: list[dict] = []
+    for message in messages:
+        current = dict(message)
+        if current.get("role") == "assistant":
+            content = current.get("content")
+            is_empty = content is None or content == [] or (
+                isinstance(content, str) and not content.strip()
+            )
+            if is_empty:
+                current["content"] = None if current.get("tool_calls") else "(empty)"
+        normalized.append(current)
+    return normalized
+
 
 # LLM 错误分类
 @dataclass
@@ -306,12 +326,13 @@ class LLMHandler:
         tools: list[dict] | None = None,
     ) -> AsyncGenerator[LLMEvent, None]:
         """OpenAI Chat Completions 流式路径。"""
+        request_messages = _normalize_chat_messages(messages)
         llm_log = LLMLogger(self.model)
-        llm_log.log_input(messages, tools)
+        llm_log.log_input(request_messages, tools)
 
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
