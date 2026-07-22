@@ -50,3 +50,62 @@ async def test_llm_handler_passes_configured_max_tokens(monkeypatch):
     assert captured["stream"] is True
     assert isinstance(events[-1], StepFinish)
     assert events[-1].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_normalizes_empty_assistant_content(monkeypatch):
+    """真实请求中历史 tool-call 和当前 ReAct 消息都可能没有可见正文。"""
+    handler = LLMHandler("test-model", "test-key")
+    captured = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream()
+
+    monkeypatch.setattr(
+        handler._client,
+        "chat",
+        SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+    messages = [
+        # 22.json[152]：历史 assistant tool-call，content 字段已被 converter 省略。
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_history",
+                "type": "function",
+                "function": {"name": "bash", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_history", "content": "ok"},
+        # 22.json[214]：当前 ReAct memory 写入 content="" + reasoning + tool_calls。
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "need tools",
+            "tool_calls": [{
+                "id": "call_live",
+                "type": "function",
+                "function": {"name": "read", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_live", "content": "ok"},
+        # 22.json[158]：只有 reasoning_content，没有正文或工具调用。
+        {"role": "assistant", "reasoning_content": "internal reasoning"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await _collect(handler, messages)
+
+    assistant_messages = [m for m in captured["messages"] if m["role"] == "assistant"]
+    assert assistant_messages[0]["content"] is None
+    assert assistant_messages[1]["content"] is None
+    assert assistant_messages[2]["content"] == "(empty)"
+    # 请求边界规范化不能污染 memory/history 原对象。
+    assert "content" not in messages[0]
+    assert messages[2]["content"] == ""
+    assert "content" not in messages[4]
+
+
+async def _collect(handler, messages):
+    return [event async for event in handler.stream(messages)]
