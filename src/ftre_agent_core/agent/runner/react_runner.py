@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -112,6 +113,9 @@ class RunState:
     trace_span: TraceSpan | None = None             # 本次执行的根 trace span
     partial_content: list[dict] = field(default_factory=list)  # 跨轮累积的 content[]，用于流式 assistant_message
     turn_id: str = ""                               # 本次 Turn 的唯一标识
+    _turn_start_ts: float = 0.0                     # 当前轮开始时间（perf_counter）
+    _first_token_logged: bool = False               # 当前轮是否已记录首个字符
+    _ttft_ms: float | None = None                   # 当前 LLM call 的 TTFT（毫秒）
     token_usage: dict = field(default_factory=lambda: {  # 本 Turn 累积的 token 用量
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -309,6 +313,9 @@ class ReActRunner:
             while self.agent.max_iterations is None or self.state.iteration < self.agent.max_iterations:
                 self.state.check_cancel()
                 self.state.iteration += 1
+                self.state._turn_start_ts = time.perf_counter()
+                self.state._first_token_logged = False
+                self.state._ttft_ms = None
 
                 # ── on_turn_start hook ──
                 ts_output = await self.agent.hook_manager.trigger(
@@ -518,6 +525,13 @@ class ReActRunner:
         try:
             async for event in self.llm.stream(messages, tools):
                 self.state.check_cancel()
+
+                if not self.state._first_token_logged:
+                    self.state._first_token_logged = True
+                    elapsed_ms = (time.perf_counter() - self.state._turn_start_ts) * 1000
+                    logger.info(f"[react] 第 {self.state.iteration} 轮 TTFT {elapsed_ms:.0f}ms")
+                    if llm_span and not llm_span.ended:
+                        llm_span.add_event("ttft", {"ms": round(elapsed_ms)})
 
                 if isinstance(event, TextDelta):
                     # 文本增量：累积到 partial_content，yield 完整快照。
