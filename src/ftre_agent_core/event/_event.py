@@ -98,12 +98,8 @@ class DoneReason(StrEnum):
     CANCELLED = "cancelled"
 
 
-# AgentScope 对齐：ReplyEndEvent 的结束原因（不同于 ftre DoneReason，独立定义）
-class ReplyFinishedReason(StrEnum):
-    COMPLETED = "completed"
-    INTERRUPTED = "interrupted"
-    EXCEED_MAX_ITERS = "exceed_max_iters"
-    ERROR = "error"
+# AgentScope 对齐：ReplyEndEvent 的结束原因，定义在 types.py（避免 event↔message 循环 import）
+from ..types import ReplyFinishedReason
 
 
 # ─── TypedDict（保留，外部可能 import）──────────────────────────
