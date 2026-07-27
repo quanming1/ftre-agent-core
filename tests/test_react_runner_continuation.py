@@ -10,7 +10,7 @@ import logging
 import pytest
 
 from ftre_agent_core.agent import EventType, ReActAgent, StepEvent, StepPhase
-from ftre_agent_core.agent.event import DoneReason
+from ftre_agent_core.event import DoneReason
 from ftre_agent_core.llm import ReasoningDelta, StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool, ToolRegistry
 

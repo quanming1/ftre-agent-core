@@ -5,7 +5,7 @@ turn_id 从 runtime_context 读取，done_reason/error_code 通过 RunState 暴�
 import pytest
 
 from ftre_agent_core.agent import ReActAgent, StepEvent
-from ftre_agent_core.agent.event import DoneReason
+from ftre_agent_core.event import DoneReason
 from ftre_agent_core.agent.runner import RunStatus
 from ftre_agent_core.llm import LLMError, TextDelta, StepFinish, ToolCall
 from ftre_agent_core.tool import tool

@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.tracing import Tracer
-from .event import AgentEvent
+from ..event import AgentEvent
 from .runner import ReActRunner
 from ..hooks import FtreCoreHookManager
 import logging
