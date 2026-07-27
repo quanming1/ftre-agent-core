@@ -1,5 +1,5 @@
 from .react import ReActAgent
-from .event import (
+from ..event import (
     EventType,
     StepPhase,
     DoneReason,

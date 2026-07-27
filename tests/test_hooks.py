@@ -12,7 +12,7 @@ import asyncio
 import pytest
 
 from ftre_agent_core.agent import ReActAgent, EventType, StepEvent, StepPhase
-from ftre_agent_core.agent.event import DoneReason
+from ftre_agent_core.event import DoneReason
 from ftre_agent_core.hooks import (
     FtreCoreHookManager,
     ON_TURN_START,

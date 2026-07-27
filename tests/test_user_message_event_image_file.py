@@ -2,7 +2,7 @@ import base64
 import os
 import tempfile
 
-from ftre_agent_core.agent.event import UserMessageEvent
+from ftre_agent_core.event import UserMessageEvent
 
 
 def _make_temp_image(raw: bytes, suffix: str = ".png") -> str:

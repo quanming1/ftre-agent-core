@@ -33,7 +33,7 @@ from ftre_agent_core.llm import (
 from ftre_agent_core.tool import CancellationToken, ToolCancelledError
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 from .tool_handler import ToolHandler
-from ..event import (
+from ...event import (
     DoneReason,
     AgentEvent,
     assistant_message_event,

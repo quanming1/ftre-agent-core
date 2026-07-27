@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
-from ftre_agent_core.agent.event import AgentEvent
+from ftre_agent_core.event import AgentEvent
 from ftre_agent_core.reasoning import format_assistant_message
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 

@@ -7,7 +7,7 @@ core 层仅保留 EventType.RETRY、RetryData、retry_event() 定义。
 
 def test_retry_event_structure():
     """验证 RETRY Event 结构"""
-    from ftre_agent_core.agent.event import retry_event, EventType
+    from ftre_agent_core.event import retry_event, EventType
 
     event = retry_event(code="timeout", message="Request timed out", attempt=1, max_attempts=3)
 

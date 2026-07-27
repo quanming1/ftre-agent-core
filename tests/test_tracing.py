@@ -3,7 +3,7 @@ import json
 import pytest
 
 from ftre_agent_core.agent import ReActAgent
-from ftre_agent_core.agent.event import DoneReason
+from ftre_agent_core.event import DoneReason
 from ftre_agent_core.llm import StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool
 from ftre_agent_core.tracing import (

@@ -2,7 +2,7 @@
 import pytest
 
 from ftre_agent_core.agent.react import ReActAgent
-from ftre_agent_core.agent.event import AssistantMessageCompleteEvent
+from ftre_agent_core.event import AssistantMessageCompleteEvent
 from ftre_agent_core.llm.completion import (
     TextDelta,
     ReasoningDelta,
