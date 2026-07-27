@@ -28,6 +28,18 @@ def make_agent(tools=None, max_iterations=3):
     )
 
 
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
 def test_step_finish_defaults_to_unknown():
     assert StepFinish().finish_reason == "unknown"
 
@@ -78,7 +90,9 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
         else:
             assert tools is None
             assert messages[-1]["role"] == "user"
-            assert "直接给出回复用户的最终内容" in messages[-1]["content"]
+            assert "直接给出回复用户的最终内容" in _content_text(
+                messages[-1]["content"]
+            )
             yield TextDelta(text="final")
             yield StepFinish(finish_reason="stop")
 
@@ -213,7 +227,9 @@ async def test_length_finish_adds_hidden_user_continuation():
             yield StepFinish(finish_reason="length")
         else:
             assert messages[-1]["role"] == "user"
-            assert "从刚才中断的位置继续" in messages[-1]["content"]
+            assert "从刚才中断的位置继续" in _content_text(
+                messages[-1]["content"]
+            )
             yield TextDelta(text=" done")
             yield StepFinish(finish_reason="stop")
 
@@ -225,4 +241,4 @@ async def test_length_finish_adds_hidden_user_continuation():
     # 续写提示应该是隐藏的 user message
     user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
     assert len(user_msgs) == 2  # original + continuation
-    assert "从刚才中断的位置继续" in user_msgs[1]["content"]
+    assert "从刚才中断的位置继续" in _content_text(user_msgs[1]["content"])

@@ -1,14 +1,12 @@
 """ContentBlock ↔ OpenAI dict 双向转换器。
 
-ftre 现有两种「工具调用」表示，本转换器都覆盖：
-  1. 事件 content part 风格：``{type:"toolCall", id, name, arguments:dict}``
-     —— 出现在 ``AssistantMessageCompleteEvent.content`` 里
+ftre 支持两种「工具调用」边界表示：
+  1. content part 风格：``{type:"toolCall", id, name, arguments:dict}``
   2. OpenAI 标准消息字段：``tool_calls: [{id, type:"function",
      function:{name, arguments:str_JSON}}]`` —— 出现在 memory / LLM 调用里
 
 两个视角的转换函数:
   - ``to_openai_part`` / ``from_openai_part``：单个 content part ↔ Block
-    （给事件用，toolCall 是 camelCase + arguments dict）
   - ``to_openai_message`` / ``from_openai_message``：整条消息 ↔ Block 列表
     （给 LLM 用，ToolCallBlock → tool_calls 字段 + arguments str JSON；
      ToolResultBlock → 独立 role=tool 消息）
@@ -241,8 +239,8 @@ def to_openai_message(
          ToolResultBlock；ftre 工具结果是独立消息，一条一结果）
       2. 否则 → ``{role:"assistant", content:[parts], tool_calls:[...],
          reasoning_content?}``：
-         * TextBlock/ThinkingBlock/DataBlock/HintBlock → content parts
-         * ThinkingBlock 同时写 reasoning_content 字段（保 DeepSeek 原生识别）
+         * TextBlock/DataBlock/HintBlock → content parts
+         * ThinkingBlock 只写 reasoning_content（OpenAI content 不接受 thinking part）
          * ToolCallBlock → tool_calls 字段（arguments 序列化为 str JSON）
     """
     # 形态 1：工具结果消息
@@ -275,7 +273,6 @@ def to_openai_message(
                 },
             })
         elif isinstance(block, ThinkingBlock):
-            content_parts.append(to_openai_part(block))
             reasoning_parts.append(block.thinking)
         elif isinstance(block, ToolResultBlock):
             # assistant 消息里夹带 ToolResultBlock —— 降级为 text part

@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 def _gen_id() -> str:
-    """生成 16 位 hex id，贴合 ftre ``event.py`` 的 event_id 风格。"""
+    """生成 16 位 hex block id。"""
     return uuid.uuid4().hex[:16]
 
 
