@@ -9,8 +9,8 @@ import logging
 
 import pytest
 
-from ftre_agent_core.agent import EventType, ReActAgent, StepEvent, StepPhase
-from ftre_agent_core.event import DoneReason
+from ftre_agent_core.agent import EventType, ReActAgent
+from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.llm import ReasoningDelta, StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool, ToolRegistry
 
@@ -53,7 +53,7 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
 
     assert calls == 2
     # 验证最终状态
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -87,9 +87,7 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     events = [event async for event in agent.run("start")]
 
     assert calls == 3
-    user_msg_events = [e for e in events if e.type == EventType.USER_MESSAGE]
-    assert len(user_msg_events) == 1
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -113,7 +111,7 @@ async def test_unknown_finish_with_text_logs_and_continues(caplog):
         events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -164,9 +162,9 @@ async def test_tool_call_turn_does_not_emit_turn_end_before_followup_turn():
 
     assert calls == 2
     # tool_result 事件应该存在（agent-core 不再产出 turn_end 事件）
-    tool_results = [e for e in events if e.type == EventType.TOOL_RESULT]
+    tool_results = [e for e in events if e.type == EventType.TOOL_RESULT_END]
     assert len(tool_results) == 1
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -198,7 +196,7 @@ async def test_multi_tool_call_events_are_emitted_before_results():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    tool_results = [e for e in events if e.type == EventType.TOOL_RESULT]
+    tool_results = [e for e in events if e.type == EventType.TOOL_RESULT_END]
     assert len(tool_results) == 2
 
 

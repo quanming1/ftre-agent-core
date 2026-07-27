@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
-from ftre_agent_core.event import AgentEvent
+from ftre_agent_core.event import AgentStreamEvent, EventBase
 from ftre_agent_core.reasoning import format_assistant_message
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
@@ -44,7 +44,7 @@ class ToolResult:
     error: str | None = None
     status: str = "completed"   # completed / failed / cancelled
     metadata: dict = field(default_factory=dict)
-    event: AgentEvent | None = None  # 工具返回了 AgentEvent（非 str）时设此字段
+    event: AgentStreamEvent | None = None  # 工具返回了 EventBase（非 str）时设此字段
 
     @property
     def cancelled(self) -> bool:
@@ -127,7 +127,7 @@ class ToolHandler:
                     runtime_context=ctx.metadata.get("runtime_context"),
                     **ctx.arguments,
                 )
-            if isinstance(raw, AgentEvent):
+            if isinstance(raw, EventBase):
                 result = ToolResult(call_id=call_id, name=name, result="", event=raw)
             elif isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], str) and isinstance(raw[1], dict):
                 # 工具返回 (result_str, metadata) — edit/write 返回 diff metadata

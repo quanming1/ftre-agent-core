@@ -4,8 +4,8 @@ turn_id 从 runtime_context 读取，done_reason/error_code 通过 RunState 暴�
 """
 import pytest
 
-from ftre_agent_core.agent import ReActAgent, StepEvent
-from ftre_agent_core.event import DoneReason
+from ftre_agent_core.agent import ReActAgent
+from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.agent.runner import RunStatus
 from ftre_agent_core.llm import LLMError, TextDelta, StepFinish, ToolCall
 from ftre_agent_core.tool import tool
@@ -70,7 +70,7 @@ async def test_done_reason_completed():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
     assert agent.state.status == RunStatus.COMPLETED
 
 
@@ -93,7 +93,7 @@ async def test_done_reason_max_iterations():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == DoneReason.MAX_ITERATIONS
+    assert agent.state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
     assert agent.state.status == RunStatus.COMPLETED
 
 
@@ -111,26 +111,12 @@ async def test_done_reason_error():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == DoneReason.ERROR
+    assert agent.state.done_reason == ReplyFinishedReason.ERROR
     assert agent.state.status == RunStatus.ERROR
     assert agent.state.error_code == "bad_request"
     assert agent.state.error is not None
     assert "bad_request" in agent.state.error
 
 
-# ── Step 14: 事件流中无 StepEvent ─────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_no_step_events_in_stream():
-    """agent-core 不再产出任何 StepEvent。"""
-    agent = make_agent()
 
-    async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="stop")
-
-    agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("start")]
-
-    step_events = [e for e in events if isinstance(e, StepEvent)]
-    assert len(step_events) == 0

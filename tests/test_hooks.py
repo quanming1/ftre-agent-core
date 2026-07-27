@@ -11,8 +11,8 @@ Core Hook 系统测试。
 import asyncio
 import pytest
 
-from ftre_agent_core.agent import ReActAgent, EventType, StepEvent, StepPhase
-from ftre_agent_core.event import DoneReason
+from ftre_agent_core.agent import ReActAgent
+from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.hooks import (
     FtreCoreHookManager,
     ON_TURN_START,
@@ -304,7 +304,7 @@ async def test_on_stop_hook_blocks_and_continues():
     assert msgs[3]["role"] == "assistant"
 
     # 验证最终状态（agent-core 不再产出 Step 事件，通过 state 检查）
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -330,7 +330,7 @@ async def test_on_stop_hook_allow_lets_agent_stop():
     events = [e async for e in agent.run("start")]
 
     assert hook_calls == 1
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -494,7 +494,7 @@ async def test_on_turn_end_called_on_completion():
     events = [e async for e in agent.run("start")]
 
     assert len(turn_end_calls) == 1
-    assert turn_end_calls[0].done_reason == DoneReason.COMPLETED
+    assert turn_end_calls[0].done_reason == ReplyFinishedReason.COMPLETED
     assert turn_end_calls[0].iteration == 1
 
 
@@ -534,7 +534,7 @@ async def test_on_turn_end_called_after_tool_iteration():
 
     assert call_count == 2
     assert len(turn_end_calls) == 1
-    assert turn_end_calls[0].done_reason == DoneReason.COMPLETED
+    assert turn_end_calls[0].done_reason == ReplyFinishedReason.COMPLETED
     assert turn_end_calls[0].iteration == 2
 
 
@@ -620,7 +620,7 @@ async def test_goal_simulation_block_twice_then_allow():
     assert call_count == 3
     assert hook_iterations == [1, 2, 3]
 
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
     assert agent.state.iteration == 3
 
 
@@ -636,7 +636,7 @@ from ftre_agent_core.hooks import (
     PostToolInput,
     PostToolOutput,
 )
-from ftre_agent_core.agent import ToolResultEvent
+from ftre_agent_core.event import ToolResultEndEvent
 from ftre_agent_core.tool import tool
 
 
@@ -678,7 +678,7 @@ async def test_on_pre_tool_block_prevents_execution():
     assert execution_count == 0
 
     # Agent 应该看到拦截 reason 作为 tool_result
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
     assert "禁止执行此工具" in tool_results[0].result
     assert tool_results[0].status == "failed"
@@ -715,7 +715,7 @@ async def test_on_pre_tool_modify_args():
     mgr.register(ON_PRE_TOOL, modify_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].result == "echo:modified"
 
@@ -753,7 +753,7 @@ async def test_on_pre_tool_allow_executes_normally():
     mgr.register(ON_PRE_TOOL, allow_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].result == "echo:hello"
 
@@ -798,7 +798,7 @@ async def test_on_post_tool_modify_result():
     mgr.register(ON_POST_TOOL, redact_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].result == "echo:***REDACTED***"
 
@@ -838,7 +838,7 @@ async def test_on_post_tool_allow_keeps_original():
     mgr.register(ON_POST_TOOL, observe_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].result == "original_result"
 
@@ -932,5 +932,5 @@ async def test_pre_and_post_tool_both_registered():
     assert post_seen == ["echo:from_pre"]
 
     # 最终 Agent 拿到的是 post 修改后的结果
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert tool_results[0].result == "from_post"
