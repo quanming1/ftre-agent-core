@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Agent 事件定义（破坏性重构后，纯 AgentScope 对齐协议）。
+"""扁平 Pydantic AgentStreamEvent 定义。
 
-旧 ftre 事件（AgentEvent 基类 + 6 子类 + 工厂 + DoneReason/StepPhase +
-TypedDict）已删除，不再兼容。所有事件继承 EventBase（pydantic，model_dump
-扁平序列化）。RetryEvent 为 ftre 特有，改继承 EventBase。
+所有事件继承 EventBase，使用 ``model_dump(mode="json")`` 扁平序列化。
+RetryEvent 是 ftre 的扩展事件。
 """
 from __future__ import annotations
 
