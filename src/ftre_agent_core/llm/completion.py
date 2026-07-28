@@ -33,8 +33,9 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """复制并规范化 Chat Completions 消息，不污染调用方的 memory/history。
 
     遵循 OpenAI-compatible 工具调用语义：
-    - assistant 有 tool_calls 但无正文：content=None
-    - assistant 无 tool_calls 且无正文（包括 reasoning-only）：content="(empty)"
+    - assistant 内容为空（包括 reasoning-only）时统一设 content=None
+    - 不使用占位符字符串：模型会将其作为可见文本 echo 回来，
+      导致 runner 误判为正常完成而停止
     """
     normalized: list[dict] = []
     for message in messages:
@@ -45,7 +46,7 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
                 isinstance(content, str) and not content.strip()
             )
             if is_empty:
-                current["content"] = None if current.get("tool_calls") else "(empty)"
+                current["content"] = None
         normalized.append(current)
     return normalized
 

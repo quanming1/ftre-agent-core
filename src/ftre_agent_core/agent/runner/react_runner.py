@@ -119,6 +119,20 @@ def decide(state: RunState, prev: TurnResult | None) -> Reasoning | Acting | Exi
 
     # 4-6. 空响应处理（prev 非空但文本为空）
     if prev is not None and not prev.text.strip():
+        has_reasoning = bool(prev.reasoning and prev.reasoning.strip())
+        has_tools = bool(prev.tool_calls)
+        logger.warning(
+            "[react] 空响应: text=%r reasoning=%d chars tools=%d finish_reason=%s "
+            "empty_retries=%d/%d in_finalization=%s iteration=%d",
+            prev.text[:80] if prev.text else "",
+            len(prev.reasoning or ""),
+            len(prev.tool_calls or []),
+            prev.finish_reason,
+            state.empty_retries,
+            MAX_EMPTY_RESPONSE_RETRIES,
+            state.in_finalization,
+            state.iteration,
+        )
         if state.in_finalization:
             # 4. 已在最终化阶段还是空 → 彻底失败
             return Exit(

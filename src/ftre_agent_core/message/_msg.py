@@ -64,6 +64,9 @@ class Usage(BaseModel):
     """token 用量统计。"""
     input_tokens: int
     output_tokens: int
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -166,10 +169,16 @@ class Msg(BaseModel):
                 self.usage = Usage(
                     input_tokens=event.input_tokens,
                     output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                    cached_tokens=event.cached_tokens,
+                    reasoning_tokens=event.reasoning_tokens,
                 )
             else:
                 self.usage.input_tokens += event.input_tokens
                 self.usage.output_tokens += event.output_tokens
+                self.usage.total_tokens += event.total_tokens
+                self.usage.cached_tokens += event.cached_tokens
+                self.usage.reasoning_tokens += event.reasoning_tokens
 
         # ── 文本块三段式 ──
         elif et == "TEXT_BLOCK_START":
