@@ -71,6 +71,7 @@ class ReasoningExecutor:
         tool_calls: list[ToolCall] = []
         finish_reason = "unknown"
         usage: dict | None = None
+        response_metadata: dict = {}
 
         for attempt in range(max_attempts):
             llm_span = None
@@ -130,6 +131,7 @@ class ReasoningExecutor:
 
                     elif isinstance(event, StepFinish):
                         finish_reason = event.finish_reason
+                        response_metadata = event.response_metadata
                         if event.usage:
                             usage = event.usage
                             self.state.token_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -163,6 +165,7 @@ class ReasoningExecutor:
                         "finish_reason": finish_reason,
                         "has_tool_calls": bool(tool_calls),
                         "usage": usage,
+                        "response_metadata": response_metadata,
                     })
 
                 # 写入 memory
@@ -248,3 +251,4 @@ class ReasoningExecutor:
                 tool_calls = []
                 finish_reason = "unknown"
                 usage = None
+                response_metadata = {}

@@ -204,6 +204,8 @@ class ReActRunner:
                     if exit_executor.outcome.should_continue:
                         prev = None
                         continue
+                    # on_turn_end hook（正常退出时触发）
+                    await self._trigger_on_turn_end()
                     return
 
         except CancelledError:
@@ -236,3 +238,18 @@ class ReActRunner:
         if ts_output is not None and isinstance(ts_output, TurnStartOutput):
             for msg in ts_output.inject_messages:
                 self.agent.memory.add_raw(msg)
+
+    async def _trigger_on_turn_end(self) -> None:
+        """触发 on_turn_end hook（只读观察）。"""
+        from ...hooks import ON_TURN_END, TurnEndInput
+
+        await self.agent.hook_manager.trigger(
+            ON_TURN_END,
+            lambda: TurnEndInput(
+                session_id=self.state.runtime_context.get("session_id", ""),
+                turn_id=self.state.turn_id,
+                iteration=self.state.iteration,
+                done_reason=str(self.state.done_reason or ReplyFinishedReason.COMPLETED),
+                runtime_context=self.state.runtime_context,
+            ),
+        )
