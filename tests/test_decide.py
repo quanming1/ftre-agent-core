@@ -1,8 +1,8 @@
 # tests/test_decide.py
 """_decide() 纯决策函数单元测试。"""
 import pytest
-from ftre_agent_core.agent.runner._decide import decide, MAX_EMPTY_RESPONSE_RETRIES, FINALIZATION_RETRY_PROMPT, EMPTY_FINAL_RESPONSE_MESSAGE
-from ftre_agent_core.agent.runner._actions import Reasoning, Acting, Exit, TurnResult
+from ftre_agent_core.agent.runner.react_runner import decide, MAX_EMPTY_RESPONSE_RETRIES, FINALIZATION_RETRY_PROMPT, EMPTY_FINAL_RESPONSE_MESSAGE
+from ftre_agent_core.agent.runner._state import Reasoning, Acting, Exit, TurnResult, ExitOutcome
 from ftre_agent_core.agent.runner._state import RunState
 from ftre_agent_core.llm import ToolCall, LLMError
 from ftre_agent_core.types import ReplyFinishedReason

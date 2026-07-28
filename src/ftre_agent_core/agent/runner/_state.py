@@ -1,17 +1,30 @@
-"""Runner 运行状态、状态枚举和内部取消异常。"""
+"""Runner 运行状态、动作模型与执行器间数据载体。
+
+本模块定义 ReAct 状态机的全部"词汇表"：
+  - RunStatus / RunState / CancelledError：运行生命周期
+  - Reasoning / Acting / Exit：三种动作类型
+  - TurnResult / ExitOutcome：执行器间传递的数据
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel
 
 from ...types import ReplyFinishedReason
 from ...tool import CancellationToken
+from ...llm import ToolCall, LLMError
 
 if TYPE_CHECKING:
     from ...tracing import TraceSpan
 
+
+# ═══════════════════════════════════════════════════════════════
+# 运行状态
+# ═══════════════════════════════════════════════════════════════
 
 class RunStatus(str, Enum):
     """单次 run() 调用的生命周期状态。"""
@@ -88,3 +101,49 @@ class RunState:
             "cached_tokens": 0,
             "llm_calls": 0,
         }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 动作类型（纯数据，由 _decide 返回，由执行器消费）
+# ═══════════════════════════════════════════════════════════════
+
+class Reasoning(BaseModel):
+    """下一步：调用大模型进行推理。"""
+    hint: str | None = None
+    tool_choice: str | None = None
+    force_no_tools: bool = False
+
+
+class Acting(BaseModel):
+    """下一步：执行模型产生的工具调用。"""
+    tool_calls: list[ToolCall]
+
+
+class Exit(BaseModel):
+    """下一步：结束（或暂停）当前回复。"""
+    finished_reason: ReplyFinishedReason
+    exit_msg: Any | None = None
+    error: str | None = None
+    error_code: str | None = None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 执行器间数据载体
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class TurnResult:
+    """一轮 LLM 推理的结构化产物，供 _decide() 消费。"""
+    text: str
+    reasoning: str
+    tool_calls: list[ToolCall]
+    finish_reason: str
+    usage: dict | None = None
+    error: LLMError | None = None
+
+
+@dataclass
+class ExitOutcome:
+    """Exit 执行结果，可能让主循环继续而非退出。"""
+    should_continue: bool = False
+    continue_hint: str | None = None

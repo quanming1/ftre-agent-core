@@ -18,7 +18,7 @@ from ...event import (
 )
 from ...llm import LLMHandler, LLMError, TextDelta, ReasoningDelta, ToolInputDelta, ToolCall, StepFinish
 from ...tracing import RunType, RunStatus as TraceRunStatus
-from ._actions import Reasoning, TurnResult
+from ._state import Reasoning, TurnResult
 
 if TYPE_CHECKING:
     from ...hooks import FtreCoreHookManager
