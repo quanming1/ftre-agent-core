@@ -1,0 +1,90 @@
+"""Runner 运行状态、状态枚举和内部取消异常。"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from ...types import ReplyFinishedReason
+from ...tool import CancellationToken
+
+if TYPE_CHECKING:
+    from ...tracing import TraceSpan
+
+
+class RunStatus(str, Enum):
+    """单次 run() 调用的生命周期状态。"""
+    IDLE = "idle"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+class CancelledError(Exception):
+    """内部取消异常，与 asyncio.CancelledError 区分。"""
+    pass
+
+
+@dataclass
+class RunState:
+    """一次 run() 执行期间的可变状态。"""
+    # 生命周期
+    status: RunStatus = RunStatus.IDLE
+    iteration: int = 0
+    done_reason: ReplyFinishedReason | None = None
+    error: str | None = None
+    error_code: str | None = None
+
+    # 取消 — cancel_token 仅供 ToolHandler 兼容，从不主动 cancel
+    cancel_token: CancellationToken = field(default_factory=CancellationToken)
+
+    # Tracing
+    trace_span: "TraceSpan | None" = None
+
+    # 运行上下文
+    runtime_context: dict = field(default_factory=dict)
+    reply_id: str = ""
+    turn_id: str = ""
+
+    # 空响应恢复（仅 _decide 读写）
+    empty_retries: int = 0
+    in_finalization: bool = False
+
+    # token 统计
+    token_usage: dict = field(default_factory=lambda: {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "llm_calls": 0,
+    })
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.status == RunStatus.CANCELLED
+
+    @property
+    def is_done(self) -> bool:
+        """是否处于终态。"""
+        return self.status in (RunStatus.COMPLETED, RunStatus.ERROR, RunStatus.CANCELLED)
+
+    def start(self) -> None:
+        """重置全部字段，开始新一轮执行。"""
+        self.status = RunStatus.RUNNING
+        self.iteration = 0
+        self.error = None
+        self.error_code = None
+        self.done_reason = None
+        self.cancel_token = CancellationToken()
+        self.empty_retries = 0
+        self.in_finalization = False
+        self.trace_span = None
+        self.reply_id = ""
+        self.turn_id = self.runtime_context.get("turn_id") or f"turn_{uuid.uuid4().hex[:12]}"
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
+            "llm_calls": 0,
+        }
