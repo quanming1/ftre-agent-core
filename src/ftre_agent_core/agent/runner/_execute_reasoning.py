@@ -258,13 +258,19 @@ class ReasoningExecutor:
                             yield ThinkingBlockEndEvent(reply_id=reply_id, block_id=thinking_block_id)
                             thinking_block_id = None
 
-                        # 产出 ModelCallEndEvent：携带本轮 input/output token 数与 finish_reason
+                        # 产出 ModelCallEndEvent：携带本轮完整 token 用量与 finish_reason
                         input_tokens = usage.get("prompt_tokens", 0) if usage else 0
                         output_tokens = usage.get("completion_tokens", 0) if usage else 0
+                        total_tokens = usage.get("total_tokens", 0) if usage else 0
+                        cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) if usage else 0
+                        reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0) if usage else 0
                         yield ModelCallEndEvent(
                             reply_id=reply_id,
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
+                            total_tokens=total_tokens,
+                            cached_tokens=cached_tokens,
+                            reasoning_tokens=reasoning_tokens,
                             finished_reason=finish_reason,
                         )
 
