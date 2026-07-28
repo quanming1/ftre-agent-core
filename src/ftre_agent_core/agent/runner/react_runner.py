@@ -173,7 +173,9 @@ class ReActRunner:
     """
 
     def __init__(self, agent: "ReActAgent"):
+        # 关联的 ReActAgent 实例（提供 model / memory / hook_manager / tracer 等依赖）
         self.agent = agent
+        # 本次 run() 的可变运行状态（iteration / empty_retries / trace_span 等）
         self.state = RunState()
         # 当前 run() 对应的 asyncio.Task，用于取消和并发锁检查
         self._run_task: asyncio.Task | None = None
