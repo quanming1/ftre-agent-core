@@ -31,7 +31,14 @@ async def test_text_only_turn():
 
     async def fake_stream(messages, tools=None):
         yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="stop", usage={"prompt_tokens": 10, "completion_tokens": 5})
+        yield StepFinish(
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
     agent.runner.llm.stream = fake_stream
 
@@ -59,7 +66,14 @@ async def test_tool_call_turn():
 
     async def fake_stream(messages, tools=None):
         yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-        yield StepFinish(finish_reason="tool_calls")
+        yield StepFinish(
+            finish_reason="tool_calls",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
     agent.runner.llm.stream = fake_stream
 
@@ -83,7 +97,14 @@ async def test_hint_written_to_memory_before_llm_call():
         nonlocal hint_seen
         hint_seen = messages[-1]
         yield TextDelta(text="done")
-        yield StepFinish(finish_reason="stop")
+        yield StepFinish(
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
     agent.runner.llm.stream = fake_stream
 
@@ -112,7 +133,14 @@ async def test_force_no_tools_passes_none():
         nonlocal tools_received
         tools_received = tools
         yield TextDelta(text="final")
-        yield StepFinish(finish_reason="stop")
+        yield StepFinish(
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
     agent.runner.llm.stream = fake_stream
 
@@ -120,6 +148,33 @@ async def test_force_no_tools_passes_none():
     events = [e async for e in executor.stream(Reasoning(force_no_tools=True))]
 
     assert tools_received is None
+
+
+@pytest.mark.asyncio
+async def test_incomplete_usage_does_not_emit_model_call_end_or_update_state(caplog):
+    agent = make_agent()
+    state = make_state()
+
+    async def fake_stream(messages, tools=None):
+        yield TextDelta(text="done")
+        yield StepFinish(
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+    agent.runner.llm.stream = fake_stream
+
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
+    with caplog.at_level("WARNING"):
+        events = [e async for e in executor.stream(Reasoning())]
+
+    assert EventType.MODEL_CALL_END not in [event.type for event in events]
+    assert state.token_usage == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    assert "未返回完整 token usage" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -135,7 +190,14 @@ async def test_retry_on_rate_limit():
         if call_count == 1:
             raise LLMError(message="rate limited", code="rate_limit")
         yield TextDelta(text="success")
-        yield StepFinish(finish_reason="stop")
+        yield StepFinish(
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
     agent.runner.llm.stream = fake_stream
 

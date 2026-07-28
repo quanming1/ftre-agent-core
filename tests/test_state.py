@@ -34,8 +34,7 @@ def test_run_state_defaults():
     assert state.in_finalization is False
     assert state.token_usage["prompt_tokens"] == 0
     assert state.token_usage["completion_tokens"] == 0
-    assert state.token_usage["cached_tokens"] == 0
-    assert state.token_usage["llm_calls"] == 0
+    assert state.token_usage["total_tokens"] == 0
 
 
 def test_run_state_start_resets_fields():

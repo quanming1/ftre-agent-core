@@ -15,7 +15,10 @@ messages = memory.get_messages()
 memory.clear()
 ```
 
-Token 用量由 `MODEL_CALL_END` 的 `input_tokens` / `output_tokens` 提供，
-并由 `Msg.append_event()` 聚合到 `Msg.usage`。
+Token 用量由 `MODEL_CALL_END` 的 `prompt_tokens`、`completion_tokens` 和
+`total_tokens` 提供，并由 `Msg.append_event()` 聚合到 `Msg.token`：
+
+- `token.usage`：当前 Reply 内所有 LLM Call 的累计用量；
+- `token.last_call_usage`：最后一次 LLM Call 的真实用量。
 
 Memory 是运行时 provider 消息容器；长期存储应保存 `Msg` 快照。

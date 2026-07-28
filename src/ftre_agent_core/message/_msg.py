@@ -57,16 +57,24 @@ def _to_blocks(content: str | list) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════
-# Usage
+# TokenUsage / MsgToken
 # ══════════════════════════════════════════════════════════════════
 
-class Usage(BaseModel):
-    """token 用量统计。"""
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int = 0
-    cached_tokens: int = 0
-    reasoning_tokens: int = 0
+class TokenUsage(BaseModel):
+    """单次或累计的 OpenAI-compatible token 用量。"""
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class MsgToken(BaseModel):
+    """assistant Reply 的 token 用量快照。
+
+    - usage: 当前 Reply 内所有 LLM Call 的累计消费
+    - last_call_usage: 最后一次成功的 LLM Call 返回的 usage
+    """
+    usage: TokenUsage
+    last_call_usage: TokenUsage
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -89,7 +97,7 @@ class Msg(BaseModel):
     # ── 元数据 ──
     metadata: dict = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
-    usage: Usage | None = Field(default=None)
+    token: MsgToken | None = Field(default=None)
 
     # ── 工作流控制 ──
     finished_at: str | None = Field(default=None)
@@ -108,6 +116,11 @@ class Msg(BaseModel):
                 raise ValueError("User message can only contain text/data blocks.")
             if self.role == "system" and block.type != "text":
                 raise ValueError("System message can only contain text blocks.")
+        if self.token is not None and self.role != "assistant":
+            raise ValueError(
+                f"Msg with role={self.role!r} cannot carry token; "
+                "only assistant messages are allowed."
+            )
         return self
 
     # ── 内容访问辅助 ──
@@ -165,20 +178,21 @@ class Msg(BaseModel):
             self.error = event.error
 
         elif et == "MODEL_CALL_END":
-            if self.usage is None:
-                self.usage = Usage(
-                    input_tokens=event.input_tokens,
-                    output_tokens=event.output_tokens,
-                    total_tokens=event.total_tokens,
-                    cached_tokens=event.cached_tokens,
-                    reasoning_tokens=event.reasoning_tokens,
+            current = TokenUsage(
+                prompt_tokens=event.prompt_tokens,
+                completion_tokens=event.completion_tokens,
+                total_tokens=event.total_tokens,
+            )
+            if self.token is None:
+                self.token = MsgToken(
+                    usage=current.model_copy(deep=True),
+                    last_call_usage=current.model_copy(deep=True),
                 )
             else:
-                self.usage.input_tokens += event.input_tokens
-                self.usage.output_tokens += event.output_tokens
-                self.usage.total_tokens += event.total_tokens
-                self.usage.cached_tokens += event.cached_tokens
-                self.usage.reasoning_tokens += event.reasoning_tokens
+                self.token.usage.prompt_tokens += current.prompt_tokens
+                self.token.usage.completion_tokens += current.completion_tokens
+                self.token.usage.total_tokens += current.total_tokens
+                self.token.last_call_usage = current.model_copy(deep=True)
 
         # ── 文本块三段式 ──
         elif et == "TEXT_BLOCK_START":

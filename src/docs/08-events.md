@@ -20,7 +20,7 @@
 - `REPLY_START(session_id, reply_id, name, role)`
 - `REPLY_END(session_id, reply_id, finished_reason, error)`
 - `MODEL_CALL_START(reply_id, model_name)`
-- `MODEL_CALL_END(reply_id, input_tokens, output_tokens, finished_reason)`
+- `MODEL_CALL_END(reply_id, prompt_tokens, completion_tokens, total_tokens, finished_reason)`
 - `EXCEED_MAX_ITERS(reply_id, name)`
 - `retry(reply_id, code, message, attempt, max_attempts)`
 - `CUSTOM(name, value)`

@@ -242,13 +242,29 @@ class ReasoningExecutor:
                     elif isinstance(event, StepFinish):
                         finish_reason = event.finish_reason
                         response_metadata = event.response_metadata
-                        # 累积 token 用量：把本次 usage 合并到跨轮的 state.token_usage
-                        if event.usage:
-                            usage = event.usage
+                        usage = event.usage
+                        required_usage_fields = {
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                        }
+                        valid_usage = (
+                            isinstance(usage, dict)
+                            and required_usage_fields.issubset(usage)
+                        )
+                        # 仅接受完整的 OpenAI-compatible usage，避免把缺失字段
+                        # 静默补零后覆盖下游最后一次有效调用。
+                        if valid_usage:
                             self.state.token_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
                             self.state.token_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                            self.state.token_usage["cached_tokens"] += usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                            self.state.token_usage["llm_calls"] += 1
+                            self.state.token_usage["total_tokens"] += usage.get("total_tokens", 0)
+                        else:
+                            logger.warning(
+                                "LLM 调用未返回完整 token usage，忽略本次用量: "
+                                "model=%s required=%s",
+                                self.agent.model,
+                                sorted(required_usage_fields),
+                            )
 
                         # 收尾仍开启的 block：发对应的 End 事件并清空 id
                         if text_block_id is not None:
@@ -258,21 +274,14 @@ class ReasoningExecutor:
                             yield ThinkingBlockEndEvent(reply_id=reply_id, block_id=thinking_block_id)
                             thinking_block_id = None
 
-                        # 产出 ModelCallEndEvent：携带本轮完整 token 用量与 finish_reason
-                        input_tokens = usage.get("prompt_tokens", 0) if usage else 0
-                        output_tokens = usage.get("completion_tokens", 0) if usage else 0
-                        total_tokens = usage.get("total_tokens", 0) if usage else 0
-                        cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) if usage else 0
-                        reasoning_tokens = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0) if usage else 0
-                        yield ModelCallEndEvent(
-                            reply_id=reply_id,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            total_tokens=total_tokens,
-                            cached_tokens=cached_tokens,
-                            reasoning_tokens=reasoning_tokens,
-                            finished_reason=finish_reason,
-                        )
+                        if valid_usage:
+                            yield ModelCallEndEvent(
+                                reply_id=reply_id,
+                                prompt_tokens=usage["prompt_tokens"],
+                                completion_tokens=usage["completion_tokens"],
+                                total_tokens=usage["total_tokens"],
+                                finished_reason=finish_reason,
+                            )
 
                 # ── 阶段 5：成功完成 ───────────────────────────────────────────
                 # 拼接本轮完整文本与推理

@@ -105,11 +105,9 @@ class ModelCallStartEvent(EventBase):
 class ModelCallEndEvent(EventBase):
     type: Literal["MODEL_CALL_END"] = "MODEL_CALL_END"
     reply_id: str
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int = 0
-    cached_tokens: int = 0
-    reasoning_tokens: int = 0
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
     finished_reason: str = "completed"
 
 

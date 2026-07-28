@@ -28,7 +28,8 @@ from ._convert import (
     to_openai_message,
 )
 from ._msg import (
-    Usage,
+    TokenUsage,
+    MsgToken,
     Msg,
     UserMsg,
     AssistantMsg,
@@ -53,7 +54,8 @@ __all__ = [
     "from_openai_message",
     "to_openai_message",
     # 层次 B
-    "Usage",
+    "TokenUsage",
+    "MsgToken",
     "Msg",
     "UserMsg",
     "AssistantMsg",
