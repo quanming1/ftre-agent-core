@@ -83,4 +83,4 @@ class ReActAgent:
             yield event
 
     def cancel_nowait(self) -> None:
-        self._runner.cancel()
+        self._runner.cancel_nowait()
