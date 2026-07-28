@@ -1,8 +1,8 @@
 # tests/test_execute_exit.py
 """ExitExecutor 单元测试。"""
 import pytest
-from ftre_agent_core.agent.runner._execute_exit import ExitExecutor
-from ftre_agent_core.agent.runner._actions import Exit, ExitOutcome
+from ftre_agent_core.agent.runner._execute_acting import ExitExecutor
+from ftre_agent_core.agent.runner._state import Exit, ExitOutcome
 from ftre_agent_core.agent.runner._state import RunState
 from ftre_agent_core.agent.react import ReActAgent
 from ftre_agent_core.event import EventType

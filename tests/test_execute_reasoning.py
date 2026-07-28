@@ -2,7 +2,7 @@
 """ReasoningExecutor 单元测试。"""
 import pytest
 from ftre_agent_core.agent.runner._execute_reasoning import ReasoningExecutor
-from ftre_agent_core.agent.runner._actions import Reasoning, TurnResult
+from ftre_agent_core.agent.runner._state import Reasoning, TurnResult
 from ftre_agent_core.agent.runner._state import RunState
 from ftre_agent_core.agent.react import ReActAgent
 from ftre_agent_core.llm import TextDelta, ToolCall, StepFinish, LLMError
