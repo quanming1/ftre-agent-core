@@ -52,13 +52,17 @@ Msg(
     id: str,
     metadata: dict,
     created_at: str,
-    usage: Usage | None,
+    token: MsgToken | None,
     finished_at: str | None,
     finished_reason: ReplyFinishedReason | None,
     structured_output: dict | None,
     error: dict | None,
 )
 ```
+
+`MsgToken.usage` 表示当前 Reply 内所有模型调用的累计用量；
+`MsgToken.last_call_usage` 表示最后一次模型调用的真实用量。两者均只包含
+`prompt_tokens`、`completion_tokens`、`total_tokens`。
 
 工厂函数：
 

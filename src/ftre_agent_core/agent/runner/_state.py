@@ -69,8 +69,7 @@ class RunState:
     token_usage: dict = field(default_factory=lambda: {
         "prompt_tokens": 0,
         "completion_tokens": 0,
-        "cached_tokens": 0,
-        "llm_calls": 0,
+        "total_tokens": 0,
     })
 
     @property
@@ -98,8 +97,7 @@ class RunState:
         self.token_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
-            "cached_tokens": 0,
-            "llm_calls": 0,
+            "total_tokens": 0,
         }
 
 
