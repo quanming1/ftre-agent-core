@@ -163,9 +163,12 @@ class ReActRunner:
             self._run_task.cancel()
 
     async def _loop(self) -> AsyncGenerator[AgentStreamEvent, None]:
-        """ReAct 主循环。"""
-        prev: TurnResult | None = None
+        """ReAct 主循环。
 
+        iteration 只在 Reasoning 时递增，一次迭代 = 一次 LLM 调用
+        （可能后跟 Acting，但不额外计数）。
+        """
+        prev: TurnResult | None = None
         max_iters = self.agent.max_iterations
 
         reasoning_executor = ReasoningExecutor(
@@ -179,15 +182,13 @@ class ReActRunner:
         )
 
         try:
-            while max_iters is None or self.state.iteration < max_iters:
-                self.state.iteration += 1
-
-                # on_turn_start hook
-                await self._trigger_on_turn_start()
-
+            while True:
                 action = decide(self.state, prev)
 
                 if isinstance(action, Reasoning):
+                    self.state.iteration += 1
+                    # on_turn_start hook
+                    await self._trigger_on_turn_start()
                     async for event in reasoning_executor.stream(action):
                         yield event
                     prev = reasoning_executor.result
@@ -204,15 +205,6 @@ class ReActRunner:
                         prev = None
                         continue
                     return
-
-            # 达到 max_iterations
-            if not self.state.is_done:
-                self._finalize(ReplyFinishedReason.EXCEED_MAX_ITERS)
-                yield ReplyEndEvent(
-                    session_id=self.state.runtime_context.get("session_id", ""),
-                    reply_id=self.state.reply_id,
-                    finished_reason=ReplyFinishedReason.EXCEED_MAX_ITERS,
-                )
 
         except CancelledError:
             self._finalize(ReplyFinishedReason.INTERRUPTED)
