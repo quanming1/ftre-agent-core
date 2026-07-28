@@ -27,6 +27,13 @@ from .runner import (
     RunState,
     RunStatus,
     ReActRunner,
+    CancelledError,
+    Reasoning,
+    Acting,
+    Exit,
+    TurnResult,
+    ExitOutcome,
+    decide,
 )
 from ..hooks import (
     FtreCoreHookManager,
@@ -76,6 +83,13 @@ __all__ = [
     # Runner
     "RunState",
     "RunStatus",
+    "CancelledError",
+    "Reasoning",
+    "Acting",
+    "Exit",
+    "TurnResult",
+    "ExitOutcome",
+    "decide",
     "ReActRunner",
     # Hooks
     "FtreCoreHookManager",
