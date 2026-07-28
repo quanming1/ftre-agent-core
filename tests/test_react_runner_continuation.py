@@ -1,9 +1,7 @@
 """
-ReActRunner continuation / retry 逻辑测试。
+ReActRunner continuation / retry 逻辑测试（状态机重构版）。
 
-原始 continuation_active / pending_user_messages 魔法键已删除，
-continuation 逻辑由 on_stop hook 覆盖（见 test_hooks.py）。
-本文件保留 length 截断续写、空响应重试等内置机制测试。
+length 截断续写已删除。空响应重试和 on_stop hook 由新状态机处理。
 """
 import logging
 
@@ -64,7 +62,6 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    # 验证最终状态
     assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
@@ -74,25 +71,31 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     def echo(text: str) -> str:
         return f"echo:{text}"
 
-    agent = make_agent(tools=[echo], max_iterations=4)
+    agent = make_agent(tools=[echo], max_iterations=6)
     calls = 0
 
     async def fake_stream(messages, tools=None):
         nonlocal calls
         calls += 1
-        if calls == 1:
-            assert tools is not None
-            yield StepFinish(finish_reason="stop")
-        elif calls == 2:
-            assert tools is not None
-            yield TextDelta(text=" \n ")
-            yield StepFinish(finish_reason="stop")
+        if calls <= 3:
+            # 前三轮都返回空响应（带工具）
+            if tools is None:
+                raise RuntimeError(f"tools should not be None on call {calls}")
+            if calls < 3:
+                yield StepFinish(finish_reason="stop")
+                yield  # make it an async generator
+            else:
+                yield TextDelta(text=" \n ")
+                yield StepFinish(finish_reason="stop")
         else:
-            assert tools is None
-            assert messages[-1]["role"] == "user"
-            assert "直接给出回复用户的最终内容" in _content_text(
-                messages[-1]["content"]
-            )
+            # 第四轮：最终化（不带工具）
+            if tools is not None:
+                raise RuntimeError("tools should be None on finalization call")
+            if messages[-1]["role"] != "user":
+                raise RuntimeError("last message should be user")
+            content = _content_text(messages[-1]["content"])
+            if "直接给出回复用户的最终内容" not in content:
+                raise RuntimeError(f"finalization prompt not found: {content}")
             yield TextDelta(text="final")
             yield StepFinish(finish_reason="stop")
 
@@ -100,37 +103,34 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
 
     events = [event async for event in agent.run("start")]
 
-    assert calls == 3
+    assert calls == 4
     assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_unknown_finish_with_text_logs_and_continues(caplog):
+async def test_unknown_finish_with_text_completes(caplog):
+    """finish_reason=unknown + 有文本 → 直接完成（新行为）。"""
     agent = make_agent(max_iterations=3)
     calls = 0
 
     async def fake_stream(messages, tools=None):
         nonlocal calls
         calls += 1
-        if calls == 1:
-            yield TextDelta(text="hello")
-            yield StepFinish(finish_reason="unknown")
-        else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+        yield TextDelta(text="hello")
+        yield StepFinish(finish_reason="unknown")
 
     agent.runner.llm.stream = fake_stream
 
     with caplog.at_level(logging.INFO):
         events = [event async for event in agent.run("start")]
 
-    assert calls == 2
+    assert calls == 1
     assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
 async def test_unknown_finish_with_empty_response_continues_without_finalization():
-    agent = make_agent(max_iterations=3)
+    agent = make_agent(max_iterations=5)
     calls = 0
 
     async def fake_stream(messages, tools=None):
@@ -152,7 +152,7 @@ async def test_unknown_finish_with_empty_response_continues_without_finalization
 
 
 @pytest.mark.asyncio
-async def test_tool_call_turn_does_not_emit_turn_end_before_followup_turn():
+async def test_tool_call_turn_produces_tool_result_events():
     @tool(description="Echo text")
     def echo(text: str) -> str:
         return f"echo:{text}"
@@ -175,7 +175,6 @@ async def test_tool_call_turn_does_not_emit_turn_end_before_followup_turn():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    # tool_result 事件应该存在（agent-core 不再产出 turn_end 事件）
     tool_results = [e for e in events if e.type == EventType.TOOL_RESULT_END]
     assert len(tool_results) == 1
     assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
@@ -215,30 +214,25 @@ async def test_multi_tool_call_events_are_emitted_before_results():
 
 
 @pytest.mark.asyncio
-async def test_length_finish_adds_hidden_user_continuation():
-    agent = make_agent()
+async def test_single_reply_start_and_reply_end():
+    """验证一次 run() 只产一对 ReplyStart/ReplyEnd。"""
+    agent = make_agent(max_iterations=3)
     calls = 0
 
     async def fake_stream(messages, tools=None):
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield TextDelta(text="partial")
-            yield StepFinish(finish_reason="length")
+            yield ToolCall(id="c1", name="nonexistent", input={})
+            yield StepFinish(finish_reason="tool_calls")
         else:
-            assert messages[-1]["role"] == "user"
-            assert "从刚才中断的位置继续" in _content_text(
-                messages[-1]["content"]
-            )
-            yield TextDelta(text=" done")
+            yield TextDelta(text="done")
             yield StepFinish(finish_reason="stop")
 
     agent.runner.llm.stream = fake_stream
 
     events = [event async for event in agent.run("start")]
 
-    assert calls == 2
-    # 续写提示应该是隐藏的 user message
-    user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
-    assert len(user_msgs) == 2  # original + continuation
-    assert "从刚才中断的位置继续" in _content_text(user_msgs[1]["content"])
+    types = [e.type for e in events]
+    assert types.count(EventType.REPLY_START) == 1
+    assert types.count(EventType.REPLY_END) == 1
