@@ -1,192 +1,200 @@
-"""
-异步 ReAct 执行引擎。
+"""ReActRunner — ReAct Agent 的核心执行引擎（状态机重构版）。
 
-整体结构参考 opencode 的 runner/llm.ts：
+整体设计借鉴 AgentScope 的 _next_action() 纯决策函数模式，同时保留
+原有的 LLM 重试、空响应恢复、ON_STOP Hook、Tracing、工具并发执行、
+成组写入 Memory 等生产能力。
 
-  _loop()        外层循环，一次迭代对应一次 provider 调用
-  _run_turn()    单轮调用，负责重试和向外透传事件
-  _stream_turn() 消费 LLM 事件流，遇到工具调用后并发执行工具
+架构分三层：
 
-关键不变量：
-  1. 消费 provider 流时不等待工具执行完成。
-  2. 文本和 reasoning 事件实时向外 yield。
-  3. 带 tool_calls 的 assistant 消息和对应 tool 结果必须成组写入 memory。
+  decide()               纯决策函数，只读状态，返回动作类型
+  ReasoningExecutor      执行 Reasoning 动作：调 LLM + 流式 + 重试
+  ActingExecutor         执行 Acting 动作：工具并发 + 成组写入 Memory
+  ExitExecutor           执行 Exit 动作：ON_STOP Hook + 产出 ReplyEnd
 
-工具的并发调度、取消和结果归并下沉到 ToolHandler；本模块只负责控制流、
-memory 写入和事件 yield。
+主循环 _loop() 只做 match 分发：
+
+  while True:
+      action = decide(state, prev)
+      match action:
+          Reasoning → prev = reasoning_executor.stream(action)
+          Acting    → acting_executor.stream(action); prev = None
+          Exit      → exit_executor.stream(action); return
+
+取消协议：
+  外部调用 cancel_nowait() → Task.cancel() → CancelledError 沿调用栈传播
+  → _loop 的 except 捕获 → _finalize(INTERRUPTED) → yield ReplyEnd(INTERRUPTED)
+  不引入 CancellationToken，纯依赖 asyncio 协作式取消。
+
+运行锁：
+  同一 Agent 禁止并发 run()。run() 开始时记录 asyncio.current_task()，
+  重复调用直接抛 RuntimeError。finally 中清除。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import AsyncGenerator, TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncGenerator
 
-from ftre_agent_core.llm import (
-    LLMHandler, LLMError,
-    TextDelta, ReasoningDelta, ToolInputDelta,
-    ToolCall, StepFinish,
-)
-from ftre_agent_core.tool import CancellationToken, ToolCancelledError
-from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
+from ...event import AgentStreamEvent, ReplyStartEvent, ReplyEndEvent
+from ...tracing import RunStatus as TraceRunStatus, RunType
+from ...types import ReplyFinishedReason
+from ...llm import LLMHandler
+from ._state import Reasoning, Acting, Exit, TurnResult, RunState, RunStatus, CancelledError
+from ._execute_acting import ActingExecutor, ExitExecutor
+from ._execute_reasoning import ReasoningExecutor
 from .tool_handler import ToolHandler
-from ..event import (
-    DoneReason,
-    AgentEvent,
-    assistant_message_event,
-    assistant_message_complete_event,
-    retry_event,
-    tool_result_event,
-    user_message_event,
-)
-from ...hooks import (
-    ON_TURN_START,
-    ON_STOP,
-    ON_TURN_END,
-    TurnStartInput,
-    TurnStartOutput,
-    StopInput,
-    TurnEndInput,
-)
 
 if TYPE_CHECKING:
     from ..react import ReActAgent
 
 logger = logging.getLogger(__name__)
 
-# ── 内部提示词常量 ────────────────────────────────────────────────────────────
-
-# 当 finish_reason == "length"（输出被截断）时，注入这条消息让模型继续输出。
-LENGTH_CONTINUATION_PROMPT = (
-    "输出长度达到上限。请从刚才中断的位置继续，不要重述已经说过的内容，也不要道歉。"
-)
-
-# 当模型多次返回空内容后，注入这条消息强制要求模型给出最终回复。
-FINALIZATION_RETRY_PROMPT = (
-    "请根据上面的对话，直接给出回复用户的最终内容。"
-)
-
-# 空响应重试耗尽后的错误提示。
-EMPTY_FINAL_RESPONSE_MESSAGE = (
-    "模型多次重试后仍未生成可见的最终文本回复。"
-)
+# ═══════════════════════════════════════════════════════════════
+# 纯决策函数
+# ═══════════════════════════════════════════════════════════════
 
 # 空响应最多重试次数（不含强制最终化那一次）。
+# 超过此次数后进入"强制最终化"阶段：去掉工具，注入提示，让模型只输出文本。
 MAX_EMPTY_RESPONSE_RETRIES = 2
 
+# 强制最终化时注入 Memory 的提示词，要求模型直接给出最终回复。
+FINALIZATION_RETRY_PROMPT = "请根据上面的对话，直接给出回复用户的最终内容。"
 
-# ── 运行状态 ──────────────────────────────────────────────────────────────────
-
-class RunStatus(str, Enum):
-    """单次 run() 调用的生命周期状态。"""
-    IDLE = "idle"          # 尚未启动
-    RUNNING = "running"    # 正在执行 ReAct 循环
-    COMPLETED = "completed"  # 正常结束（含 max_iterations 到顶）
-    ERROR = "error"        # 因不可重试错误终止
-    CANCELLED = "cancelled"  # 被用户取消
+# 强制最终化后仍然返回空响应时的错误提示。
+EMPTY_FINAL_RESPONSE_MESSAGE = "模型多次重试后仍未生成可见的最终文本回复。"
 
 
-class CancelledError(Exception):
-    """内部取消异常，与 asyncio.CancelledError 区分。"""
-    pass
+def decide(state: RunState, prev: TurnResult | None) -> Reasoning | Acting | Exit:
+    """根据当前状态和上一轮 TurnResult 决定下一步动作。
 
+    纯函数：不执行 I/O，不 yield 事件。
+    副作用仅限修改 state.empty_retries 和 state.in_finalization。
 
-@dataclass
-class RunState:
-    """一次 run() 执行期间的可变状态。
+    判断优先级（从高到低）：
+        1. prev.error 非空 → Exit(ERROR)
+           LLM 调用重试耗尽或遇到不可重试错误，直接退出。
+        2. prev.tool_calls 非空 → Acting(tool_calls)
+           模型本轮产生了工具调用，需要执行这些工具。
+        3. prev.text 非空且无工具调用 → Exit(COMPLETED)
+           模型本轮给出了纯文本回答，正常完成。
+        4. 空响应 + in_finalization → Exit(ERROR)
+           已在强制最终化阶段还是空响应，彻底失败。
+        5. 空响应 + empty_retries < MAX → Reasoning() 重试
+           模型返回空内容，重试计数 +1，继续推理。
+        6. 空响应 + 重试耗尽 → Reasoning(最终化提示, force_no_tools)
+           重试次数用尽，进入强制最终化：去掉工具，注入提示。
+        7. iteration >= max_iterations → Exit(EXCEED_MAX_ITERS)
+           达到最大迭代次数，防止无限循环。
+        8. 默认 → Reasoning()
+           首轮（prev=None）或工具执行后（prev=None），继续推理。
 
-    所有字段在 start() 时重置，在 _loop / _run_turn / _stream_turn 中读写。
+    Args:
+        state: 当前 RunState（只读 iteration / empty_retries /
+               in_finalization / runtime_context）。
+        prev: 上一轮推理的 TurnResult，None 表示首轮或刚执行完工具。
+
+    Returns:
+        Reasoning: 继续调用大模型进行推理
+        Acting:    执行模型产生的工具调用
+        Exit:      结束（或暂停）当前回复
     """
-    status: RunStatus = RunStatus.IDLE
-    iteration: int = 0                              # 当前迭代轮次（从 1 开始）
-    error: str | None = None                        # 最终错误描述（ERROR 状态时填充）
-    error_code: str | None = None                   # 错误代码（ERROR 状态时填充）
-    done_reason: DoneReason | None = None           # Turn 结束原因（COMPLETED/MAX_ITERATIONS/ERROR/CANCELLED）
-    cancel_token: CancellationToken = field(default_factory=CancellationToken)
-    runtime_context: dict = field(default_factory=dict)  # 调用方传入的上下文
-    empty_content_retries: int = 0                  # 连续空响应计数
-    force_no_tools_once: bool = False               # 下一轮强制不带 tools（用于空响应最终化）
-    finalization_retrying: bool = False             # 是否已进入"强制最终化"阶段
-    trace_span: TraceSpan | None = None             # 本次执行的根 trace span
-    partial_content: list[dict] = field(default_factory=list)  # 跨轮累积的 content[]，用于流式 assistant_message
-    turn_id: str = ""                               # 本次 Turn 的唯一标识
-    _turn_start_ts: float = 0.0                     # 当前轮开始时间（perf_counter）
-    _first_token_logged: bool = False               # 当前轮是否已记录首个字符
-    _ttft_ms: float | None = None                   # 当前 LLM call 的 TTFT（毫秒）
-    token_usage: dict = field(default_factory=lambda: {  # 本 Turn 累积的 token 用量
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "cached_tokens": 0,
-        "llm_calls": 0,
-    })
+    max_iterations = state.runtime_context.get("max_iterations")
 
-    @property
-    def is_cancelled(self) -> bool:
-        return self.status == RunStatus.CANCELLED
+    # 1. LLM 错误 → 直接退出
+    if prev is not None and prev.error is not None:
+        return Exit(
+            finished_reason=ReplyFinishedReason.ERROR,
+            error=f"[{prev.error.code}] {prev.error.message}",
+            error_code=prev.error.code,
+        )
 
-    @property
-    def is_done(self) -> bool:
-        """是否处于终态（无论成功/失败/取消）。"""
-        return self.status in (RunStatus.COMPLETED, RunStatus.ERROR, RunStatus.CANCELLED)
+    # 2. 有工具调用 → 执行工具
+    if prev is not None and prev.tool_calls:
+        return Acting(tool_calls=prev.tool_calls)
 
-    def start(self) -> None:
-        """重置全部字段，开始新一轮执行。"""
-        self.status = RunStatus.RUNNING
-        self.iteration = 0
-        self.error = None
-        self.error_code = None
-        self.done_reason = None
-        self.cancel_token = CancellationToken()
-        self.empty_content_retries = 0
-        self.force_no_tools_once = False
-        self.finalization_retrying = False
-        self.trace_span = None
-        self.partial_content = []
-        self.turn_id = self.runtime_context.get("turn_id") or f"turn_{uuid.uuid4().hex[:12]}"
-        self.token_usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cached_tokens": 0,
-            "llm_calls": 0,
-        }
+    # 3. 有非空文本且无工具调用 → 正常完成
+    if prev is not None and prev.text.strip():
+        return Exit(finished_reason=ReplyFinishedReason.COMPLETED)
 
-    def cancel(self) -> None:
-        """标记为取消，同时触发 cancel_token 通知正在执行的工具。"""
-        if self.status != RunStatus.RUNNING:
-            return
-        self.status = RunStatus.CANCELLED
-        self.cancel_token.cancel("user_cancelled")
+    # 4-6. 空响应处理（prev 非空但文本为空）
+    if prev is not None and not prev.text.strip():
+        has_reasoning = bool(prev.reasoning and prev.reasoning.strip())
+        has_tools = bool(prev.tool_calls)
+        logger.warning(
+            "[react] 空响应: text=%r reasoning=%d chars tools=%d finish_reason=%s "
+            "empty_retries=%d/%d in_finalization=%s iteration=%d",
+            prev.text[:80] if prev.text else "",
+            len(prev.reasoning or ""),
+            len(prev.tool_calls or []),
+            prev.finish_reason,
+            state.empty_retries,
+            MAX_EMPTY_RESPONSE_RETRIES,
+            state.in_finalization,
+            state.iteration,
+        )
+        if state.in_finalization:
+            # 4. 已在最终化阶段还是空 → 彻底失败
+            return Exit(
+                finished_reason=ReplyFinishedReason.ERROR,
+                error=EMPTY_FINAL_RESPONSE_MESSAGE,
+                error_code="empty_response",
+            )
+        if state.empty_retries < MAX_EMPTY_RESPONSE_RETRIES:
+            # 5. 重试次数未达上限 → 继续 Reasoning
+            state.empty_retries += 1
+            return Reasoning()
+        # 6. 重试耗尽 → 进入强制最终化
+        state.in_finalization = True
+        return Reasoning(
+            hint=FINALIZATION_RETRY_PROMPT,
+            force_no_tools=True,
+        )
 
-    def check_cancel(self) -> None:
-        """检查是否被取消，是则抛出 CancelledError。"""
-        try:
-            self.cancel_token.raise_if_cancelled()
-        except ToolCancelledError as exc:
-            raise CancelledError(str(exc)) from exc
+    # 7. 达到最大迭代次数
+    if max_iterations is not None and state.iteration >= max_iterations:
+        return Exit(finished_reason=ReplyFinishedReason.EXCEED_MAX_ITERS)
 
+    # 8. 默认 → 继续推理
+    return Reasoning()
 
-# ── ReActRunner 主执行器 ──────────────────────────────────────────────────────
+# ReplyFinishedReason → RunStatus 映射
+# EXCEED_MAX_ITERS 映射为 COMPLETED（非错误，只是达到上限）
+_REASON_TO_STATUS = {
+    ReplyFinishedReason.COMPLETED: RunStatus.COMPLETED,
+    ReplyFinishedReason.INTERRUPTED: RunStatus.CANCELLED,
+    ReplyFinishedReason.ERROR: RunStatus.ERROR,
+    ReplyFinishedReason.EXCEED_MAX_ITERS: RunStatus.COMPLETED,
+}
+
+# RunStatus → Tracing RunStatus 映射
+_TRACE_STATUS = {
+    RunStatus.COMPLETED: TraceRunStatus.COMPLETED,
+    RunStatus.CANCELLED: TraceRunStatus.CANCELLED,
+    RunStatus.ERROR: TraceRunStatus.ERROR,
+}
+
 
 class ReActRunner:
     """ReAct Agent 的核心执行引擎。
 
     职责：
-      - 驱动 Reason → Act → Observe 循环
-      - 管理 LLM 调用（含重试）
-      - 并发执行工具并归并结果
-      - 维护 memory（对话历史）的合法性
-      - 向外 yield AgentEvent 供 UI/调用方消费
+      - 驱动 Reason → Act → Observe 循环（通过 _decide + 执行器）
+      - 管理运行锁（同一 Agent 禁止并发 run）
+      - 取消入口（cancel_nowait → Task.cancel）
+      - Tracing 根 span 生命周期
+      - 统一终态写入（_finalize）
     """
 
     def __init__(self, agent: "ReActAgent"):
+        # 关联的 ReActAgent 实例（提供 model / memory / hook_manager / tracer 等依赖）
         self.agent = agent
+        # 本次 run() 的可变运行状态（iteration / empty_retries / trace_span 等）
         self.state = RunState()
-        # LLMHandler 封装了 provider 调用细节（OpenAI SDK、流式解析、reasoning 提取等）。
-        # max_tokens 来自 agent 配置（config.json 的 max_output），None 表示不传该参数。
-        self.llm = LLMHandler(
+        # 当前 run() 对应的 asyncio.Task，用于取消和并发锁检查
+        self._run_task: asyncio.Task | None = None
+        # LLM 调用封装（Provider 调用、流式解析、reasoning 提取等）
+        self._llm = LLMHandler(
             agent.model,
             agent.api_key,
             agent.api_base,
@@ -194,31 +202,59 @@ class ReActRunner:
             max_tokens=agent.max_tokens,
             reasoning_effort=agent.reasoning_effort,
         )
-        # ToolHandler 负责工具的并发调度、取消传播和结果归并。
-        self.tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
+        # 工具并发调度、取消传播和结果归并
+        self._tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
 
-    # ── 入口：run() ────────────────────────────────────────────────────────
+    @property
+    def llm(self) -> LLMHandler:
+        """LLM 调用封装实例。"""
+        return self._llm
+
+    @property
+    def tool_handler(self) -> ToolHandler:
+        """工具执行器实例。"""
+        return self._tool_handler
 
     async def run(
-        self, message, runtime_context: dict | None = None
-    ) -> AsyncGenerator[AgentEvent, None]:
+        self,
+        message,
+        runtime_context: dict | None = None,
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
         """启动一次完整的 ReAct 执行。
 
+        一次 run() 的生命周期：
+          1. 并发锁检查 + 记录当前 Task
+          2. 初始化 RunState（start()）
+          3. 开启 Tracing 根 span
+          4. 写入用户消息到 Memory
+          5. 产出 ReplyStartEvent（只产一次）
+          6. 驱动 _loop() 主循环
+          7. 异常/取消/正常退出路径统一经过 _finalize()
+          8. finally 中关闭 Tracing span + 释放运行锁
+
         Args:
-            message: 用户消息。可以是字符串（单条）或消息列表（多条）。
-            runtime_context: 调用方传入的上下文，可包含：
-                - trace_metadata / trace_tags：tracing 元数据
-                - trace_name：span 名称
+            message: 用户消息（字符串或消息列表）。
+            runtime_context: 调用方上下文（session_id、tracing 元数据等）。
 
         Yields:
-            AgentEvent：包括文本增量、推理增量、工具调用/结果、step 等。
+            AgentStreamEvent: 回复过程中的所有流式事件。
         """
+        # ── 并发锁：同一 Agent 禁止并发 run() ──
+        if self._run_task is not None and not self._run_task.done():
+            raise RuntimeError("Agent is already running")
+
+        # 记录当前 Task，供 cancel_nowait() 使用
+        self._run_task = asyncio.current_task()
         self.state.runtime_context = runtime_context or {}
+        # max_iterations 放入 runtime_context 供 _decide() 读取
+        self.state.runtime_context.setdefault(
+            "max_iterations", self.agent.max_iterations,
+        )
         self.state.start()
 
-        # ── 准备 tracing 元数据 ──
-        # 调用方可以通过 runtime_context 传入自定义 trace 元数据，
-        # 这里兜底处理：非 dict 自动包一层，然后强制带上 model / api_type。
+        # ── 准备 Tracing 元数据 ──
+        # 调用方可通过 runtime_context 传入自定义 trace 元数据，
+        # 这里兜底处理：非 dict 自动包一层，然后强制带上 model / api_type
         trace_metadata = self.state.runtime_context.get("trace_metadata") or {}
         if not isinstance(trace_metadata, dict):
             trace_metadata = {"value": trace_metadata}
@@ -227,12 +263,12 @@ class ReActRunner:
             "api_type": self.agent.api_type,
             **trace_metadata,  # 调用方自定义字段可覆盖上面的默认值
         }
-        # tags 允许传单个字符串，统一规整成 list。
+        # tags 允许传单个字符串，统一规整成 list
         trace_tags = self.state.runtime_context.get("trace_tags") or []
         if isinstance(trace_tags, str):
             trace_tags = [trace_tags]
 
-        # 开启根 span（AGENT 节点）；tracer 未配置 exporter 时为空操作。
+        # 开启根 span（AGENT 节点）；tracer 未配置 exporter 时为空操作
         self.state.trace_span = self.agent.tracer.start_run(
             str(self.state.runtime_context.get("trace_name") or "react_agent"),
             RunType.AGENT,
@@ -241,51 +277,52 @@ class ReActRunner:
             tags=list(trace_tags),
         )
 
-        # ── 将用户消息写入 memory ──
+        # ── 将用户消息写入 Memory ──
         if isinstance(message, str):
             self.agent.memory.add_user(message)
         else:
-            # 列表形式：原样写入 memory。
-            # system 消息（如插件通过 BEFORE_AGENT_RUN hook 注入的 MCP/Skill 提示）
-            # 也会被写入 _messages，最终在 get_messages() 中出现在 memory.system_prompt 之后。
+            # 列表形式：原样写入 memory（含 system 消息等）
             for msg in message:
                 self.agent.memory.add_raw(msg)
+
+        # ── 产出 ReplyStartEvent（一次 run() 只产一次）──
+        reply_id = uuid.uuid4().hex[:16]
+        self.state.reply_id = reply_id
+        session_id = self.state.runtime_context.get("session_id", "")
+        model_name = self.agent.model
+
+        yield ReplyStartEvent(
+            session_id=session_id, reply_id=reply_id, name=model_name,
+        )
 
         # ── 主循环 + 异常/收尾处理 ──
         try:
             async for event in self._loop():
-                # 给每个事件盖 turn_id 戳
-                object.__setattr__(event, "turn_id", self.state.turn_id)
                 yield event
 
-        except BaseException as exc:
-            # 异常路径：区分「取消」与「真实错误」，分别落不同的 trace 状态。
-            if self.state.trace_span and not self.state.trace_span.ended:
-                if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
-                    self.state.trace_span.end(
-                        status=TraceRunStatus.CANCELLED,
-                        outputs={"iterations": self.state.iteration},
-                    )
-                else:
-                    self.state.trace_span.end(
-                        error=exc,
-                        outputs={"iterations": self.state.iteration},
-                    )
+        except asyncio.CancelledError:
+            # 取消路径：_finalize 设置 INTERRUPTED 状态，产出 ReplyEnd
+            self._finalize(ReplyFinishedReason.INTERRUPTED)
+            yield ReplyEndEvent(
+                session_id=session_id, reply_id=reply_id,
+                finished_reason=ReplyFinishedReason.INTERRUPTED,
+            )
+
+        except Exception:
+            # 异常路径：_finalize 设置 ERROR 状态，产出 ReplyEnd
+            self._finalize(ReplyFinishedReason.ERROR)
+            yield ReplyEndEvent(
+                session_id=session_id, reply_id=reply_id,
+                finished_reason=ReplyFinishedReason.ERROR,
+                error={"message": str(self.state.error or "Unknown error")},
+            )
             raise
 
         finally:
-            # 正常路径收尾：依据 RunState 推断最终 trace 状态并关闭根 span。
-            # （异常路径已在 except 中提前 end，这里因 ended 判断而跳过。）
+            # Tracing 收尾：依据 RunState.status 映射 trace 状态并关闭根 span
             if self.state.trace_span and not self.state.trace_span.ended:
-                trace_status = (
-                    TraceRunStatus.CANCELLED
-                    if self.state.status == RunStatus.CANCELLED
-                    else TraceRunStatus.ERROR
-                    if self.state.status == RunStatus.ERROR
-                    else TraceRunStatus.COMPLETED
-                )
                 self.state.trace_span.end(
-                    status=trace_status,
+                    status=_TRACE_STATUS.get(self.state.status, TraceRunStatus.ERROR),
                     outputs={
                         "success": self.state.status == RunStatus.COMPLETED,
                         "done_reason": self.state.done_reason,
@@ -293,534 +330,151 @@ class ReActRunner:
                     },
                     error=self.state.error if self.state.status == RunStatus.ERROR else None,
                 )
+            # 释放运行锁
+            self._run_task = None
 
-    def cancel(self) -> None:
-        """外部调用：取消当前执行。同时通知 LLM stream 和工具任务。"""
-        self.state.cancel()
-        self.llm.cancel()
+    def cancel_nowait(self) -> None:
+        """外部调用：取消当前执行。
 
-    # ── 外层循环：_loop() ──────────────────────────────────────────────────
+        对 self._run_task 执行 Task.cancel()，CancelledError 会沿
+        await 调用栈传播到 _loop() 或 _execute_reasoning / _execute_acting
+        中的当前 await 点，最终被 run() 的 except 捕获并转换为
+        INTERRUPTED 结果。
+        """
+        if self._run_task is not None and not self._run_task.done():
+            self._run_task.cancel()
 
-    async def _loop(self) -> AsyncGenerator[AgentEvent, None]:
+    async def _loop(self) -> AsyncGenerator[AgentStreamEvent, None]:
         """ReAct 主循环：Reason → Act → Observe。
 
-        每次循环代表一次完整的 LLM turn：
-          1. _run_turn() 调用 LLM，消费流式输出
-          2. 如果 LLM 返回了纯文本（无工具调用），循环结束
-          3. 如果 LLM 返回了工具调用，执行工具后继续下一轮
+        循环逻辑：
+          1. 调用 _decide(state, prev) 获取下一步动作
+          2. 根据动作类型分发到对应执行器
+          3. Reasoning → 递增 iteration，调 LLM，更新 prev
+          4. Acting    → 执行工具，清除 prev（下一轮重新推理）
+          5. Exit      → 产出结束事件，触发 on_turn_end，return
+
+        iteration 计数规则：
+          只在 Reasoning 时递增。一次"迭代"= 一次 LLM 调用，
+          可能后跟一次 Acting（工具执行），但不额外计数。
+          这样 max_iterations=N 表示最多调用 N 次 LLM。
+
+        Exit + should_continue 的特殊路径：
+          on_stop hook 返回 block 时，ExitExecutor 产出 HintBlockEvent
+          但不产 ReplyEndEvent，返回 ExitOutcome(should_continue=True)。
+          主循环注入续写提示到 Memory，清除 prev，继续循环。
         """
+        prev: TurnResult | None = None
+        max_iters = self.agent.max_iterations
+
+        # 创建三个执行器实例（循环内复用）
+        reasoning_executor = ReasoningExecutor(
+            self.agent, self.state, self._llm, self.agent.hook_manager,
+        )
+        acting_executor = ActingExecutor(
+            self.agent, self.state, self._tool_handler,
+        )
+        exit_executor = ExitExecutor(
+            self.agent, self.state, self.agent.hook_manager,
+        )
+
         try:
-            while self.agent.max_iterations is None or self.state.iteration < self.agent.max_iterations:
-                self.state.check_cancel()
-                self.state.iteration += 1
-                self.state._turn_start_ts = time.perf_counter()
-                self.state._first_token_logged = False
-                self.state._ttft_ms = None
+            while True:
+                # 纯决策函数：只读状态，返回动作类型
+                action = decide(self.state, prev)
 
-                # ── on_turn_start hook ──
-                ts_output = await self.agent.hook_manager.trigger(
-                    ON_TURN_START,
-                    lambda: TurnStartInput(
-                        session_id=self.state.runtime_context.get("session_id", ""),
-                        turn_id=self.state.turn_id,
-                        iteration=self.state.iteration,
-                        messages=self.agent.memory.get_messages(),
-                        runtime_context=self.state.runtime_context,
-                    ),
-                )
-                if ts_output is not None and isinstance(ts_output, TurnStartOutput):
-                    for msg in ts_output.inject_messages:
-                        self.agent.memory.add_raw(msg)
+                if isinstance(action, Reasoning):
+                    # ── Reasoning：调 LLM ──
+                    self.state.iteration += 1
+                    # on_turn_start hook（可注入消息到 Memory）
+                    await self._trigger_on_turn_start()
+                    # 执行 LLM 调用 + 流式消费 + 重试
+                    async for event in reasoning_executor.stream(action):
+                        yield event
+                    # 获取本轮推理的结构化产物，供下一轮 _decide() 消费
+                    prev = reasoning_executor.result
 
-                async for event in self._run_turn():
-                    yield event
+                elif isinstance(action, Acting):
+                    # ── Acting：执行工具 ──
+                    # 并发执行所有工具调用，成组写入 Memory
+                    async for event in acting_executor.stream(action):
+                        yield event
+                    # 清除 prev：工具执行后需要重新调 LLM 读取工具结果
+                    prev = None
 
-                # 纯文本 turn 会在 _run_turn 内标记 COMPLETED；有工具调用时保持 RUNNING。
-                if self.state.is_done:
-                    # ── on_turn_end hook（只读观察）──
-                    await self.agent.hook_manager.trigger(
-                        ON_TURN_END,
-                        lambda: TurnEndInput(
-                            session_id=self.state.runtime_context.get("session_id", ""),
-                            turn_id=self.state.turn_id,
-                            iteration=self.state.iteration,
-                            done_reason=self.state.done_reason or DoneReason.COMPLETED,
-                            runtime_context=self.state.runtime_context,
-                        ),
-                    )
+                elif isinstance(action, Exit):
+                    # ── Exit：结束（或暂停）当前回复 ──
+                    async for event in exit_executor.stream(action):
+                        yield event
+                    # ON_STOP hook 返回 block 时不退出
+                    if exit_executor.outcome.should_continue:
+                        # 注入续写提示已在 ExitExecutor 中完成
+                        prev = None
+                        continue
+                    # 正常退出 → 触发 on_turn_end hook，结束循环
+                    await self._trigger_on_turn_end()
                     return
-                # 仍然 RUNNING 说明本轮执行了工具，继续下一轮让模型读取工具结果。
-
-            # 达到 max_iterations 上限，标记为完成（非错误）。
-            if not self.state.is_done:
-                self.state.done_reason = DoneReason.MAX_ITERATIONS
-                self.state.status = RunStatus.COMPLETED
 
         except CancelledError:
-            self.state.done_reason = DoneReason.CANCELLED
-            self.state.status = RunStatus.CANCELLED
+            # 内部取消异常（来自 _execute_acting 的 cancelled=True 路径）
+            self._finalize(ReplyFinishedReason.INTERRUPTED)
+            yield ReplyEndEvent(
+                session_id=self.state.runtime_context.get("session_id", ""),
+                reply_id=self.state.reply_id,
+                finished_reason=ReplyFinishedReason.INTERRUPTED,
+            )
 
-    # ── 单轮调用（带重试）：_run_turn() ────────────────────────────────────
+    def _finalize(self, reason: ReplyFinishedReason) -> None:
+        """统一终态写入。
 
-    async def _run_turn(self) -> AsyncGenerator[AgentEvent, None]:
-        """执行一次 provider turn，并对可重试错误自动重试。
+        所有退出路径（正常、取消、异常、超限）都经过此函数，
+        确保 RunState 的 status 和 done_reason 一致。
 
-        成功时有两种结果：
-          - 没有工具调用 → 状态变成 COMPLETED，外层循环结束
-          - 有工具调用 → 状态保持 RUNNING，外层循环继续下一轮
-
-        重试使用 for 循环（非递归），避免递归放大重试次数。
-        重试策略：
-          - 不可重试错误（如 400 bad_request）→ 立即终止
-          - 可重试错误（如 429 rate_limit）→ 等待 retry_delay 后重试
-          - 达到 max_attempts → 终止
+        Args:
+            reason: 结束原因（COMPLETED / INTERRUPTED / ERROR / EXCEED_MAX_ITERS）
         """
-        messages = self.agent.memory.get_messages()
-        # force_no_tools_once 用于空响应最终化：强制模型不带工具，只输出文本。
-        tools = None if self.state.force_no_tools_once else self.agent.tool_registry.to_openai_tools() or None
-        self.state.force_no_tools_once = False
-        max_attempts = 1 + self.agent.max_retries  # 首次 + 重试次数
+        self.state.done_reason = reason
+        self.state.status = _REASON_TO_STATUS.get(reason, RunStatus.ERROR)
 
-        for attempt in range(max_attempts):
-            # 每次尝试创建一个 LLM 子 span，挂在根 AGENT span 下。
-            llm_span = self.state.trace_span.child(
-                "llm",
-                RunType.LLM,
-                inputs={"messages": messages, "tools": tools},
-                metadata={
-                    "model": self.agent.model,
-                    "api_type": self.agent.api_type,
-                    "iteration": self.state.iteration,
-                    "attempt": attempt + 1,
-                },
-            ) if self.state.trace_span else None
+    async def _trigger_on_turn_start(self) -> None:
+        """触发 on_turn_start hook。
 
-            try:
-                async for event in self._stream_turn(messages, tools, llm_span=llm_span):
-                    yield event
-                return  # 成功完成，退出重试循环
-
-            except CancelledError:
-                # 取消：标记 LLM span 为 CANCELLED 后继续向上传播。
-                if llm_span and not llm_span.ended:
-                    llm_span.end(status=TraceRunStatus.CANCELLED)
-                raise
-
-            except Exception as exc:
-                # 出错：先记录到 LLM span（正常完成路径已在 _stream_turn 内 end）。
-                if llm_span and not llm_span.ended:
-                    llm_span.end(error=exc)
-                if self.state.is_cancelled:
-                    raise CancelledError() from exc
-
-                # _stream_turn 抛出的 provider 异常已经是 LLMError；其他异常在此分类。
-                err = exc if isinstance(exc, LLMError) else LLMError.classify(exc)
-                is_last = attempt >= max_attempts - 1
-                logger.warning(
-                    "LLM 调用失败 [%s] %s (第 %d/%d 次尝试)",
-                    err.code, err.message[:200], attempt + 1, max_attempts,
-                )
-
-                # 不可重试或已是最后一次尝试 → 终止。
-                if err.code in LLMError.UNRETRYABLE_CODES or is_last:
-                    self.state.done_reason = DoneReason.ERROR
-                    self.state.status = RunStatus.ERROR
-                    self.state.error = f"[{err.code}] {err.message}"
-                    self.state.error_code = err.code
-                    return
-
-            # 可重试错误：发出 retry 事件，等待一小段时间后进入下一次 attempt。
-            yield retry_event(
-                code=err.code,
-                message=err.message,
-                attempt=attempt + 1,
-                max_attempts=max_attempts - 1,
-            )
-            await asyncio.sleep(self.agent.retry_delay)
-            if self.state.cancel_token.is_cancelled():
-                raise CancelledError()
-            # 重试前重新读取 messages，避免使用已经过期的上下文。
-            messages = self.agent.memory.get_messages()
-
-    # ── 流式执行：_stream_turn() ───────────────────────────────────────────
-
-    async def _stream_turn(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None,
-        llm_span: TraceSpan | None = None,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        """流式消费 LLM 输出，并在收齐工具调用后执行工具。
-
-        执行分为 5 个阶段：
-          1. 消费 LLM 流（文本/reasoning/工具调用增量实时 yield）
-          2. 输出本轮完整文本/reasoning 事件
-          3. 如果没有工具调用 → 处理纯文本 turn（含空响应/截断/续跑等分支）
-          4. 等待全部工具完成，归并结果
-          5. 成组写入 memory（assistant tool_calls + tool results），然后 yield 事件
-
-        关键设计：阶段 5 中不能出现 await/yield，否则调用方取消 generator 时
-        可能留下只有 assistant tool_calls、没有 tool result 的非法历史。
+        在每次 Reasoning（LLM 调用）之前触发。
+        hook 可以注入 system/user 消息（如每日提醒、上下文补充），
+        注入的消息会追加到 Memory，Agent 在本轮迭代中可见。
         """
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        finish_reason: str = "unknown"
-        usage: dict | None = None
-        response_metadata: dict = {}
+        from ...hooks import ON_TURN_START, TurnStartInput, TurnStartOutput
 
-        # tool_call_id → 工具任务的映射；保持确定性的写入顺序。
-        tool_tasks: dict[str, asyncio.Task] = {}
-        tool_calls: list[ToolCall] = []
-
-        # partial_content 跨轮累积，放在 RunState 中以便 ReAct 多轮拼接。
-        partial_content = self.state.partial_content
-
-        def _emit_streaming() -> AgentEvent:
-            """yield 当前 partial_content 的快照作为流式 assistant_message。"""
-            return assistant_message_event(
-                content=[dict(p) for p in partial_content]
-            )
-
-        def _build_complete_events(persist_memory: bool = False, kind: str = "final") -> list:
-            """把本轮内容拼成单个 assistant_message_complete 事件。
-
-            正常结束和取消/异常路径共用：取消时已累积的半截内容也会被 emit，
-            从而和正常结束一样被上层持久化（文本与推理对称处理）。两条路径互斥，
-            正常情况下只会有一处调用。
-
-            persist_memory=True 时（取消/异常路径）顺便把半截内容写入 memory，
-            让后续用同一 session 续跑时模型能看到这段被中断的输出。正常路径
-            （persist_memory=False）的 memory 写入仍由阶段 3 统一处理，避免重复写。
-            """
-            full_reasoning = "".join(reasoning_parts)
-            full_text = "".join(text_parts)
-            if not full_reasoning and not full_text and not tool_calls:
-                return []
-
-            content: list[dict] = []
-            if full_reasoning:
-                content.append({"type": "thinking", "thinking": full_reasoning, "event_id": uuid.uuid4().hex[:16]})
-            if full_text:
-                content.append({"type": "text", "text": full_text, "event_id": uuid.uuid4().hex[:16]})
-            for tc in tool_calls:
-                content.append({"type": "toolCall", "id": tc.id, "name": tc.name, "arguments": tc.input or {}, "event_id": uuid.uuid4().hex[:16]})
-
-            if persist_memory and full_text.strip():
-                self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
-
-            metadata: dict[str, Any] = {"kind": kind}
-            if usage:
-                metadata["usage"] = usage
-            if finish_reason and finish_reason != "unknown":
-                metadata["stopReason"] = finish_reason
-            if response_metadata:
-                metadata["responseId"] = response_metadata.get("id")
-                metadata["model"] = response_metadata.get("model")
-
-            return [assistant_message_complete_event(content=content, metadata=metadata)]
-
-        # ── 阶段 1：消费 LLM 流 ──
-        # 这里如果发生异常（含 provider LLMError），
-        # 必须先取消已启动的工具任务再向外传播。
-        try:
-            async for event in self.llm.stream(messages, tools):
-                self.state.check_cancel()
-
-                if not self.state._first_token_logged:
-                    self.state._first_token_logged = True
-                    elapsed_ms = (time.perf_counter() - self.state._turn_start_ts) * 1000
-                    logger.info(f"[react] 第 {self.state.iteration} 轮 TTFT {elapsed_ms:.0f}ms")
-                    if llm_span and not llm_span.ended:
-                        llm_span.add_event("ttft", {"ms": round(elapsed_ms)})
-
-                if isinstance(event, TextDelta):
-                    # 文本增量：累积到 partial_content，yield 完整快照。
-                    text_parts.append(event.text)
-                    if partial_content and partial_content[-1].get("type") == "text":
-                        partial_content[-1]["text"] = partial_content[-1].get("text", "") + event.text
-                    else:
-                        partial_content.append({"type": "text", "text": event.text})
-                    yield _emit_streaming()
-
-                elif isinstance(event, ReasoningDelta):
-                    # 推理增量（thinking model 的 chain-of-thought）：累积到 partial_content。
-                    reasoning_parts.append(event.text)
-                    if partial_content and partial_content[-1].get("type") == "thinking":
-                        partial_content[-1]["thinking"] = partial_content[-1].get("thinking", "") + event.text
-                    else:
-                        partial_content.append({"type": "thinking", "thinking": event.text})
-                    yield _emit_streaming()
-
-                elif isinstance(event, ToolInputDelta):
-                    # 工具参数 JSON 片段：累积到 partial_content 中对应的 toolCall part。
-                    _accumulated = False
-                    for p in reversed(partial_content):
-                        if p.get("type") == "toolCall" and p.get("id") == event.id:
-                            p["arguments"] = p.get("arguments", "") + event.text
-                            if event.name:
-                                p["name"] = event.name
-                            _accumulated = True
-                            break
-                    if not _accumulated:
-                        partial_content.append({
-                            "type": "toolCall", "id": event.id,
-                            "name": event.name or "", "arguments": event.text,
-                        })
-                    yield _emit_streaming()
-
-                elif isinstance(event, ToolCall):
-                    # 完整的工具调用：立即 spawn 异步任务，不在这里 await。
-                    # 同时更新 partial_content 中对应 toolCall 的 arguments 为完整 dict。
-                    tool_calls.append(event)
-                    _updated = False
-                    for p in reversed(partial_content):
-                        if p.get("type") == "toolCall" and p.get("id") == event.id:
-                            p["name"] = event.name
-                            p["arguments"] = event.input or {}
-                            _updated = True
-                            break
-                    if not _updated:
-                        partial_content.append({
-                            "type": "toolCall", "id": event.id,
-                            "name": event.name, "arguments": event.input or {},
-                        })
-                    yield _emit_streaming()
-
-                    tool_tasks[event.id] = self.tool_handler.spawn(
-                        event,
-                        self.state,
-                        parent_span=self.state.trace_span,
-                    )
-
-                elif isinstance(event, StepFinish):
-                    # LLM 流结束：拿到 finish_reason 和 usage。
-                    finish_reason = event.finish_reason
-                    response_metadata = event.response_metadata
-                    if event.usage:
-                        usage = event.usage
-                        # 累积到 turn 级统计
-                        self.state.token_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                        self.state.token_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                        self.state.token_usage["cached_tokens"] += usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                        self.state.token_usage["llm_calls"] += 1
-
-        except BaseException:
-            # 取消/异常：先 flush 已累积的半截文本与推理（让上层能持久化，并写入
-            # memory 以便续跑时可见），再清理已启动的工具任务，最后向上传播。
-            for ev in _build_complete_events(persist_memory=True):
-                yield ev
-            self.state.partial_content = []
-            await self.tool_handler.drain(tool_tasks)
-            raise
-
-        # ── 阶段 2：输出完整文本/reasoning 事件 ──
-        full_text = "".join(text_parts)
-        full_reasoning = "".join(reasoning_parts)
-        _kind = "block" if tool_calls else "final"
-        for ev in _build_complete_events(kind=_kind):
-            yield ev
-        self.state.partial_content = []
-
-        # 关闭 LLM span（记录本轮完整输出）。
-        if llm_span and not llm_span.ended:
-            llm_span.end(outputs={
-                "text": full_text,
-                "reasoning": full_reasoning,
-                "finish_reason": finish_reason,
-                "has_tool_calls": bool(tool_calls),
-                "tool_calls": [
-                    {"id": call.id, "name": call.name, "arguments": call.input}
-                    for call in tool_calls
-                ],
-                "usage": usage,
-                "response_metadata": response_metadata,
-            })
-
-        # provider 未返回明确 finish_reason 时的告警。
-        if finish_reason == "unknown":
-            logger.warning(
-                "[react_runner] provider 未返回明确 finish_reason，保持 ReAct Loop 继续; "
-                "迭代=%s has_text=%s has_reasoning=%s has_tool_calls=%s",
-                self.state.iteration,
-                bool(full_text.strip()),
-                bool(full_reasoning.strip()),
-                bool(tool_calls),
-            )
-
-        # ── 阶段 3：没有工具调用的 turn ──
-        if not tool_calls:
-            if full_text.strip():
-                # 正常有文本输出：重置空响应计数器，写入 memory。
-                self.state.empty_content_retries = 0
-                self.state.finalization_retrying = False
-                self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
-
-                # 分支 3a：输出被截断（达到 max_tokens）→ 注入续写提示。
-                if finish_reason == "length":
-                    yield self._append_internal_user_message(
-                        LENGTH_CONTINUATION_PROMPT,
-                        reason="length_recovery",
-                    )
-                    return
-
-                if finish_reason == "unknown":
-                    return
-
-                # 分支 3e：on_stop hook — 外部可阻止 Agent 停止。
-                stop_output = await self.agent.hook_manager.trigger(
-                    ON_STOP,
-                    lambda: StopInput(
-                        session_id=self.state.runtime_context.get("session_id", ""),
-                        turn_id=self.state.turn_id,
-                        iteration=self.state.iteration,
-                        last_assistant_text=full_text,
-                        finish_reason=finish_reason,
-                        token_usage=dict(self.state.token_usage),
-                        runtime_context=self.state.runtime_context,
-                    ),
-                )
-                if stop_output is not None and stop_output.decision == "block":
-                    logger.info(
-                        "[react_runner] on_stop hook 阻止停止; 迭代=%s reason=%s",
-                        self.state.iteration,
-                        stop_output.reason[:100],
-                    )
-                    yield self._append_internal_user_message(
-                        stop_output.reason or "继续工作。",
-                        reason="stop_hook_block",
-                    )
-                    return  # 不设 COMPLETED，_loop 继续下一轮
-
-                # 分支 3f：正常结束。
-                self.state.done_reason = DoneReason.COMPLETED
-                self.state.status = RunStatus.COMPLETED
-                return
-
-            # ── 以下处理空文本（full_text 为空）的情况 ──
-
-            # finish_reason=length 但文本为空：可能是 max_tokens 设太小，
-            # provider 返回了空 content。直接结束，避免无限循环。
-            if finish_reason == "length":
-                return
-            # finish_reason=unknown：无法判断，直接结束。
-            if finish_reason == "unknown":
-                return
-
-            # 已经在"强制最终化"阶段还是空 → 彻底失败。
-            if self.state.finalization_retrying:
-                self.state.done_reason = DoneReason.ERROR
-                self.state.status = RunStatus.ERROR
-                self.state.error = EMPTY_FINAL_RESPONSE_MESSAGE
-                self.state.error_code = "empty_response"
-                return
-
-            # 空响应重试：计数 +1，未达上限则继续下一轮（让模型重新生成）。
-            self.state.empty_content_retries += 1
-            if self.state.empty_content_retries < MAX_EMPTY_RESPONSE_RETRIES:
-                logger.warning(
-                    "[react_runner] 空响应重试; 迭代=%s 第 %s/%s 次 finish_reason=%s 有推理=%s",
-                    self.state.iteration,
-                    self.state.empty_content_retries,
-                    MAX_EMPTY_RESPONSE_RETRIES,
-                    finish_reason,
-                    bool(full_reasoning),
-                )
-                return
-
-            # 重试耗尽 → 进入"强制最终化"：下一轮强制不带工具，只输出文本。
-            logger.warning(
-                "[react_runner] 空响应重试 %s 次后仍失败，请求最终回复; "
-                "迭代=%s finish_reason=%s 有推理=%s",
-                self.state.empty_content_retries,
-                self.state.iteration,
-                finish_reason,
-                bool(full_reasoning),
-            )
-            self.state.finalization_retrying = True
-            self.state.force_no_tools_once = True
-            yield self._append_internal_user_message(
-                FINALIZATION_RETRY_PROMPT,
-                reason="empty_finalization_retry",
-            )
-            return
-
-        # ── 阶段 4：等待全部工具完成 ──
-        # gather_results 会并发等待所有工具任务，处理取消，返回按调用顺序排列的结果。
-        self.state.empty_content_retries = 0
-        self.state.finalization_retrying = False
-        results, cancelled = await self.tool_handler.gather_results(
-            tool_calls, tool_tasks, self.state
+        ts_output = await self.agent.hook_manager.trigger(
+            ON_TURN_START,
+            lambda: TurnStartInput(
+                session_id=self.state.runtime_context.get("session_id", ""),
+                turn_id=self.state.turn_id,
+                iteration=self.state.iteration,
+                messages=self.agent.memory.get_messages(),
+                runtime_context=self.state.runtime_context,
+            ),
         )
+        if ts_output is not None and isinstance(ts_output, TurnStartOutput):
+            for msg in ts_output.inject_messages:
+                self.agent.memory.add_raw(msg)
 
-        # ── 阶段 5：成组写入 memory ──
-        # ⚠️ 这里不能出现 await/yield！否则调用方取消 generator 时
-        # 可能留下只有 assistant tool_calls、没有 tool result 的非法历史。
-        #
-        # 写入顺序必须是：
-        #   assistant(tool_calls) → tool(result_1) → tool(result_2) → ...
-        # 这样 provider 才能正确匹配 tool_call 和 tool_result。
-        self.agent.memory.add_raw(
-            self.tool_handler.build_assistant_message(
-                tool_calls=tool_calls,
-                content=full_text or None,
-                reasoning=full_reasoning or None,
-            )
-        )
+    async def _trigger_on_turn_end(self) -> None:
+        """触发 on_turn_end hook（只读观察）。
 
-        events: list[AgentEvent] = []
-        # 工具返回的 UserMessageEvent 需在所有 tool_result 之后追加，
-        # 否则会打断 assistant(tool_calls) → tool(...) → tool(...) 顺序，
-        # 导致 provider 报 "tool call result does not follow tool call"。
-        pending_user_messages: list[AgentEvent] = []
-
-        for tc, result in zip(tool_calls, results):
-            # 写入 tool_result 到 memory
-            self.agent.memory.add_tool_result(
-                tc.id, result.result or f"[{tc.name}] 已完成"
-            )
-            # 收集 UserMessageEvent（延后追加）
-            if result.event is not None:
-                pending_user_messages.append(result.event)
-
-        # 构建向外 yield 的事件列表（tool_result → pending_user_messages）
-        # tool_call 已嵌入 assistant_message_complete（阶段 2），不再独立 yield。
-        events: list[AgentEvent] = []
-
-        for tc, result in zip(tool_calls, results):
-            events.append(tool_result_event(
-                id=result.call_id, name=result.name, result=result.result or f"[{tc.name}] 已完成",
-                error=result.error, status=result.status,
-                metadata=result.metadata or None,
-            ))
-
-        # 统一追加 UserMessageEvent：确保在 tool_result 之后，消息顺序合法
-        for ev in pending_user_messages:
-            self.agent.memory.add_raw(ev.to_openai_message())
-            events.append(ev)
-
-        for event in events:
-            yield event
-
-        if cancelled:
-            raise CancelledError()
-
-        # 工具已执行，本轮不标记完成，外层循环会进入下一轮让模型读取工具结果。
-
-    # ── 辅助方法 ────────────────────────────────────────────────────────────
-
-    def _append_internal_user_message(self, content: str, *, reason: str) -> AgentEvent:
-        """向 memory 追加一条内部用户消息（对用户不可见），并返回对应事件。
-
-        用于：
-          - length 截断后的续写提示
-          - 空响应最终化提示
-          - on_stop hook block 时的 continuation prompt
+        在 Agent 正常退出（Exit + ON_STOP allow）时触发。
+        hook 不能阻止退出，decision 字段被忽略。
+        用于遥测、日志、UI 通知。
         """
-        ev = user_message_event(
-            content,
-            metadata={"hide": True, "internal": True, "reason": reason},
+        from ...hooks import ON_TURN_END, TurnEndInput
+
+        await self.agent.hook_manager.trigger(
+            ON_TURN_END,
+            lambda: TurnEndInput(
+                session_id=self.state.runtime_context.get("session_id", ""),
+                turn_id=self.state.turn_id,
+                iteration=self.state.iteration,
+                done_reason=str(self.state.done_reason or ReplyFinishedReason.COMPLETED),
+                runtime_context=self.state.runtime_context,
+            ),
         )
-        self.agent.memory.add_raw(ev.to_openai_message())
-        return ev
-
-

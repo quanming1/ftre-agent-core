@@ -11,8 +11,8 @@ Core Hook 系统测试。
 import asyncio
 import pytest
 
-from ftre_agent_core.agent import ReActAgent, EventType, StepEvent, StepPhase
-from ftre_agent_core.agent.event import DoneReason
+from ftre_agent_core.agent import ReActAgent
+from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.hooks import (
     FtreCoreHookManager,
     ON_TURN_START,
@@ -29,6 +29,17 @@ from ftre_agent_core.llm import TextDelta, StepFinish, ToolCall
 
 
 # ── 测试辅助 ──────────────────────────────────────────────────────
+
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
 
 def make_agent(max_iterations=5, hook_manager=None):
     return ReActAgent(
@@ -274,7 +285,7 @@ async def test_on_stop_hook_blocks_and_continues():
         else:
             # 第二轮：continuation prompt 已注入，Agent 应该能看到它
             assert messages[-1]["role"] == "user"
-            assert "keep going" in messages[-1]["content"]
+            assert "keep going" in _content_text(messages[-1]["content"])
             yield TextDelta(text="done")
             yield StepFinish(finish_reason="stop")
 
@@ -297,14 +308,14 @@ async def test_on_stop_hook_blocks_and_continues():
     # memory 中应该有：user(start) → assistant(working) → user(continuation) → assistant(done)
     msgs = agent.memory.messages
     assert msgs[0]["role"] == "user"
-    assert msgs[0]["content"] == "start"
+    assert _content_text(msgs[0]["content"]) == "start"
     assert msgs[1]["role"] == "assistant"
     assert msgs[2]["role"] == "user"
-    assert "keep going" in msgs[2]["content"]
+    assert "keep going" in _content_text(msgs[2]["content"])
     assert msgs[3]["role"] == "assistant"
 
     # 验证最终状态（agent-core 不再产出 Step 事件，通过 state 检查）
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -330,7 +341,7 @@ async def test_on_stop_hook_allow_lets_agent_stop():
     events = [e async for e in agent.run("start")]
 
     assert hook_calls == 1
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -446,7 +457,11 @@ async def test_on_turn_start_injects_message():
 
     assert call_count == 1
     # 注入的消息应该在 memory 中
-    contents = [m.get("content") for m in agent.memory.messages if m["role"] == "user"]
+    contents = [
+        _content_text(m.get("content"))
+        for m in agent.memory.messages
+        if m["role"] == "user"
+    ]
     assert "reminder: check tests" in contents
 
 
@@ -466,7 +481,7 @@ async def test_on_turn_start_no_injection_when_no_hook():
     # 只有一条用户消息（原始输入）
     user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
     assert len(user_msgs) == 1
-    assert user_msgs[0]["content"] == "start"
+    assert _content_text(user_msgs[0]["content"]) == "start"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -494,7 +509,7 @@ async def test_on_turn_end_called_on_completion():
     events = [e async for e in agent.run("start")]
 
     assert len(turn_end_calls) == 1
-    assert turn_end_calls[0].done_reason == DoneReason.COMPLETED
+    assert turn_end_calls[0].done_reason == ReplyFinishedReason.COMPLETED
     assert turn_end_calls[0].iteration == 1
 
 
@@ -534,7 +549,7 @@ async def test_on_turn_end_called_after_tool_iteration():
 
     assert call_count == 2
     assert len(turn_end_calls) == 1
-    assert turn_end_calls[0].done_reason == DoneReason.COMPLETED
+    assert turn_end_calls[0].done_reason == ReplyFinishedReason.COMPLETED
     assert turn_end_calls[0].iteration == 2
 
 
@@ -584,8 +599,8 @@ async def test_multiple_stop_hooks_chain():
     user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
     # 1 个原始 + 2 个 continuation
     assert len(user_msgs) == 3
-    assert "continue (attempt 1)" in user_msgs[1]["content"]
-    assert "continue (attempt 2)" in user_msgs[2]["content"]
+    assert "continue (attempt 1)" in _content_text(user_msgs[1]["content"])
+    assert "continue (attempt 2)" in _content_text(user_msgs[2]["content"])
 
 
 @pytest.mark.asyncio
@@ -620,7 +635,7 @@ async def test_goal_simulation_block_twice_then_allow():
     assert call_count == 3
     assert hook_iterations == [1, 2, 3]
 
-    assert agent.state.done_reason == DoneReason.COMPLETED
+    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
     assert agent.state.iteration == 3
 
 
@@ -636,7 +651,15 @@ from ftre_agent_core.hooks import (
     PostToolInput,
     PostToolOutput,
 )
-from ftre_agent_core.agent import ToolResultEvent
+from ftre_agent_core.event import ToolResultEndEvent, ToolResultTextDeltaEvent
+
+
+def _tool_result_text(events) -> str:
+    return "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    )
 from ftre_agent_core.tool import tool
 
 
@@ -678,10 +701,10 @@ async def test_on_pre_tool_block_prevents_execution():
     assert execution_count == 0
 
     # Agent 应该看到拦截 reason 作为 tool_result
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
-    assert "禁止执行此工具" in tool_results[0].result
-    assert tool_results[0].status == "failed"
+    assert "禁止执行此工具" in _tool_result_text(events)
+    assert tool_results[0].state == "error"
 
 
 @pytest.mark.asyncio
@@ -715,9 +738,9 @@ async def test_on_pre_tool_modify_args():
     mgr.register(ON_PRE_TOOL, modify_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
-    assert tool_results[0].result == "echo:modified"
+    assert _tool_result_text(events) == "echo:modified"
 
 
 @pytest.mark.asyncio
@@ -753,9 +776,9 @@ async def test_on_pre_tool_allow_executes_normally():
     mgr.register(ON_PRE_TOOL, allow_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
-    assert tool_results[0].result == "echo:hello"
+    assert _tool_result_text(events) == "echo:hello"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -798,9 +821,9 @@ async def test_on_post_tool_modify_result():
     mgr.register(ON_POST_TOOL, redact_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
-    assert tool_results[0].result == "echo:***REDACTED***"
+    assert _tool_result_text(events) == "echo:***REDACTED***"
 
 
 @pytest.mark.asyncio
@@ -838,9 +861,9 @@ async def test_on_post_tool_allow_keeps_original():
     mgr.register(ON_POST_TOOL, observe_hook)
     events = [e async for e in agent.run("start")]
 
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
     assert len(tool_results) == 1
-    assert tool_results[0].result == "original_result"
+    assert _tool_result_text(events) == "original_result"
 
 
 @pytest.mark.asyncio
@@ -932,5 +955,5 @@ async def test_pre_and_post_tool_both_registered():
     assert post_seen == ["echo:from_pre"]
 
     # 最终 Agent 拿到的是 post 修改后的结果
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert tool_results[0].result == "from_post"
+    tool_results = [e for e in events if isinstance(e, ToolResultEndEvent)]
+    assert _tool_result_text(events) == "from_post"

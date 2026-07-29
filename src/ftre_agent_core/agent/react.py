@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.memory import MemoryManager
 from ftre_agent_core.tracing import Tracer
-from .event import AgentEvent
+from ..event import AgentStreamEvent
 from .runner import ReActRunner
 from ..hooks import FtreCoreHookManager
 import logging
@@ -78,9 +78,9 @@ class ReActAgent:
 
     async def run(
         self, message, runtime_context: dict | None = None
-    ) -> AsyncGenerator[AgentEvent, None]:
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
         async for event in self._runner.run(message, runtime_context=runtime_context):
             yield event
 
     def cancel_nowait(self) -> None:
-        self._runner.cancel()
+        self._runner.cancel_nowait()
