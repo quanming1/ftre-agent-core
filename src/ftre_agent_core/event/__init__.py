@@ -30,6 +30,7 @@ from ._event import (
     ToolResultEndEvent,
     RetryEvent,
     CustomEvent,
+    UserMessageEvent,
     AgentStreamEvent,
 )
 from ..types import ReplyFinishedReason
@@ -47,5 +48,5 @@ __all__ = [
     "ToolCallStartEvent", "ToolCallDeltaEvent", "ToolCallEndEvent",
     "ToolResultStartEvent", "ToolResultTextDeltaEvent",
     "ToolResultDataDeltaEvent", "ToolResultEndEvent",
-    "RetryEvent", "CustomEvent", "AgentStreamEvent",
+    "RetryEvent", "CustomEvent", "UserMessageEvent", "AgentStreamEvent",
 ]

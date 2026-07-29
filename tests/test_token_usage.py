@@ -14,7 +14,7 @@ Covers the 9 required scenarios from the redesign doc:
 """
 import json
 import pytest
-from ftre_agent_core.message import Msg, TokenUsage, MsgToken, AssistantMsg, UserMsg
+from ftre_agent_core.message import Msg, TokenUsage, MsgToken, MsgName, AssistantMsg, UserMsg
 from ftre_agent_core.event import ModelCallEndEvent
 from ftre_agent_core.agent.runner._state import RunState, RunStatus
 
@@ -23,7 +23,7 @@ class TestSingleModelCallEnd:
     """1. Single MODEL_CALL_END initializes both usage and last_call_usage."""
 
     def test_single_call_initializes_both(self):
-        msg = AssistantMsg(name="test", content="hello", id="reply_1")
+        msg = AssistantMsg(name=MsgName.DEFAULT, content="hello", id="reply_1")
         event = ModelCallEndEvent(
             reply_id="reply_1",
             prompt_tokens=100,
@@ -44,7 +44,7 @@ class TestMultipleModelCallEndAccumulation:
     """2 & 3. Three MODEL_CALL_ENDs accumulate; last_call equals third."""
 
     def test_three_calls_accumulate_and_last_call_is_third(self):
-        msg = AssistantMsg(name="test", content="hello", id="reply_1")
+        msg = AssistantMsg(name=MsgName.DEFAULT, content="hello", id="reply_1")
         # Call 1: 10,000 + 200 = 10,200
         msg.append_event(ModelCallEndEvent(
             reply_id="reply_1", prompt_tokens=10000, completion_tokens=200, total_tokens=10200,
@@ -79,7 +79,7 @@ class TestRoleValidation:
             last_call_usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
         with pytest.raises(ValidationError) as exc_info:
-            UserMsg(name="test", content="hello", token=token)
+            UserMsg(name=MsgName.DEFAULT, content="hello", token=token)
         assert "assistant" in str(exc_info.value).lower()
 
     def test_system_msg_with_token_raises(self):
@@ -90,11 +90,11 @@ class TestRoleValidation:
             last_call_usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
         with pytest.raises(ValidationError) as exc_info:
-            Msg(name="test", content=[TextBlock(text="sys")], role="system", token=token)
+            Msg(name=MsgName.DEFAULT, content=[TextBlock(text="sys")], role="system", token=token)
         assert "assistant" in str(exc_info.value).lower()
 
     def test_user_msg_without_token_is_fine(self):
-        msg = UserMsg(name="test", content="hello")
+        msg = UserMsg(name=MsgName.DEFAULT, content="hello")
         assert msg.token is None
 
     def test_assistant_msg_with_token_is_fine(self):
@@ -102,7 +102,7 @@ class TestRoleValidation:
             usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
             last_call_usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
-        msg = AssistantMsg(name="test", content="hi", token=token)
+        msg = AssistantMsg(name=MsgName.DEFAULT, content="hi", token=token)
         assert msg.token is not None
 
 
@@ -110,7 +110,7 @@ class TestJsonRoundTrip:
     """5. JSON round-trip preserves all fields."""
 
     def test_json_round_trip(self):
-        msg = AssistantMsg(name="test", content="hello", id="reply_1")
+        msg = AssistantMsg(name=MsgName.DEFAULT, content="hello", id="reply_1")
         msg.append_event(ModelCallEndEvent(
             reply_id="reply_1", prompt_tokens=10000, completion_tokens=200, total_tokens=10200,
         ))
@@ -136,7 +136,7 @@ class TestJsonRoundTrip:
 
     def test_user_msg_json_has_no_token_key(self):
         """exclude_none=True should omit token for user messages."""
-        msg = UserMsg(name="test", content="hello")
+        msg = UserMsg(name=MsgName.DEFAULT, content="hello")
         data = msg.model_dump(mode="json", exclude_none=True)
         assert "token" not in data
 

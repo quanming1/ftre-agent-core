@@ -37,17 +37,85 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     - 不使用占位符字符串：模型会将其作为可见文本 echo 回来，
       导致 runner 误判为正常完成而停止
     """
+    def normalize_assistant_content(message: dict) -> None:
+        content = message.get("content")
+        is_empty = content is None or content == [] or (
+            isinstance(content, str) and not content.strip()
+        )
+        if is_empty:
+            message["content"] = None
+
+    def has_assistant_payload(message: dict) -> bool:
+        return bool(message.get("content") or message.get("reasoning_content"))
+
+    # OpenAI-compatible provider 要求 assistant.tool_calls 后紧跟、且只紧跟
+    # 每个 call 一条对应 tool result。持久化快照在中断或并发工具时可能不完整，
+    # 这里不重排用户历史，只移除无效的协议片段以避免整个请求被 400 拒绝。
     normalized: list[dict] = []
-    for message in messages:
-        current = dict(message)
-        if current.get("role") == "assistant":
-            content = current.get("content")
-            is_empty = content is None or content == [] or (
-                isinstance(content, str) and not content.strip()
-            )
-            if is_empty:
-                current["content"] = None
-        normalized.append(current)
+    dropped_orphan_results = 0
+    stripped_incomplete_calls = 0
+    index = 0
+    while index < len(messages):
+        current = dict(messages[index])
+        role = current.get("role")
+
+        if role == "tool":
+            # 只有紧跟对应 tool_calls 的分支才允许 result 通过。
+            dropped_orphan_results += 1
+            index += 1
+            continue
+
+        if role != "assistant":
+            normalized.append(current)
+            index += 1
+            continue
+
+        normalize_assistant_content(current)
+        tool_calls = current.get("tool_calls") or []
+        if not tool_calls:
+            normalized.append(current)
+            index += 1
+            continue
+
+        call_ids = [call.get("id") for call in tool_calls if isinstance(call, dict)]
+        valid_call_ids = (
+            len(call_ids) == len(tool_calls)
+            and all(isinstance(call_id, str) and call_id for call_id in call_ids)
+            and len(set(call_ids)) == len(call_ids)
+        )
+        following: list[dict] = []
+        cursor = index + 1
+        while cursor < len(messages) and messages[cursor].get("role") == "tool":
+            following.append(dict(messages[cursor]))
+            cursor += 1
+
+        result_ids = [result.get("tool_call_id") for result in following]
+        complete_pair = (
+            valid_call_ids
+            and len(following) == len(call_ids)
+            and set(result_ids) == set(call_ids)
+            and all(isinstance(result_id, str) and result_id for result_id in result_ids)
+        )
+        if complete_pair:
+            normalized.append(current)
+            normalized.extend(following)
+            index = cursor
+            continue
+
+        # 没有结果、结果不全，或被其他消息隔开：保留可读 assistant 文本，
+        # 解除其对 tool result 的协议约束；后续 tool result 会作为 orphan 丢弃。
+        current.pop("tool_calls", None)
+        stripped_incomplete_calls += 1
+        if has_assistant_payload(current):
+            normalized.append(current)
+        index += 1
+
+    if stripped_incomplete_calls or dropped_orphan_results:
+        logger.warning(
+            "[completion] normalized invalid tool protocol: stripped_calls=%d orphan_results=%d",
+            stripped_incomplete_calls,
+            dropped_orphan_results,
+        )
     return normalized
 
 
@@ -535,10 +603,13 @@ class LLMHandler:
         """
         import json as _json
 
+        # Responses API 也从同一份 Chat 消息历史转换而来，先复用同一个工具调用
+        # 协议边界，避免把孤立 function_call_output 传给 provider。
+        request_messages = _normalize_chat_messages(messages)
         llm_log = LLMLogger(self.model)
-        llm_log.log_input(messages, tools)
+        llm_log.log_input(request_messages, tools)
 
-        instructions, input_items = self._convert_messages_to_responses_input(messages)
+        instructions, input_items = self._convert_messages_to_responses_input(request_messages)
         resp_tools = self._convert_tools_to_responses(tools) if tools else []
 
         params: dict[str, Any] = {

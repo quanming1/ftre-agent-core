@@ -30,6 +30,7 @@ from ._convert import (
 from ._msg import (
     TokenUsage,
     MsgToken,
+    MsgName,
     Msg,
     UserMsg,
     AssistantMsg,
@@ -56,6 +57,7 @@ __all__ = [
     # 层次 B
     "TokenUsage",
     "MsgToken",
+    "MsgName",
     "Msg",
     "UserMsg",
     "AssistantMsg",

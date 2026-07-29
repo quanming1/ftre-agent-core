@@ -9,6 +9,7 @@ from typing import Any
 
 from .message import (
     Msg,
+    MsgName,
     TextBlock,
     ToolResultBlock,
     ToolResultState,
@@ -61,7 +62,7 @@ class MemoryManager:
 
     def add_user(self, content: str) -> None:
         self._messages.append(
-            Msg(name="user", content=[TextBlock(text=content)], role="user")
+            Msg(name=MsgName.DEFAULT, content=[TextBlock(text=content)], role="user")
         )
 
     def add_assistant(
@@ -76,14 +77,14 @@ class MemoryManager:
         if reasoning:
             metadata["reasoning_content"] = reasoning
         self._messages.append(
-            Msg(name="assistant", content=blocks, role="assistant", metadata=metadata)
+            Msg(name=MsgName.DEFAULT, content=blocks, role="assistant", metadata=metadata)
         )
 
     def add_tool_result(self, tool_call_id: str, content: str, **kwargs) -> None:
         """工具结果 → Msg(content=[ToolResultBlock])，输出时 to_openai 拆回 {role:tool}。"""
         self._messages.append(
             Msg(
-                name="assistant",
+                name=MsgName.DEFAULT,
                 content=[
                     ToolResultBlock(
                         id=tool_call_id,
@@ -112,7 +113,7 @@ class MemoryManager:
             if role not in ("user", "assistant", "system"):
                 role = "assistant"
             self._messages.append(
-                Msg(name=message.get("name", ""), content=blocks, role=role)
+                Msg(name=MsgName.DEFAULT, content=blocks, role=role)
             )
         else:
             # 兜底：原样存（不应该走到，但保不崩）

@@ -57,6 +57,7 @@ class EventType(StrEnum):
     EXCEED_MAX_ITERS = "EXCEED_MAX_ITERS"
     RETRY = "retry"
     CUSTOM = "CUSTOM"
+    USER_MESSAGE = "USER_MESSAGE"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -243,6 +244,20 @@ class CustomEvent(EventBase):
     value: dict = Field(default_factory=dict)
 
 
+class UserMessageEvent(EventBase):
+    """一条完整用户输入对应的 Event。
+
+    ``content`` 与 ``message_metadata`` 用于宿主投影为 UserMsg；``data`` 是宿主
+    可选的实时 echo 数据。投影字段不重复进入线缆 payload。
+    """
+
+    type: Literal["USER_MESSAGE"] = "USER_MESSAGE"
+    reply_id: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    content: list[Any] = Field(default_factory=list, exclude=True)
+    message_metadata: dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+
 # ── 联合类型 ──
 AgentStreamEvent: TypeAlias = Union[
     ReplyStartEvent, ReplyEndEvent, ExceedMaxItersEvent,
@@ -254,5 +269,5 @@ AgentStreamEvent: TypeAlias = Union[
     ToolCallStartEvent, ToolCallDeltaEvent, ToolCallEndEvent,
     ToolResultStartEvent, ToolResultTextDeltaEvent,
     ToolResultDataDeltaEvent, ToolResultEndEvent,
-    RetryEvent, CustomEvent,
+    RetryEvent, CustomEvent, UserMessageEvent,
 ]

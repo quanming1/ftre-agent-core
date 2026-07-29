@@ -15,6 +15,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal, Sequence, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -78,6 +79,23 @@ class MsgToken(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════
+# MsgName — Msg 的语义类别
+# ══════════════════════════════════════════════════════════════════
+
+class MsgName(StrEnum):
+    """Msg 的语义类别。
+
+    ``role`` 说明"谁发的消息"；``name`` 只说明该 Msg 的语义类别，
+    不能复用为 agent id 或模型名。
+
+    - DEFAULT：普通用户/助手/系统消息
+    - COMPACT：上下文压缩摘要（role=user，正文为完整摘要）
+    """
+    DEFAULT = "default"
+    COMPACT = "compact"
+
+
+# ══════════════════════════════════════════════════════════════════
 # Msg
 # ══════════════════════════════════════════════════════════════════
 
@@ -89,7 +107,7 @@ class Msg(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     # ── 进 context 的字段 ──
-    name: str
+    name: MsgName = MsgName.DEFAULT
     content: list[Annotated[ContentBlock, Field(discriminator="type")]] = Field(default_factory=list)
     role: Literal["user", "assistant", "system"]
     id: str = Field(default_factory=_gen_id)
@@ -359,16 +377,19 @@ class Msg(BaseModel):
 # 工厂函数（对齐 AgentScope UserMsg/AssistantMsg/SystemMsg）
 # ══════════════════════════════════════════════════════════════════
 
-def UserMsg(name: str, content: str | list, **kwargs) -> Msg:
-    """创建 user 消息（content str 自动包 TextBlock）。"""
+def UserMsg(name: str | MsgName = MsgName.DEFAULT, content: str | list = "", **kwargs) -> Msg:
+    """创建 user 消息（content str 自动包 TextBlock）。
+
+    name 默认 MsgName.DEFAULT；压缩摘要场景显式传 MsgName.COMPACT。
+    """
     return Msg(name=name, content=_to_blocks(content), role="user", **kwargs)
 
 
-def AssistantMsg(name: str, content: str | list = "", **kwargs) -> Msg:
+def AssistantMsg(name: str | MsgName = MsgName.DEFAULT, content: str | list = "", **kwargs) -> Msg:
     """创建 assistant 消息（content str 自动包 TextBlock，默认空）。"""
     return Msg(name=name, content=_to_blocks(content), role="assistant", **kwargs)
 
 
-def SystemMsg(name: str, content: str | list, **kwargs) -> Msg:
+def SystemMsg(name: str | MsgName = MsgName.DEFAULT, content: str | list = "", **kwargs) -> Msg:
     """创建 system 消息（content str 自动包 TextBlock）。"""
     return Msg(name=name, content=_to_blocks(content), role="system", **kwargs)
