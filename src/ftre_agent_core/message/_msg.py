@@ -176,7 +176,8 @@ class Msg(BaseModel):
         """把一个流式事件增量应用到 Msg（对齐 AgentScope append_event）。
 
         映射规则见 Obsidian「Msg与append_event设计.md」。
-        暂不处理人工介入事件（REQUIRE_USER_CONFIRM 等），收到时静默跳过。
+        REQUIRE_USER_CONFIRM 会把对应 ToolCall 置 ASKING；其余人工介入事件
+        （USER_CONFIRM_RESULT 等）暂不处理，收到时静默跳过。
         """
         # reply_id 校验
         reply_id = getattr(event, "reply_id", None)
@@ -366,9 +367,22 @@ class Msg(BaseModel):
                 if call_block is not None:
                     call_block.state = ToolCallState.FINISHED
 
-        # ── 人工介入事件暂不处理（ftre 无权限系统），静默跳过 ──
-        # REQUIRE_USER_CONFIRM / USER_CONFIRM_RESULT
-        # REQUIRE_EXTERNAL_EXECUTION / EXTERNAL_EXECUTION_RESULT
+        # ── 权限确认：把对应 ToolCall 置 ASKING ──
+        # RequireUserConfirmEvent 是"状态变更信使"：它让持久化 Msg 与前端快照里的
+        # 目标 tool_call 从 PENDING 变成 ASKING，从而在在线/历史/重连各场景下都能
+        # 渲染成"待确认"，也是 Gateway 判断是否走 resume 的依据。
+        elif et == "REQUIRE_USER_CONFIRM":
+            block = self._find_block("tool_call", event.tool_call_id)
+            if block is not None:
+                block.state = ToolCallState.ASKING
+            else:
+                logger.warning(
+                    "ToolCall %r not found for REQUIRE_USER_CONFIRM, skipping.",
+                    event.tool_call_id,
+                )
+
+        # ── 其余人工介入事件暂不处理，静默跳过 ──
+        # USER_CONFIRM_RESULT / REQUIRE_EXTERNAL_EXECUTION / EXTERNAL_EXECUTION_RESULT
 
         return self
 

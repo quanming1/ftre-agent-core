@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """权限系统接线的集成测试：Acting 分流、挂起、恢复、拒绝、挂起期间拒绝新消息。"""
 import pytest
 
@@ -106,7 +106,7 @@ async def test_resume_execute_after_approval():
 
     # 用户确认放行 → 置 ALLOWED（模拟 runner._resume 的动作）
     MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.ALLOWED)
-    events = [e async for e in executor.resume_execute(action)]
+    events = [e async for e in executor.resume_execute()]
 
     assert EventType.TOOL_RESULT_END in [e.type for e in events]
     assert "echo:hi" in str(agent.messages[-1].get("content", ""))
@@ -125,7 +125,7 @@ async def test_resume_execute_after_rejection_writes_denied():
 
     # 用户拒绝 → 置 FINISHED
     MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.FINISHED)
-    events = [e async for e in executor.resume_execute(action)]
+    events = [e async for e in executor.resume_execute()]
 
     end = [e for e in events if e.type == EventType.TOOL_RESULT_END]
     assert len(end) == 1
@@ -163,7 +163,7 @@ async def test_deny_pauses_with_ask_batch():
 
     # 确认放行 c1；c2 保持 PENDING（DENY）
     MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.ALLOWED)
-    resume_events = [e async for e in executor.resume_execute(action)]
+    resume_events = [e async for e in executor.resume_execute()]
 
     ends = {e.tool_call_id: e for e in resume_events if e.type == EventType.TOOL_RESULT_END}
     assert ends["c1"].state == ToolResultState.SUCCESS
@@ -213,3 +213,60 @@ async def test_no_engine_executes_without_permission_check():
 
     assert EventType.TOOL_RESULT_END in [e.type for e in events]
     assert EventType.REQUIRE_USER_CONFIRM not in [e.type for e in events]
+
+
+@pytest.mark.asyncio
+async def test_append_event_marks_tool_call_asking():
+    """RequireUserConfirmEvent 经 append_event 把对应 ToolCallBlock 置 ASKING。
+
+    这是持久化/前端渲染的关键：ASKING 状态靠该事件写进 Msg 快照。
+    """
+    from ftre_agent_core.message import Msg, MsgName, ToolCallBlock
+
+    msg = Msg(
+        name=MsgName.DEFAULT,
+        role="assistant",
+        id="r1",
+        content=[ToolCallBlock(id="c1", name="bash", arguments={"cmd": "ls"})],
+    )
+    assert msg.content[0].state == ToolCallState.PENDING
+
+    msg.append_event(
+        RequireUserConfirmEvent(
+            reply_id="r1",
+            tool_call_id="c1",
+            tool_call_name="bash",
+            arguments={"cmd": "ls"},
+            reason="需要确认",
+        )
+    )
+    assert msg.content[0].state == ToolCallState.ASKING
+
+
+@pytest.mark.asyncio
+async def test_resume_execute_rebuilds_from_context_only():
+    """resume_execute 完全从 context 重建待收尾清单，不依赖任何传入动作或实例内存。
+
+    模拟"持久化往返后恢复"：手动构造一条 ASKING 的 assistant 消息（如同从
+    state.json 加载而来），把它置 ALLOWED，然后仅调 resume_execute() 就能执行。
+    """
+    agent = make_agent(rules=[
+        PermissionRule(id="ask-echo", tool_name="echo", behavior=PermissionBehavior.ASK)
+    ])
+    state = make_state()
+
+    # 直接往 context 塞一条带 tool_call 的 assistant 消息（模拟持久化加载）
+    MessageContext.add_raw(
+        agent.state.context,
+        agent.runner.tool_handler.build_assistant_message(
+            tool_calls=[ToolCall(id="c1", name="echo", input={"text": "hi"})]
+        ),
+    )
+    # 模拟：挂起时置 ASKING，用户确认后置 ALLOWED
+    MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.ALLOWED)
+
+    # 仅凭 context 恢复，不传任何 action
+    events = [e async for e in _executor(agent, state).resume_execute()]
+
+    assert EventType.TOOL_RESULT_END in [e.type for e in events]
+    assert "echo:hi" in str(agent.messages[-1].get("content", ""))

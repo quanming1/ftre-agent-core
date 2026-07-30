@@ -211,8 +211,6 @@ class ReActRunner:
         self._tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
         # 权限决策引擎（由 Agent 提供，可能为 None = 不启用权限检查）
         self._permission_engine = agent.permission_engine
-        # 挂起时保存本轮 Acting 动作，供恢复阶段整批执行时复用
-        self._paused_action: Acting | None = None
 
     @property
     def llm(self) -> LLMHandler:
@@ -258,18 +256,18 @@ class ReActRunner:
         prologue: AsyncGenerator[AgentStreamEvent, None] | None = None
 
         if isinstance(message, UserConfirmResultEvent):
-            # 恢复路径：处理确认（纯同步）。返回 None 表示仍有未决 ASKING，
+            # 恢复路径：处理确认（纯同步）。返回 False 表示仍有未决 ASKING，
             # 继续挂起、本次调用不进主循环。
-            action = self._accept_confirmation(message)
-            if action is None:
+            if not self._accept_confirmation(message):
                 return
-            # ASKING 已清空：以整批收尾事件作为 prologue，随后进主循环。
+            # ASKING 已清空：从 context 重建待收尾清单并整批执行，作为 prologue，
+            # 随后进主循环。resume_execute 只依赖 context，不依赖实例内存。
             self._run_task = asyncio.current_task()
             self.state.status = RunStatus.RUNNING
             acting_executor = ActingExecutor(
                 self.agent, self.state, self._tool_handler, self._permission_engine,
             )
-            prologue = acting_executor.resume_execute(action)
+            prologue = acting_executor.resume_execute()
         else:
             # 新回复路径：入口校验 + 初始化状态 + 写用户消息 + 产 ReplyStart。
             self._prepare_new_reply(message, runtime_context)
@@ -394,14 +392,15 @@ class ReActRunner:
         # ── 生成 reply_id（一次 run() 只产一次 ReplyStartEvent，由 run() 负责）──
         self.state.reply_id = uuid.uuid4().hex[:16]
 
-    def _accept_confirmation(self, event: UserConfirmResultEvent) -> Acting | None:
+    def _accept_confirmation(self, event: UserConfirmResultEvent) -> bool:
         """处理一条用户确认结果（纯同步，不产事件）。
 
         返回值：
-          - None  → 仍有未决 ASKING，继续挂起，本次调用不进主循环；
-          - Acting → ASKING 已全部清空，返回挂起时保存的整批动作，供 run() 恢复执行。
+          - False → 仍有未决 ASKING，继续挂起，本次调用不进主循环；
+          - True  → ASKING 已全部清空，可从 context 重建清单整批执行。
 
         校验失败（非挂起态 / reply_id 或 tool_call_id 不匹配）直接抛 RuntimeError。
+        待恢复清单完全由 context 推导，本方法只负责更新目标 tool_call 的状态。
         """
         context = self.agent.state.context
         asking = MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)
@@ -432,14 +431,8 @@ class ReActRunner:
             ToolCallState.ALLOWED if event.approved else ToolCallState.FINISHED,
         )
 
-        # 仍有未决 ASKING → 继续挂起（保持 PAUSED），返回 None
-        if MessageContext.tool_calls_in_state(context, ToolCallState.ASKING):
-            return None
-
-        # ASKING 已清空：交出挂起时保存的动作，供 run() 整批执行
-        action = self._paused_action
-        self._paused_action = None
-        return action
+        # 仍有未决 ASKING → 继续挂起（保持 PAUSED）；否则可整批收尾
+        return not MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)
 
     def cancel_nowait(self) -> None:
         """外部调用：取消当前执行。
@@ -513,9 +506,10 @@ class ReActRunner:
                         if isinstance(event, RequireUserConfirmEvent):
                             paused = True
                     if paused:
-                        # 权限挂起：保存本轮动作供恢复复用，置 PAUSED 状态后跳出循环。
+                        # 权限挂起：置 PAUSED 状态后跳出循环。
                         # 【不】finalize、【不】产 ReplyEnd——挂起不是回复结束。
-                        self._paused_action = action
+                        # 待恢复清单已随 ASKING 状态写入 context，恢复时从 context 重建，
+                        # 不在实例内存里保存动作（进程重启后也能恢复）。
                         self.state.status = RunStatus.PAUSED
                         return
                     # 清除 prev：工具执行后需要重新调 LLM 读取工具结果

@@ -22,7 +22,8 @@ from ...event import (
     AgentStreamEvent, ReplyEndEvent, HintBlockEvent, RequireUserConfirmEvent,
     ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent,
 )
-from ...message import ToolCallState, ToolResultState
+from ...llm import ToolCall
+from ...message import ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
 from ...message_context import MessageContext
 from ...permission import PermissionBehavior, PermissionRequest, PermissionRule
 from ...types import ReplyFinishedReason
@@ -31,7 +32,6 @@ from .tool_handler import ToolHandler
 
 if TYPE_CHECKING:
     from ...hooks import FtreCoreHookManager
-    from ...llm import ToolCall
     from ...permission import PermissionEngine
     from ._state import RunState
 
@@ -131,21 +131,30 @@ class ActingExecutor:
                 )
         # DENY 的调用保持 PENDING，不在此写结果——恢复阶段整批处理时统一写 DENIED。
 
-    async def resume_execute(
-        self, action: Acting
-    ) -> AsyncGenerator[AgentStreamEvent, None]:
-        """恢复阶段：所有 ASK 都已确认后，对整批 tool_call 统一收尾。
+    async def resume_execute(self) -> AsyncGenerator[AgentStreamEvent, None]:
+        """恢复阶段：从 context 重建待收尾的 tool_call 并统一处理。
 
-        此时 context 里的 ToolCallBlock 状态已由 react_runner 依据用户确认更新：
+        待收尾 = context 里尚无配对 tool_result 的 ToolCallBlock。它们的状态已由
+        react_runner 依据用户确认更新：
           - ALLOWED           → 执行工具，写 SUCCESS/ERROR 结果；
           - FINISHED（被拒绝）→ 不执行，写 DENIED 结果；
           - PENDING（DENY）   → 不执行，写 DENIED 结果。
 
+        不接收 action 参数——待执行清单完全从持久化的 context 重建，因此进程重启后
+        加载 state.json 也能恢复，不依赖任何实例内存。
         assistant(tool_calls) 消息在挂起时已写过，这里不再重复写。
         """
-        tool_calls = action.tool_calls
-        allowed = [tc for tc in tool_calls if self._call_state(tc.id) == ToolCallState.ALLOWED]
-        denied = [tc for tc in tool_calls if tc not in allowed]
+        pending_blocks = self._pending_tool_calls_from_context()
+        # ToolCallBlock → ToolCall（执行所需）
+        tool_calls = [
+            ToolCall(id=b.id, name=b.name, input=b.arguments or {})
+            for b in pending_blocks
+        ]
+        allowed_ids = {
+            b.id for b in pending_blocks if b.state == ToolCallState.ALLOWED
+        }
+        allowed = [tc for tc in tool_calls if tc.id in allowed_ids]
+        denied = [tc for tc in tool_calls if tc.id not in allowed_ids]
 
         # 已确认放行的调用：走原执行流程，但跳过 assistant 消息（挂起时已写）
         if allowed:
@@ -217,13 +226,31 @@ class ActingExecutor:
 
     def _call_state(self, tool_call_id: str) -> ToolCallState | None:
         """读取 context 里指定 tool_call（ToolCallBlock）的当前状态，找不到返回 None。"""
-        from ...message import ToolCallBlock
-
         for message in self.agent.state.context:
             for block in message.content:
                 if isinstance(block, ToolCallBlock) and block.id == tool_call_id:
                     return block.state
         return None
+
+    def _pending_tool_calls_from_context(self) -> list[ToolCallBlock]:
+        """从 context 重建"待收尾"的 ToolCallBlock 列表（保持出现顺序）。
+
+        待收尾 = 尚无配对 tool_result 的 tool_call。已经写过结果的 tool_call
+        （其 id 出现在某个 ToolResultBlock 上）视为已完成，跳过。这样恢复清单
+        完全由持久化 context 推导，不依赖任何实例内存或传入参数。
+        """
+        resulted_ids = {
+            block.id
+            for message in self.agent.state.context
+            for block in message.content
+            if isinstance(block, ToolResultBlock)
+        }
+        pending: list[ToolCallBlock] = []
+        for message in self.agent.state.context:
+            for block in message.content:
+                if isinstance(block, ToolCallBlock) and block.id not in resulted_ids:
+                    pending.append(block)
+        return pending
 
     async def _execute_calls(
         self, tool_calls: list["ToolCall"], write_assistant: bool = True
