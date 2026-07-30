@@ -256,7 +256,14 @@ class ReActRunner:
         prologue: AsyncGenerator[AgentStreamEvent, None] | None = None
 
         if isinstance(message, UserConfirmResultEvent):
-            # 恢复路径：处理确认（纯同步）。返回 False 表示仍有未决 ASKING，
+            # 恢复路径：先装配运行状态（供 tracing / session_id 使用），
+            # 再处理确认。runtime_context 由调用方按需传入；reply_id 由
+            # _accept_confirmation 从持久化 context 推导并回填。
+            self.state.runtime_context = runtime_context or {}
+            self.state.runtime_context.setdefault(
+                "max_iterations", self.agent.max_iterations,
+            )
+            # 处理确认（纯同步）。返回 False 表示仍有未决 ASKING，
             # 继续挂起、本次调用不进主循环。
             if not self._accept_confirmation(message):
                 return
@@ -411,18 +418,18 @@ class ReActRunner:
                 "Agent is not awaiting confirmation; "
                 "cannot accept a UserConfirmResultEvent."
             )
-        # 校验：reply_id 必须与挂起时一致
-        if event.reply_id != self.state.reply_id:
-            raise RuntimeError(
-                f"UserConfirmResultEvent.reply_id {event.reply_id!r} does not "
-                f"match the paused reply {self.state.reply_id!r}."
-            )
-        # 校验：tool_call_id 必须命中某个 ASKING 调用
+        # 校验：tool_call_id 必须命中某个 ASKING 调用（tool_call_id 唯一定位待恢复调用）
         if event.tool_call_id not in {b.id for b in asking}:
             raise RuntimeError(
                 f"UserConfirmResultEvent.tool_call_id {event.tool_call_id!r} "
                 f"is not awaiting confirmation."
             )
+        # 采信事件携带的 reply_id 并回填到运行状态：core 内部 assistant 消息的
+        # Msg.id 由 add_raw 生成，与 reply_id 无必然相等关系，无法从 context 反推；
+        # 而 reply_id 是调用方（从 RequireUserConfirmEvent）原样带回的权威值，
+        # 后续 resume_execute 与事件产出都需要用它保证事件归属到原回复。
+        if event.reply_id:
+            self.state.reply_id = event.reply_id
 
         # 应用确认：approved → ALLOWED；rejected → FINISHED（整批处理时写 DENIED）
         MessageContext.set_tool_call_state(

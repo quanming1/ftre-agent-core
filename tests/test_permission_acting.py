@@ -270,3 +270,79 @@ async def test_resume_execute_rebuilds_from_context_only():
 
     assert EventType.TOOL_RESULT_END in [e.type for e in events]
     assert "echo:hi" in str(agent.messages[-1].get("content", ""))
+
+
+@pytest.mark.asyncio
+async def test_resume_across_fresh_instance_via_persisted_context():
+    """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。
+
+    这是 Gateway "不保活" 方案的核心场景——挂起时销毁实例，用户确认时新建
+    实例并注入历史 context，靠持久化状态恢复，不依赖任何活实例内存。
+    """
+    from ftre_agent_core.llm import TextDelta, ToolCall as LLMToolCall, StepFinish
+    from ftre_agent_core.state import AgentState
+
+    rules = [PermissionRule(id="ask-echo", tool_name="echo", behavior=PermissionBehavior.ASK)]
+
+    # ── agent A：跑到 ASK 挂起 ──
+    agent_a = make_agent(rules=rules)
+
+    async def fake_stream_a(messages, tools=None):
+        yield LLMToolCall(id="c1", name="echo", input={"text": "hi"})
+        yield StepFinish(finish_reason="tool_calls")
+
+    agent_a.runner.llm.stream = fake_stream_a
+    confirm_events = []
+    async for ev in agent_a.run("请调用 echo", runtime_context={"session_id": "s1"}):
+        if ev.type == EventType.REQUIRE_USER_CONFIRM:
+            confirm_events.append(ev)
+    assert len(confirm_events) == 1
+    reply_id = confirm_events[0].reply_id
+    tool_call_id = confirm_events[0].tool_call_id
+
+    # ── 持久化往返：把 A 的 context 序列化再反序列化（模拟 state.json 存取）──
+    dumped = [m.model_dump(mode="json") for m in agent_a.state.context]
+    from ftre_agent_core.message import Msg
+    restored_context = [Msg.model_validate(d) for d in dumped]
+
+    # 确认 ASKING 状态在往返后仍存活
+    asking = MessageContext.tool_calls_in_state(restored_context, ToolCallState.ASKING)
+    assert [b.id for b in asking] == [tool_call_id]
+
+    # ── 全新 agent B：注入历史 context，恢复执行 ──
+    registry_b = ToolRegistry()
+
+    @tool(description="Echo text")
+    def echo(text: str) -> str:
+        return f"echo:{text}"
+    registry_b.register(echo)
+
+    state_b = AgentState(
+        context=restored_context,
+        permission_context={"permission_rules": [r.model_dump() for r in rules]},
+    )
+    agent_b = ReActAgent(
+        model="fake", api_key="fake", system_prompt="test",
+        tool_registry=registry_b, max_iterations=5, state=state_b,
+        permission_engine=PermissionEngine(),
+    )
+    # B 恢复后还要再调一次 LLM（读工具结果），给个文本收尾避免死循环
+    async def fake_stream_b(messages, tools=None):
+        yield TextDelta(text="完成")
+        yield StepFinish(finish_reason="stop")
+
+    agent_b.runner.llm.stream = fake_stream_b
+
+    result_events = []
+    async for ev in agent_b.run(
+        UserConfirmResultEvent(reply_id=reply_id, tool_call_id=tool_call_id, approved=True),
+        runtime_context={"session_id": "s1"},
+    ):
+        result_events.append(ev)
+
+    # 恢复后工具被执行、产出结果、回复正常结束
+    types = [e.type for e in result_events]
+    assert EventType.TOOL_RESULT_END in types
+    assert EventType.REPLY_END in types
+    assert "echo:hi" in str(agent_b.messages[-2].get("content", "")) or \
+           any("echo:hi" in str(m.get("content", "")) for m in agent_b.messages)
