@@ -45,7 +45,7 @@ async def test_single_tool_execution():
     assert EventType.TOOL_RESULT_END in types
 
     # 验证 memory 写入（assistant tool_calls + tool result）
-    msgs = agent.memory.messages
+    msgs = agent.messages
     last_msg = msgs[-1]
     # 最后一条应该是 tool result
     assert "echo:hello" in str(last_msg.get("content", ""))

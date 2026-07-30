@@ -6,8 +6,8 @@
 用户输入 → [LLM 思考 → 调用工具 → 观察结果] × N → 最终回复
 ```
 
-`ReActAgent` 是用户接口，`ReActRunner` 驱动 LLM 与工具，`MemoryManager`
-保存 provider 消息。
+`ReActAgent` 是用户接口，`ReActRunner` 驱动 LLM 与工具，`AgentState.context`
+保存可序列化的 `Msg`；`MessageContext` 负责转换和更新这些消息。
 
 ## 实时 Event 与消息 Msg
 
@@ -27,7 +27,7 @@ start/delta/end 生命周期；一次回复以 `REPLY_START` 开始、以 `REPLY
 
 ```
 run(messages)
-  ├── 写入 Memory
+  ├── 写入 AgentState.context
   ├── REPLY_START
   ├── MODEL_CALL_START
   ├── 内容块 / 工具调用 / 工具结果事件

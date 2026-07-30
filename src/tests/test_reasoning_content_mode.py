@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from ftre_agent_core.agent.runner.tool_handler import ToolHandler
 from ftre_agent_core.llm import ToolCall
-from ftre_agent_core.memory import MemoryManager
+from ftre_agent_core.message_context import MessageContext
+from ftre_agent_core.state import AgentState
 from ftre_agent_core.tool import ToolRegistry
 
 
-def test_memory_keeps_reasoning_separate_from_content():
-    memory = MemoryManager()
+def test_message_context_keeps_reasoning_separate_from_content():
+    state = AgentState()
 
-    memory.add_assistant("answer", reasoning="thinking")
+    MessageContext.add_assistant(state.context, "answer", reasoning="thinking")
 
-    assert memory.messages == [
+    assert MessageContext.messages(state.context) == [
         {
             "role": "assistant",
             "content": [

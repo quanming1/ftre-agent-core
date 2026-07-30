@@ -2,7 +2,10 @@
 """RunState / RunStatus / CancelledError 单元测试。"""
 import asyncio
 import pytest
+from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.agent.runner._state import RunState, RunStatus, CancelledError
+from ftre_agent_core.message import UserMsg
+from ftre_agent_core.state import AgentState
 from ftre_agent_core.types import ReplyFinishedReason
 
 
@@ -70,3 +73,31 @@ def test_run_state_is_done():
         assert state.is_done is True
     state.status = RunStatus.RUNNING
     assert state.is_done is False
+
+
+def test_agent_state_context_defaults_are_isolated():
+    first = AgentState()
+    second = AgentState()
+
+    first.context.append(UserMsg(content="hello"))
+
+    assert len(first.context) == 1
+    assert second.context == []
+
+
+def test_agent_state_json_round_trip_restores_typed_messages():
+    state = AgentState(context=[UserMsg(content="hello")])
+
+    restored = AgentState.model_validate(state.model_dump(mode="json"))
+
+    assert isinstance(restored.context[0], type(state.context[0]))
+    assert restored.context[0].get_text_content() == "hello"
+
+
+def test_react_agent_uses_injected_state_and_exposes_run_state():
+    state = AgentState(context=[UserMsg(content="existing")])
+    agent = ReActAgent(model="fake", api_key="fake", state=state)
+
+    assert agent.state is state
+    assert agent.run_state is agent.runner.state
+    assert agent.messages[0]["role"] == "user"

@@ -1,4 +1,5 @@
 from .react import ReActAgent
+from ..state import AgentState
 from ..event import (
     EventType,
     EventBase,
@@ -56,6 +57,7 @@ from ..hooks import (
 
 __all__ = [
     "ReActAgent",
+    "AgentState",
     # Event
     "EventType",
     "EventBase",

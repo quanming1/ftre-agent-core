@@ -13,7 +13,7 @@ ReActAgent(
     max_iterations: int | None = None,
     max_tokens: int | None = None,
     reasoning_effort: str = "",
-    memory: MemoryManager | None = None,
+    state: AgentState | None = None,
     max_retries: int = 5,
     retry_delay: float = 3.0,
     tracer: Tracer | None = None,

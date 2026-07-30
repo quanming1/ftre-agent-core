@@ -35,7 +35,7 @@ async def test_turn_id_from_runtime_context():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("hi", runtime_context={"turn_id": "turn_test123"})]
 
-    assert agent.state.turn_id == "turn_test123"
+    assert agent.run_state.turn_id == "turn_test123"
 
 
 # ── Step 10: 无 turn_id 时自动生成 ────────────────────────────────────────
@@ -52,8 +52,8 @@ async def test_turn_id_auto_generated():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("hi")]
 
-    assert agent.state.turn_id.startswith("turn_")
-    assert len(agent.state.turn_id) > 5
+    assert agent.run_state.turn_id.startswith("turn_")
+    assert len(agent.run_state.turn_id) > 5
 
 
 # ── Step 11: 正常完成 → done_reason=COMPLETED ─────────────────────────────
@@ -70,8 +70,8 @@ async def test_done_reason_completed():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
-    assert agent.state.status == RunStatus.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.status == RunStatus.COMPLETED
 
 
 # ── Step 12: max_iterations 耗尽 → done_reason=MAX_ITERATIONS ────────────
@@ -93,8 +93,8 @@ async def test_done_reason_max_iterations():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
-    assert agent.state.status == RunStatus.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
+    assert agent.run_state.status == RunStatus.COMPLETED
 
 
 # ── Step 13: LLM 错误 → done_reason=ERROR + error_code ───────────────────
@@ -111,11 +111,11 @@ async def test_done_reason_error():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.ERROR
-    assert agent.state.status == RunStatus.ERROR
-    assert agent.state.error_code == "bad_request"
-    assert agent.state.error is not None
-    assert "bad_request" in agent.state.error
+    assert agent.run_state.done_reason == ReplyFinishedReason.ERROR
+    assert agent.run_state.status == RunStatus.ERROR
+    assert agent.run_state.error_code == "bad_request"
+    assert agent.run_state.error is not None
+    assert "bad_request" in agent.run_state.error
 
 
 

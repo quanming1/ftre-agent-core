@@ -55,8 +55,8 @@ async def test_text_only_turn():
     assert EventType.TEXT_BLOCK_DELTA in types
     assert EventType.TEXT_BLOCK_END in types
     assert EventType.MODEL_CALL_END in types
-    assert len(agent.memory.messages) == 1
-    assert agent.memory.messages[0]["role"] == "assistant"
+    assert len(agent.messages) == 1
+    assert agent.messages[0]["role"] == "assistant"
 
 
 @pytest.mark.asyncio

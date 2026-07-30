@@ -52,7 +52,7 @@ async def test_agent_trace_records_llm_and_tool_run_tree():
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
     root = next(run for run in exporter.runs.values() if run.run_type == RunType.AGENT)
     runs = exporter.get_trace(root.trace_id)
     llm_runs = [run for run in runs if run.run_type == RunType.LLM]
@@ -86,7 +86,7 @@ async def test_process_text_with_stop_is_observable_as_legal_completion():
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
     llm_run = next(run for run in exporter.runs.values() if run.run_type == RunType.LLM)
     assert llm_run.status == RunStatus.COMPLETED
     assert llm_run.outputs["text"] == "我现在开始执行。"
@@ -128,4 +128,4 @@ async def test_exporter_failure_does_not_break_agent_run():
 
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED

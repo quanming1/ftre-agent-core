@@ -38,7 +38,7 @@ async def test_simple_text_reply():
     types = [e.type for e in events]
     assert types.count(EventType.REPLY_START) == 1
     assert types.count(EventType.REPLY_END) == 1
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_tool_call_then_text():
     assert types.count(EventType.REPLY_START) == 1
     assert types.count(EventType.REPLY_END) == 1
     assert EventType.TOOL_RESULT_END in types
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -86,7 +86,7 @@ async def test_max_iterations():
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("loop")]
 
-    assert agent.state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
+    assert agent.run_state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
 
 
 @pytest.mark.asyncio
@@ -106,7 +106,7 @@ async def test_cancel_via_task_cancel():
     agent.cancel_nowait()
 
     events = await task
-    assert agent.state.done_reason == ReplyFinishedReason.INTERRUPTED
+    assert agent.run_state.done_reason == ReplyFinishedReason.INTERRUPTED
     types = [e.type for e in events]
     assert EventType.REPLY_END in types
 

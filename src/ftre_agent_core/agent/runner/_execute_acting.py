@@ -23,6 +23,7 @@ from ...event import (
     ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent,
 )
 from ...message import ToolResultState
+from ...message_context import MessageContext
 from ...types import ReplyFinishedReason
 from ._state import Acting, Exit, ExitOutcome, RunStatus, CancelledError
 from .tool_handler import ToolHandler
@@ -105,10 +106,11 @@ class ActingExecutor:
         # OpenAI / Anthropic 协议要求 role="tool" 的结果消息紧跟在带 tool_calls 的
         # assistant 消息之后、且同组的 tool 结果必须连续；若 assistant 消息缺失或
         # 顺序颠倒，后续 LLM 上下文会出现“无主 tool 消息”，直接违反协议导致报错。
-        self.agent.memory.add_raw(
+        MessageContext.add_raw(
+            self.agent.state.context,
             self.tool_handler.build_assistant_message(
                 tool_calls=tool_calls,
-            )
+            ),
         )
 
         # 工具可能返回事件对象（ToolResult.event，如 HintBlockEvent）而非纯文本，
@@ -118,8 +120,11 @@ class ActingExecutor:
 
         for tc, result in zip(tool_calls, results):
             # 写入这一条 tool 结果（role="tool"），与上面的 assistant 消息配对
-            self.agent.memory.add_tool_result(
-                tc.id, result.result or f"[{tc.name}] 已完成"
+            MessageContext.add_tool_result(
+                self.agent.state.context,
+                tc.id,
+                result.result or f"[{tc.name}] 已完成",
+                name=tc.name,
             )
 
             # 产出工具结果事件三元组：Start → (TextDelta) → End
@@ -150,7 +155,7 @@ class ActingExecutor:
                 content = ev.hint if isinstance(ev.hint, str) else str(ev.hint)
             else:
                 content = str(ev)
-            self.agent.memory.add_raw({"role": "user", "content": content})
+            MessageContext.add_raw(self.agent.state.context, {"role": "user", "content": content})
             yield HintBlockEvent(
                 reply_id=reply_id,
                 block_id=uuid.uuid4().hex[:16],
@@ -241,7 +246,7 @@ class ExitExecutor:
             #      continue 进入下一轮迭代；本方法提前 return，不产出 ReplyEndEvent、不设终态。
             if stop_output is not None and stop_output.decision == "block":
                 hint = stop_output.reason or "继续工作。"
-                self.agent.memory.add_raw({"role": "user", "content": hint})
+                MessageContext.add_raw(self.agent.state.context, {"role": "user", "content": hint})
                 yield HintBlockEvent(
                     reply_id=reply_id,
                     block_id=uuid.uuid4().hex[:16],

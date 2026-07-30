@@ -10,6 +10,8 @@ from .tracing import (
     TraceSpan,
     Tracer,
 )
+from .message_context import MessageContext
+from .state import AgentState
 from .hooks import (
     FtreCoreHookManager,
     HookInput,
@@ -30,6 +32,8 @@ from .hooks import (
 )
 
 __all__ = [
+    "AgentState",
+    "MessageContext",
     "Tracer",
     "TraceSpan",
     "TraceRun",

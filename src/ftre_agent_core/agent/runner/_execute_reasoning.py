@@ -36,6 +36,7 @@ from ...event import (
     RetryEvent,
 )
 from ...llm import LLMHandler, LLMError, TextDelta, ReasoningDelta, ToolInputDelta, ToolCall, StepFinish
+from ...message_context import MessageContext
 from ...tracing import RunType, RunStatus as TraceRunStatus
 from ._state import Reasoning, TurnResult
 
@@ -135,7 +136,10 @@ class ReasoningExecutor:
         # 对模型可见；否则模型无法据此调整行为。同时向下游发一个 HintBlockEvent，
         # 标记 hide/internal 以便 UI 层隐藏渲染。
         if action.hint:
-            self.agent.memory.add_raw({"role": "user", "content": action.hint})
+            MessageContext.add_raw(
+                self.agent.state.context,
+                {"role": "user", "content": action.hint},
+            )
             yield HintBlockEvent(
                 reply_id=reply_id,
                 block_id=uuid.uuid4().hex[:16],
@@ -148,7 +152,7 @@ class ReasoningExecutor:
         # messages 取 memory 的最新快照（hint 写入后已包含在内）。
         # tools 为 None 的两种情况：force_no_tools=True（强制纯文本对话）或
         # tool_registry 为空（没有可用工具）；其余情况转为 OpenAI 工具描述列表。
-        messages = self.agent.memory.get_messages()
+        messages = MessageContext.get_messages(self.agent.state.context, self.agent.system_prompt)
         tools = None if action.force_no_tools else self.agent.tool_registry.to_openai_tools() or None
 
         # 重试上限 = 首次尝试 + 配置的重试次数
@@ -299,7 +303,7 @@ class ReasoningExecutor:
                     })
 
                 # 写入 memory：assistant 消息，reasoning 存入 metadata（不进入正文）
-                self.agent.memory.add_assistant(full_text, reasoning=full_reasoning or None)
+                MessageContext.add_assistant(self.agent.state.context, full_text, reasoning=full_reasoning or None)
 
                 # 组装成功的 TurnResult 写入 self.result，结束本轮
                 self.result = TurnResult(
@@ -329,7 +333,7 @@ class ReasoningExecutor:
                 _full_text = "".join(text_parts)
                 _full_reasoning = "".join(reasoning_parts)
                 if _full_text.strip():
-                    self.agent.memory.add_assistant(_full_text, reasoning=_full_reasoning or None)
+                    MessageContext.add_assistant(self.agent.state.context, _full_text, reasoning=_full_reasoning or None)
                 raise
 
             # ── 阶段 6b：其他异常路径 ─────────────────────────────────────────
@@ -351,7 +355,7 @@ class ReasoningExecutor:
                 _full_text = "".join(text_parts)
                 _full_reasoning = "".join(reasoning_parts)
                 if _full_text.strip():
-                    self.agent.memory.add_assistant(_full_text, reasoning=_full_reasoning or None)
+                    MessageContext.add_assistant(self.agent.state.context, _full_text, reasoning=_full_reasoning or None)
 
                 # 错误归类：已是 LLMError 直接用，否则用 LLMError.classify 推断 code
                 err = exc if isinstance(exc, LLMError) else LLMError.classify(exc)
@@ -385,7 +389,7 @@ class ReasoningExecutor:
                 # 退避等待后进入下一轮
                 await asyncio.sleep(self.agent.retry_delay)
                 # 重新读取 messages（memory 可能在等待期间被改动）
-                messages = self.agent.memory.get_messages()
+                messages = MessageContext.get_messages(self.agent.state.context, self.agent.system_prompt)
                 # 重置收集器，避免上一轮的半截内容污染下一轮
                 text_parts = []
                 reasoning_parts = []

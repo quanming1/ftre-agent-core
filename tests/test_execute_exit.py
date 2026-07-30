@@ -74,7 +74,7 @@ async def test_on_stop_block_returns_continue():
     types = [e.type for e in events]
     assert EventType.REPLY_END not in types
     assert EventType.HINT_BLOCK in types
-    msgs = agent.memory.messages
+    msgs = agent.messages
     assert any("keep working" in str(m.get("content", "")) for m in msgs)
 
 

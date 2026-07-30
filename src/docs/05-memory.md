@@ -1,24 +1,33 @@
-# Memory
+# Agent state and message context
 
-`MemoryManager` 管理发给 provider 的消息列表。
+`AgentState` owns the serializable conversation context. `MessageContext` is a
+stateless helper that reads and updates that caller-owned list.
 
 ```python
-from ftre_agent_core.memory import MemoryManager
+from ftre_agent_core import AgentState, MessageContext
 
-memory = MemoryManager({"system_prompt": "你是助手"})
-memory.add_user("你好")
-memory.add_assistant("你好！")
-memory.add_tool_result(tool_call_id="call_123", content="结果")
-memory.add_raw({"role": "assistant", "content": "", "tool_calls": []})
+state = AgentState()
+MessageContext.add_user(state.context, "你好")
+MessageContext.add_assistant(state.context, "你好！")
+MessageContext.add_tool_result(
+    state.context,
+    tool_call_id="call_123",
+    content="结果",
+)
+MessageContext.add_raw(
+    state.context,
+    {"role": "assistant", "content": "", "tool_calls": []},
+)
 
-messages = memory.get_messages()
-memory.clear()
+messages = MessageContext.get_messages(state.context, system_prompt="你是助手")
+MessageContext.clear(state.context)
 ```
 
-Token 用量由 `MODEL_CALL_END` 的 `prompt_tokens`、`completion_tokens` 和
-`total_tokens` 提供，并由 `Msg.append_event()` 聚合到 `Msg.token`：
+`AgentState.model_dump(mode="json")` produces persistable data and
+`AgentState.model_validate(data)` restores typed `Msg` objects.
 
-- `token.usage`：当前 Reply 内所有 LLM Call 的累计用量；
-- `token.last_call_usage`：最后一次 LLM Call 的真实用量。
+Token usage is supplied by `MODEL_CALL_END` and aggregated by
+`Msg.append_event()` into `Msg.token`:
 
-Memory 是运行时 provider 消息容器；长期存储应保存 `Msg` 快照。
+- `token.usage`: total usage of all LLM calls in the current reply;
+- `token.last_call_usage`: usage reported by the final successful LLM call.

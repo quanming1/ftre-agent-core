@@ -306,7 +306,7 @@ async def test_on_stop_hook_blocks_and_continues():
     assert hook_calls == 2
 
     # memory 中应该有：user(start) → assistant(working) → user(continuation) → assistant(done)
-    msgs = agent.memory.messages
+    msgs = agent.messages
     assert msgs[0]["role"] == "user"
     assert _content_text(msgs[0]["content"]) == "start"
     assert msgs[1]["role"] == "assistant"
@@ -315,7 +315,7 @@ async def test_on_stop_hook_blocks_and_continues():
     assert msgs[3]["role"] == "assistant"
 
     # 验证最终状态（agent-core 不再产出 Step 事件，通过 state 检查）
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -341,7 +341,7 @@ async def test_on_stop_hook_allow_lets_agent_stop():
     events = [e async for e in agent.run("start")]
 
     assert hook_calls == 1
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -459,7 +459,7 @@ async def test_on_turn_start_injects_message():
     # 注入的消息应该在 memory 中
     contents = [
         _content_text(m.get("content"))
-        for m in agent.memory.messages
+        for m in agent.messages
         if m["role"] == "user"
     ]
     assert "reminder: check tests" in contents
@@ -479,7 +479,7 @@ async def test_on_turn_start_no_injection_when_no_hook():
     events = [e async for e in agent.run("start")]
 
     # 只有一条用户消息（原始输入）
-    user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
+    user_msgs = [m for m in agent.messages if m["role"] == "user"]
     assert len(user_msgs) == 1
     assert _content_text(user_msgs[0]["content"]) == "start"
 
@@ -596,7 +596,7 @@ async def test_multiple_stop_hooks_chain():
 
     assert call_count == 3
     # memory 中应该有 2 条 continuation prompt
-    user_msgs = [m for m in agent.memory.messages if m["role"] == "user"]
+    user_msgs = [m for m in agent.messages if m["role"] == "user"]
     # 1 个原始 + 2 个 continuation
     assert len(user_msgs) == 3
     assert "continue (attempt 1)" in _content_text(user_msgs[1]["content"])
@@ -635,8 +635,8 @@ async def test_goal_simulation_block_twice_then_allow():
     assert call_count == 3
     assert hook_iterations == [1, 2, 3]
 
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
-    assert agent.state.iteration == 3
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.iteration == 3
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -62,7 +62,7 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
     events = [event async for event in agent.run("start")]
 
     assert calls == 2
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -104,7 +104,7 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
     events = [event async for event in agent.run("start")]
 
     assert calls == 4
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -125,7 +125,7 @@ async def test_unknown_finish_with_text_completes(caplog):
         events = [event async for event in agent.run("start")]
 
     assert calls == 1
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -177,7 +177,7 @@ async def test_tool_call_turn_produces_tool_result_events():
     assert calls == 2
     tool_results = [e for e in events if e.type == EventType.TOOL_RESULT_END]
     assert len(tool_results) == 1
-    assert agent.state.done_reason == ReplyFinishedReason.COMPLETED
+    assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
 
 
 @pytest.mark.asyncio

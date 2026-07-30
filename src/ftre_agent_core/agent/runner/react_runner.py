@@ -40,6 +40,7 @@ from ...event import AgentStreamEvent, ReplyStartEvent, ReplyEndEvent
 from ...tracing import RunStatus as TraceRunStatus, RunType
 from ...types import ReplyFinishedReason
 from ...llm import LLMHandler
+from ...message_context import MessageContext
 from ._state import Reasoning, Acting, Exit, TurnResult, RunState, RunStatus, CancelledError
 from ._execute_acting import ActingExecutor, ExitExecutor
 from ._execute_reasoning import ReasoningExecutor
@@ -277,13 +278,13 @@ class ReActRunner:
             tags=list(trace_tags),
         )
 
-        # ── 将用户消息写入 Memory ──
+        # ── 将用户消息写入 AgentState.context ──
         if isinstance(message, str):
-            self.agent.memory.add_user(message)
+            MessageContext.add_user(self.agent.state.context, message)
         else:
-            # 列表形式：原样写入 memory（含 system 消息等）
+            # 列表形式：原样写入 context（含 system 消息等）
             for msg in message:
-                self.agent.memory.add_raw(msg)
+                MessageContext.add_raw(self.agent.state.context, msg)
 
         # ── 产出 ReplyStartEvent（一次 run() 只产一次）──
         reply_id = uuid.uuid4().hex[:16]
@@ -451,13 +452,15 @@ class ReActRunner:
                 session_id=self.state.runtime_context.get("session_id", ""),
                 turn_id=self.state.turn_id,
                 iteration=self.state.iteration,
-                messages=self.agent.memory.get_messages(),
+                messages=MessageContext.get_messages(
+                    self.agent.state.context, self.agent.system_prompt
+                ),
                 runtime_context=self.state.runtime_context,
             ),
         )
         if ts_output is not None and isinstance(ts_output, TurnStartOutput):
             for msg in ts_output.inject_messages:
-                self.agent.memory.add_raw(msg)
+                MessageContext.add_raw(self.agent.state.context, msg)
 
     async def _trigger_on_turn_end(self) -> None:
         """触发 on_turn_end hook（只读观察）。
