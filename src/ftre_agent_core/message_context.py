@@ -5,6 +5,8 @@ from .message import (
     Msg,
     MsgName,
     TextBlock,
+    ToolCallBlock,
+    ToolCallState,
     ToolResultBlock,
     ToolResultState,
     from_openai_message,
@@ -60,7 +62,11 @@ class MessageContext:
 
     @staticmethod
     def add_tool_result(
-        context: list[Msg], tool_call_id: str, content: str, **kwargs
+        context: list[Msg],
+        tool_call_id: str,
+        content: str,
+        state: ToolResultState = ToolResultState.SUCCESS,
+        **kwargs,
     ) -> None:
         context.append(
             Msg(
@@ -70,7 +76,7 @@ class MessageContext:
                         id=tool_call_id,
                         name=kwargs.get("name", ""),
                         output=content,
-                        state=ToolResultState.SUCCESS,
+                        state=state,
                     )
                 ],
                 role="assistant",
@@ -90,6 +96,38 @@ class MessageContext:
             context.append(Msg(name=MsgName.DEFAULT, content=blocks, role=role))
             return
         context.append(message)
+
+    @staticmethod
+    def set_tool_call_state(
+        context: list[Msg], tool_call_id: str, state: ToolCallState
+    ) -> bool:
+        """把 context 里指定 tool_call 的 ToolCallBlock 状态改为 ``state``。
+
+        权限流程用它标记工具调用的生命周期：挂起时置 ASKING，用户确认后置
+        ALLOWED，拒绝或了结后置 FINISHED。返回是否找到并修改了对应 block。
+        """
+        for message in context:
+            for block in message.content:
+                if isinstance(block, ToolCallBlock) and block.id == tool_call_id:
+                    block.state = state
+                    return True
+        return False
+
+    @staticmethod
+    def tool_calls_in_state(
+        context: list[Msg], state: ToolCallState
+    ) -> list[ToolCallBlock]:
+        """收集 context 里处于指定状态的全部 ToolCallBlock（保持出现顺序）。
+
+        用于恢复阶段：读出仍 ASKING 的调用判断是否还需暂停，或读出 ALLOWED
+        的调用交给 resume_execute 整批执行。
+        """
+        found: list[ToolCallBlock] = []
+        for message in context:
+            for block in message.content:
+                if isinstance(block, ToolCallBlock) and block.state == state:
+                    found.append(block)
+        return found
 
     @staticmethod
     def clear(context: list[Msg]) -> None:

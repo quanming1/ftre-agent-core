@@ -36,10 +36,14 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, AsyncGenerator
 
-from ...event import AgentStreamEvent, ReplyStartEvent, ReplyEndEvent
+from ...event import (
+    AgentStreamEvent, ReplyStartEvent, ReplyEndEvent,
+    RequireUserConfirmEvent, UserConfirmResultEvent,
+)
 from ...tracing import RunStatus as TraceRunStatus, RunType
 from ...types import ReplyFinishedReason
-from ...llm import LLMHandler
+from ...llm import LLMHandler, ToolCall
+from ...message import ToolCallBlock, ToolCallState
 from ...message_context import MessageContext
 from ._state import Reasoning, Acting, Exit, TurnResult, RunState, RunStatus, CancelledError
 from ._execute_acting import ActingExecutor, ExitExecutor
@@ -205,6 +209,10 @@ class ReActRunner:
         )
         # 工具并发调度、取消传播和结果归并
         self._tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
+        # 权限决策引擎（由 Agent 提供，可能为 None = 不启用权限检查）
+        self._permission_engine = agent.permission_engine
+        # 挂起时保存本轮 Acting 动作，供恢复阶段整批执行时复用
+        self._paused_action: Acting | None = None
 
     @property
     def llm(self) -> LLMHandler:
@@ -221,9 +229,14 @@ class ReActRunner:
         message,
         runtime_context: dict | None = None,
     ) -> AsyncGenerator[AgentStreamEvent, None]:
-        """启动一次完整的 ReAct 执行。
+        """启动一次 ReAct 执行，或从权限挂起中恢复。
 
-        一次 run() 的生命周期：
+        按输入 message 的类型分流：
+          - UserConfirmResultEvent → 恢复路径：不重置状态、不写用户消息、
+            复用挂起时的 reply_id，处理确认后继续；
+          - 其它（str / 消息列表）→ 新回复路径：完整生命周期。
+
+        新回复的生命周期：
           1. 并发锁检查 + 记录当前 Task
           2. 初始化 RunState（start()）
           3. 开启 Tracing 根 span
@@ -234,12 +247,104 @@ class ReActRunner:
           8. finally 中关闭 Tracing span + 释放运行锁
 
         Args:
-            message: 用户消息（字符串或消息列表）。
+            message: 用户消息（字符串或消息列表），或 UserConfirmResultEvent（恢复）。
             runtime_context: 调用方上下文（session_id、tracing 元数据等）。
 
         Yields:
             AgentStreamEvent: 回复过程中的所有流式事件。
         """
+        # ── 准备阶段：按输入类型分流，产出 prologue（主循环前的前置事件流）──
+        # prologue 为 None 表示无前置事件；恢复路径下它是整批工具收尾的事件流。
+        prologue: AsyncGenerator[AgentStreamEvent, None] | None = None
+
+        if isinstance(message, UserConfirmResultEvent):
+            # 恢复路径：处理确认（纯同步）。返回 None 表示仍有未决 ASKING，
+            # 继续挂起、本次调用不进主循环。
+            action = self._accept_confirmation(message)
+            if action is None:
+                return
+            # ASKING 已清空：以整批收尾事件作为 prologue，随后进主循环。
+            self._run_task = asyncio.current_task()
+            self.state.status = RunStatus.RUNNING
+            acting_executor = ActingExecutor(
+                self.agent, self.state, self._tool_handler, self._permission_engine,
+            )
+            prologue = acting_executor.resume_execute(action)
+        else:
+            # 新回复路径：入口校验 + 初始化状态 + 写用户消息 + 产 ReplyStart。
+            self._prepare_new_reply(message, runtime_context)
+            yield ReplyStartEvent(
+                session_id=self.state.runtime_context.get("session_id", ""),
+                reply_id=self.state.reply_id,
+                name=self.agent.model,
+            )
+
+        # ── 主循环 + 统一异常/收尾处理（新回复与恢复共用这一处）──
+        session_id = self.state.runtime_context.get("session_id", "")
+        reply_id = self.state.reply_id
+        try:
+            if prologue is not None:
+                async for event in prologue:
+                    yield event
+
+            async for event in self._loop():
+                yield event
+
+        except asyncio.CancelledError:
+            # 取消路径：_finalize 设置 INTERRUPTED 状态，产出 ReplyEnd
+            self._finalize(ReplyFinishedReason.INTERRUPTED)
+            yield ReplyEndEvent(
+                session_id=session_id, reply_id=reply_id,
+                finished_reason=ReplyFinishedReason.INTERRUPTED,
+            )
+
+        except Exception:
+            # 异常路径：_finalize 设置 ERROR 状态，产出 ReplyEnd
+            self._finalize(ReplyFinishedReason.ERROR)
+            yield ReplyEndEvent(
+                session_id=session_id, reply_id=reply_id,
+                finished_reason=ReplyFinishedReason.ERROR,
+                error={"message": str(self.state.error or "Unknown error")},
+            )
+            raise
+
+        finally:
+            # Tracing 收尾：依据 RunState.status 映射 trace 状态并关闭根 span。
+            # PAUSED 例外——权限挂起不是终态，span 要保持开着供恢复阶段复用，不在此关闭。
+            if (
+                self.state.status != RunStatus.PAUSED
+                and self.state.trace_span
+                and not self.state.trace_span.ended
+            ):
+                self.state.trace_span.end(
+                    status=_TRACE_STATUS.get(self.state.status, TraceRunStatus.ERROR),
+                    outputs={
+                        "success": self.state.status == RunStatus.COMPLETED,
+                        "done_reason": self.state.done_reason,
+                        "iterations": self.state.iteration,
+                    },
+                    error=self.state.error if self.state.status == RunStatus.ERROR else None,
+                )
+            # 释放运行锁。挂起时也释放，使恢复调用能重新获取（恢复走独立入口）。
+            self._run_task = None
+
+    def _prepare_new_reply(self, message, runtime_context: dict | None) -> None:
+        """新回复的准备阶段（纯同步）：入口校验、初始化状态、开 span、写用户消息。
+
+        完成后 self.state 已 start()、trace_span 已开启、用户消息已写入 context、
+        reply_id 已生成。ReplyStartEvent 由调用方 run() 负责产出。
+        """
+        # ── 入口校验：处于挂起态时，非确认输入一律拒绝 ──
+        # 只要 context 里还有 ASKING 的工具调用，就必须先用 UserConfirmResultEvent
+        # 解决它，不能用新消息覆盖挂起。
+        if MessageContext.tool_calls_in_state(
+            self.agent.state.context, ToolCallState.ASKING
+        ):
+            raise RuntimeError(
+                "Agent is awaiting permission confirmation; "
+                "send a UserConfirmResultEvent, not a new message."
+            )
+
         # ── 并发锁：同一 Agent 禁止并发 run() ──
         if self._run_task is not None and not self._run_task.done():
             raise RuntimeError("Agent is already running")
@@ -286,53 +391,55 @@ class ReActRunner:
             for msg in message:
                 MessageContext.add_raw(self.agent.state.context, msg)
 
-        # ── 产出 ReplyStartEvent（一次 run() 只产一次）──
-        reply_id = uuid.uuid4().hex[:16]
-        self.state.reply_id = reply_id
-        session_id = self.state.runtime_context.get("session_id", "")
-        model_name = self.agent.model
+        # ── 生成 reply_id（一次 run() 只产一次 ReplyStartEvent，由 run() 负责）──
+        self.state.reply_id = uuid.uuid4().hex[:16]
 
-        yield ReplyStartEvent(
-            session_id=session_id, reply_id=reply_id, name=model_name,
+    def _accept_confirmation(self, event: UserConfirmResultEvent) -> Acting | None:
+        """处理一条用户确认结果（纯同步，不产事件）。
+
+        返回值：
+          - None  → 仍有未决 ASKING，继续挂起，本次调用不进主循环；
+          - Acting → ASKING 已全部清空，返回挂起时保存的整批动作，供 run() 恢复执行。
+
+        校验失败（非挂起态 / reply_id 或 tool_call_id 不匹配）直接抛 RuntimeError。
+        """
+        context = self.agent.state.context
+        asking = MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)
+
+        # 校验：非挂起态收到确认 → 拒绝
+        if not asking:
+            raise RuntimeError(
+                "Agent is not awaiting confirmation; "
+                "cannot accept a UserConfirmResultEvent."
+            )
+        # 校验：reply_id 必须与挂起时一致
+        if event.reply_id != self.state.reply_id:
+            raise RuntimeError(
+                f"UserConfirmResultEvent.reply_id {event.reply_id!r} does not "
+                f"match the paused reply {self.state.reply_id!r}."
+            )
+        # 校验：tool_call_id 必须命中某个 ASKING 调用
+        if event.tool_call_id not in {b.id for b in asking}:
+            raise RuntimeError(
+                f"UserConfirmResultEvent.tool_call_id {event.tool_call_id!r} "
+                f"is not awaiting confirmation."
+            )
+
+        # 应用确认：approved → ALLOWED；rejected → FINISHED（整批处理时写 DENIED）
+        MessageContext.set_tool_call_state(
+            context,
+            event.tool_call_id,
+            ToolCallState.ALLOWED if event.approved else ToolCallState.FINISHED,
         )
 
-        # ── 主循环 + 异常/收尾处理 ──
-        try:
-            async for event in self._loop():
-                yield event
+        # 仍有未决 ASKING → 继续挂起（保持 PAUSED），返回 None
+        if MessageContext.tool_calls_in_state(context, ToolCallState.ASKING):
+            return None
 
-        except asyncio.CancelledError:
-            # 取消路径：_finalize 设置 INTERRUPTED 状态，产出 ReplyEnd
-            self._finalize(ReplyFinishedReason.INTERRUPTED)
-            yield ReplyEndEvent(
-                session_id=session_id, reply_id=reply_id,
-                finished_reason=ReplyFinishedReason.INTERRUPTED,
-            )
-
-        except Exception:
-            # 异常路径：_finalize 设置 ERROR 状态，产出 ReplyEnd
-            self._finalize(ReplyFinishedReason.ERROR)
-            yield ReplyEndEvent(
-                session_id=session_id, reply_id=reply_id,
-                finished_reason=ReplyFinishedReason.ERROR,
-                error={"message": str(self.state.error or "Unknown error")},
-            )
-            raise
-
-        finally:
-            # Tracing 收尾：依据 RunState.status 映射 trace 状态并关闭根 span
-            if self.state.trace_span and not self.state.trace_span.ended:
-                self.state.trace_span.end(
-                    status=_TRACE_STATUS.get(self.state.status, TraceRunStatus.ERROR),
-                    outputs={
-                        "success": self.state.status == RunStatus.COMPLETED,
-                        "done_reason": self.state.done_reason,
-                        "iterations": self.state.iteration,
-                    },
-                    error=self.state.error if self.state.status == RunStatus.ERROR else None,
-                )
-            # 释放运行锁
-            self._run_task = None
+        # ASKING 已清空：交出挂起时保存的动作，供 run() 整批执行
+        action = self._paused_action
+        self._paused_action = None
+        return action
 
     def cancel_nowait(self) -> None:
         """外部调用：取消当前执行。
@@ -373,7 +480,7 @@ class ReActRunner:
             self.agent, self.state, self._llm, self.agent.hook_manager,
         )
         acting_executor = ActingExecutor(
-            self.agent, self.state, self._tool_handler,
+            self.agent, self.state, self._tool_handler, self._permission_engine,
         )
         exit_executor = ExitExecutor(
             self.agent, self.state, self.agent.hook_manager,
@@ -396,10 +503,21 @@ class ReActRunner:
                     prev = reasoning_executor.result
 
                 elif isinstance(action, Acting):
-                    # ── Acting：执行工具 ──
-                    # 并发执行所有工具调用，成组写入 Memory
+                    # ── Acting：执行工具（或因权限挂起）──
+                    # 并发执行所有工具调用，成组写入 Memory。
+                    # 若本轮存在 ASK/DENY，stream 会 yield RequireUserConfirmEvent
+                    # 表示整批挂起、未执行任何工具。
+                    paused = False
                     async for event in acting_executor.stream(action):
                         yield event
+                        if isinstance(event, RequireUserConfirmEvent):
+                            paused = True
+                    if paused:
+                        # 权限挂起：保存本轮动作供恢复复用，置 PAUSED 状态后跳出循环。
+                        # 【不】finalize、【不】产 ReplyEnd——挂起不是回复结束。
+                        self._paused_action = action
+                        self.state.status = RunStatus.PAUSED
+                        return
                     # 清除 prev：工具执行后需要重新调 LLM 读取工具结果
                     prev = None
 

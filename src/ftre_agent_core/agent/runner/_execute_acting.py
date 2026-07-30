@@ -19,17 +19,20 @@ import uuid
 from typing import TYPE_CHECKING, AsyncGenerator
 
 from ...event import (
-    AgentStreamEvent, ReplyEndEvent, HintBlockEvent,
+    AgentStreamEvent, ReplyEndEvent, HintBlockEvent, RequireUserConfirmEvent,
     ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent,
 )
-from ...message import ToolResultState
+from ...message import ToolCallState, ToolResultState
 from ...message_context import MessageContext
+from ...permission import PermissionBehavior, PermissionRequest, PermissionRule
 from ...types import ReplyFinishedReason
 from ._state import Acting, Exit, ExitOutcome, RunStatus, CancelledError
 from .tool_handler import ToolHandler
 
 if TYPE_CHECKING:
     from ...hooks import FtreCoreHookManager
+    from ...llm import ToolCall
+    from ...permission import PermissionEngine
     from ._state import RunState
 
 
@@ -49,7 +52,13 @@ class ActingExecutor:
       本类不直接 await 单个工具，而是通过 ToolHandler.spawn / gather_results 间接驱动。
     """
 
-    def __init__(self, agent, state: "RunState", tool_handler: ToolHandler):
+    def __init__(
+        self,
+        agent,
+        state: "RunState",
+        tool_handler: ToolHandler,
+        permission_engine: "PermissionEngine | None" = None,
+    ):
         """初始化 Acting 执行器。
 
         参数：
@@ -58,27 +67,179 @@ class ActingExecutor:
             is_cancelled 等运行期上下文。
           - tool_handler: 工具执行处理器（ToolHandler），负责 spawn / gather_results /
             build_assistant_message，通常在整个 agent 运行期共享一个实例。
+          - permission_engine: 权限决策引擎。为 None 时不做任何权限检查，
+            所有工具调用直接执行（保持无权限配置时的原行为）。
         """
         self.agent = agent
         self.state = state
         self.tool_handler = tool_handler
+        self.permission_engine = permission_engine
 
     async def stream(self, action: Acting) -> AsyncGenerator[AgentStreamEvent, None]:
-        """执行一轮工具调用，按工具顺序产出流事件。
+        """执行一轮工具调用；按权限决策决定「整批执行」还是「整批挂起」。
+
+        权限分流（A1 整批语义）：
+          1) 无权限引擎，或本轮全部 tool_call 都被判定 ALLOW → 走原执行流程
+             （spawn → gather → 写 assistant + tool 结果），行为与无权限时完全一致；
+          2) 只要存在任一 ASK 或 DENY → 整批挂起，谁都不执行：
+             先写 assistant(tool_calls)，把 ASK 的 tool_call 状态置 ASKING，
+             为每个 ASK 逐个 yield RequireUserConfirmEvent，然后 return。
+             DENY 的调用此时不写结果（甲方案：一起等，恢复时整批处理才写 DENIED）。
+
+        暂停信号：本方法通过 yield RequireUserConfirmEvent 表达挂起，
+        react_runner._loop 收到该事件即知道本轮挂起，停止循环但不 finalize。
+        """
+        tool_calls = action.tool_calls
+
+        # ── 权限分流 ──
+        # decisions: tool_call_id -> PermissionBehavior；无引擎时视为全 ALLOW。
+        decisions = self._classify(tool_calls)
+        has_pause = any(
+            b in (PermissionBehavior.ASK, PermissionBehavior.DENY)
+            for b in decisions.values()
+        )
+
+        if not has_pause:
+            # 全 ALLOW（或无引擎）→ 原执行流程
+            async for event in self._execute_calls(tool_calls):
+                yield event
+            return
+
+        # ── 有 ASK/DENY：整批挂起，不执行任何工具 ──
+        # 先写 assistant(tool_calls)，让 context 里出现带全部 tool_call 的 assistant 消息，
+        # 后续每个 tool_call 都会补一条配对结果（恢复整批处理时写），保证协议完整。
+        MessageContext.add_raw(
+            self.agent.state.context,
+            self.tool_handler.build_assistant_message(tool_calls=tool_calls),
+        )
+
+        reply_id = self.state.reply_id
+        for tc in tool_calls:
+            if decisions[tc.id] == PermissionBehavior.ASK:
+                # 状态更新必须先于 yield：确保收到事件的一方看到的 context 已是 ASKING。
+                MessageContext.set_tool_call_state(
+                    self.agent.state.context, tc.id, ToolCallState.ASKING
+                )
+                decision = self._decisions_detail.get(tc.id)
+                yield RequireUserConfirmEvent(
+                    reply_id=reply_id,
+                    tool_call_id=tc.id,
+                    tool_call_name=tc.name,
+                    arguments=tc.input or {},
+                    reason=decision.reason if decision else "",
+                    rule_id=decision.rule_id if decision else None,
+                )
+        # DENY 的调用保持 PENDING，不在此写结果——恢复阶段整批处理时统一写 DENIED。
+
+    async def resume_execute(
+        self, action: Acting
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """恢复阶段：所有 ASK 都已确认后，对整批 tool_call 统一收尾。
+
+        此时 context 里的 ToolCallBlock 状态已由 react_runner 依据用户确认更新：
+          - ALLOWED           → 执行工具，写 SUCCESS/ERROR 结果；
+          - FINISHED（被拒绝）→ 不执行，写 DENIED 结果；
+          - PENDING（DENY）   → 不执行，写 DENIED 结果。
+
+        assistant(tool_calls) 消息在挂起时已写过，这里不再重复写。
+        """
+        tool_calls = action.tool_calls
+        allowed = [tc for tc in tool_calls if self._call_state(tc.id) == ToolCallState.ALLOWED]
+        denied = [tc for tc in tool_calls if tc not in allowed]
+
+        # 已确认放行的调用：走原执行流程，但跳过 assistant 消息（挂起时已写）
+        if allowed:
+            async for event in self._execute_calls(allowed, write_assistant=False):
+                yield event
+
+        # 被拒绝（用户拒绝）或被 DENY 的调用：写 DENIED 结果 + 产出事件三元组
+        reply_id = self.state.reply_id
+        for tc in denied:
+            MessageContext.add_tool_result(
+                self.agent.state.context,
+                tc.id,
+                f"[DENIED] 工具 {tc.name} 未获授权执行。",
+                state=ToolResultState.DENIED,
+                name=tc.name,
+            )
+            MessageContext.set_tool_call_state(
+                self.agent.state.context, tc.id, ToolCallState.FINISHED
+            )
+            yield ToolResultStartEvent(
+                reply_id=reply_id, tool_call_id=tc.id, tool_call_name=tc.name,
+            )
+            yield ToolResultEndEvent(
+                reply_id=reply_id, tool_call_id=tc.id,
+                state=ToolResultState.DENIED, metadata={},
+            )
+
+    def _classify(self, tool_calls: list["ToolCall"]) -> dict[str, PermissionBehavior]:
+        """对整批 tool_call 逐个求权限决策，返回 id -> behavior。
+
+        无权限引擎时全部视为 ALLOW（保持原行为）。已被确认放行（ALLOWED）的调用
+        跳过检查、直接视为 ALLOW，避免恢复后重复询问。详细决策存 _decisions_detail
+        供挂起时填充 RequireUserConfirmEvent 的 reason/rule_id。
+        """
+        self._decisions_detail = {}
+        if self.permission_engine is None:
+            return {tc.id: PermissionBehavior.ALLOW for tc in tool_calls}
+
+        rules, default_behavior = self._load_permission_config()
+        result: dict[str, PermissionBehavior] = {}
+        for tc in tool_calls:
+            if self._call_state(tc.id) == ToolCallState.ALLOWED:
+                result[tc.id] = PermissionBehavior.ALLOW
+                continue
+            decision = self.permission_engine.evaluate(
+                PermissionRequest(tool_name=tc.name, arguments=tc.input or {}),
+                rules,
+                default_behavior,
+            )
+            self._decisions_detail[tc.id] = decision
+            result[tc.id] = decision.behavior
+        return result
+
+    def _load_permission_config(self) -> tuple[list[PermissionRule], PermissionBehavior]:
+        """从 AgentState.permission_context 读出规则与默认行为。
+
+        约定 key：permission_rules（规则 dict 列表）、default_behavior（行为字符串）。
+        缺省时返回空规则 + ASK 兜底。
+        """
+        ctx = self.agent.state.permission_context or {}
+        rules = [
+            PermissionRule.model_validate(r) for r in ctx.get("permission_rules", [])
+        ]
+        default_raw = ctx.get("default_behavior")
+        default_behavior = (
+            PermissionBehavior(default_raw) if default_raw else PermissionBehavior.ASK
+        )
+        return rules, default_behavior
+
+    def _call_state(self, tool_call_id: str) -> ToolCallState | None:
+        """读取 context 里指定 tool_call（ToolCallBlock）的当前状态，找不到返回 None。"""
+        from ...message import ToolCallBlock
+
+        for message in self.agent.state.context:
+            for block in message.content:
+                if isinstance(block, ToolCallBlock) and block.id == tool_call_id:
+                    return block.state
+        return None
+
+    async def _execute_calls(
+        self, tool_calls: list["ToolCall"], write_assistant: bool = True
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """并发执行一批 tool_call 并成组写入结果、产出事件（原 stream 的执行逻辑）。
+
+        参数 write_assistant 为 False 时跳过写 assistant(tool_calls) 消息，
+        供 resume_execute 复用——恢复时该消息在挂起阶段已写过。
 
         整体流程分四个阶段：
           1) spawn：为每个 tool_call 创建并发任务（不 await，立即返回 Task）；
           2) gather_results：阻塞等待全部完成，归一化异常与取消，按原序拿回结果；
           3) 成组写入 memory：先写 assistant(tool_calls)，再逐条写 tool(result)；
           4) 延后追加 pending_hints 并 yield 对应事件；若发生取消则抛出 CancelledError。
-
-        取消传播：
-          gather_results 返回 cancelled=True 表示本轮被取消（外部取消 / 某工具被取消 /
-          state 已取消）。本方法在写完 memory 与事件后抛出内部的 CancelledError，
-          由 react_runner._loop 捕获，转成 INTERRUPTED 终态并产出 ReplyEndEvent。
         """
         reply_id = self.state.reply_id
-        tool_calls = action.tool_calls
 
         # ── 阶段 1：spawn 所有工具任务 ──
         # 对每个 tool_call 调 tool_handler.spawn 创建 asyncio.Task，这里【不 await】——
@@ -106,12 +267,13 @@ class ActingExecutor:
         # OpenAI / Anthropic 协议要求 role="tool" 的结果消息紧跟在带 tool_calls 的
         # assistant 消息之后、且同组的 tool 结果必须连续；若 assistant 消息缺失或
         # 顺序颠倒，后续 LLM 上下文会出现“无主 tool 消息”，直接违反协议导致报错。
-        MessageContext.add_raw(
-            self.agent.state.context,
-            self.tool_handler.build_assistant_message(
-                tool_calls=tool_calls,
-            ),
-        )
+        if write_assistant:
+            MessageContext.add_raw(
+                self.agent.state.context,
+                self.tool_handler.build_assistant_message(
+                    tool_calls=tool_calls,
+                ),
+            )
 
         # 工具可能返回事件对象（ToolResult.event，如 HintBlockEvent）而非纯文本，
         # 这些事件需要向上冒泡给调用方。但它们不能在下面的循环里立即写入 memory，
@@ -119,11 +281,16 @@ class ActingExecutor:
         pending_hints: list[AgentStreamEvent] = []
 
         for tc, result in zip(tool_calls, results):
+            # 执行成功的调用状态置 FINISHED，与写入的结果配对。
+            MessageContext.set_tool_call_state(
+                self.agent.state.context, tc.id, ToolCallState.FINISHED
+            )
             # 写入这一条 tool 结果（role="tool"），与上面的 assistant 消息配对
             MessageContext.add_tool_result(
                 self.agent.state.context,
                 tc.id,
                 result.result or f"[{tc.name}] 已完成",
+                state=ToolResultState.SUCCESS if not result.error else ToolResultState.ERROR,
                 name=tc.name,
             )
 
@@ -170,6 +337,8 @@ class ActingExecutor:
         # 注意：此时 memory 与事件已写完，取消只影响“本轮之后是否继续 / 以何终态收尾”。
         if cancelled:
             raise CancelledError()
+
+
 
 
 # ═══════════════════════════════════════════════════════════════

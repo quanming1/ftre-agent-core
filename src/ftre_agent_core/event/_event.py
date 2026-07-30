@@ -56,6 +56,7 @@ class EventType(StrEnum):
     TOOL_RESULT_END = "TOOL_RESULT_END"
     EXCEED_MAX_ITERS = "EXCEED_MAX_ITERS"
     REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
+    USER_CONFIRM_RESULT = "USER_CONFIRM_RESULT"
     RETRY = "retry"
     CUSTOM = "CUSTOM"
     USER_MESSAGE = "USER_MESSAGE"
@@ -242,6 +243,21 @@ class RequireUserConfirmEvent(EventBase):
     arguments: dict[str, Any] = Field(default_factory=dict)
     reason: str
     rule_id: str | None = None
+
+
+class UserConfirmResultEvent(EventBase):
+    """用户对某个待确认工具调用的决定（输入事件，不属于 AgentStreamEvent）。
+
+    由上层在收到 RequireUserConfirmEvent 后回传，作为 run() 的输入驱动恢复：
+      - approved=True  → 该工具调用从 ASKING 转 ALLOWED，恢复后执行
+      - approved=False → 产生 DENIED 工具结果，不执行
+
+    ``reply_id`` 与 ``tool_call_id`` 必须与挂起时一致，否则视为非法输入被拒绝。
+    """
+    type: Literal["USER_CONFIRM_RESULT"] = "USER_CONFIRM_RESULT"
+    reply_id: str
+    tool_call_id: str
+    approved: bool
 
 
 # ── RetryEvent（ftre 特有，继承 EventBase）──

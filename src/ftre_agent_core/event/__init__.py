@@ -29,6 +29,7 @@ from ._event import (
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     RequireUserConfirmEvent,
+    UserConfirmResultEvent,
     RetryEvent,
     CustomEvent,
     UserMessageEvent,
@@ -50,5 +51,6 @@ __all__ = [
     "ToolResultStartEvent", "ToolResultTextDeltaEvent",
     "ToolResultDataDeltaEvent", "ToolResultEndEvent",
     "RequireUserConfirmEvent",
+    "UserConfirmResultEvent",
     "RetryEvent", "CustomEvent", "UserMessageEvent", "AgentStreamEvent",
 ]

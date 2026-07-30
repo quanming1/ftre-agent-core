@@ -30,6 +30,9 @@ class RunStatus(str, Enum):
     """单次 run() 调用的生命周期状态。"""
     IDLE = "idle"
     RUNNING = "running"
+    # PAUSED：因权限 ASK 挂起，等待用户确认。非终态——收到确认后可恢复继续。
+    # 不产 ReplyEnd、不 finalize，reply_id 保留在 RunState 供恢复复用。
+    PAUSED = "paused"
     COMPLETED = "completed"
     ERROR = "error"
     CANCELLED = "cancelled"
