@@ -55,6 +55,7 @@ class EventType(StrEnum):
     TOOL_RESULT_DATA_DELTA = "TOOL_RESULT_DATA_DELTA"
     TOOL_RESULT_END = "TOOL_RESULT_END"
     EXCEED_MAX_ITERS = "EXCEED_MAX_ITERS"
+    REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
     RETRY = "retry"
     CUSTOM = "CUSTOM"
     USER_MESSAGE = "USER_MESSAGE"
@@ -226,6 +227,23 @@ class ToolResultEndEvent(EventBase):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+# ── 权限确认（HITL）──
+class RequireUserConfirmEvent(EventBase):
+    """通知上层：某个工具调用命中 ASK，正在等待用户确认。
+
+    由 Core 在权限决策为 ASK 时产出（PermissionEngine 只返回决策，不产事件）。
+    产出前对应 ToolCallBlock.state 应已置为 ASKING 并写回 AgentState.context。
+    产出本事件不结束回复，不产 ReplyEndEvent；等待用户回传确认后用同一 reply_id 继续。
+    """
+    type: Literal["REQUIRE_USER_CONFIRM"] = "REQUIRE_USER_CONFIRM"
+    reply_id: str
+    tool_call_id: str
+    tool_call_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+    rule_id: str | None = None
+
+
 # ── RetryEvent（ftre 特有，继承 EventBase）──
 class RetryEvent(EventBase):
     """重试事件。ftre 特有（AgentScope 无），对齐 EventBase 风格。"""
@@ -269,5 +287,6 @@ AgentStreamEvent: TypeAlias = Union[
     ToolCallStartEvent, ToolCallDeltaEvent, ToolCallEndEvent,
     ToolResultStartEvent, ToolResultTextDeltaEvent,
     ToolResultDataDeltaEvent, ToolResultEndEvent,
+    RequireUserConfirmEvent,
     RetryEvent, CustomEvent, UserMessageEvent,
 ]

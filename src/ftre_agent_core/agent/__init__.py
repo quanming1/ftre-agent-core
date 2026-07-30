@@ -22,6 +22,7 @@ from ..event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
     ToolResultEndEvent,
+    RequireUserConfirmEvent,
     RetryEvent,
 )
 from .runner import (
@@ -81,6 +82,7 @@ __all__ = [
     "ToolResultStartEvent",
     "ToolResultTextDeltaEvent",
     "ToolResultEndEvent",
+    "RequireUserConfirmEvent",
     "RetryEvent",
     # Runner
     "RunState",
