@@ -101,3 +101,34 @@ def test_react_agent_uses_injected_state_and_exposes_run_state():
     assert agent.state is state
     assert agent.run_state is agent.runner.state
     assert agent.messages[0]["role"] == "user"
+
+
+def test_agent_state_permission_context_defaults_to_empty_dict():
+    first = AgentState()
+    second = AgentState()
+
+    first.permission_context["default_behavior"] = "ask"
+
+    assert first.permission_context == {"default_behavior": "ask"}
+    assert second.permission_context == {}
+
+
+def test_agent_state_permission_context_survives_json_round_trip():
+    state = AgentState(
+        permission_context={
+            "permission_rules": [
+                {
+                    "id": "deny-delete",
+                    "tool_name": "delete_file",
+                    "behavior": "deny",
+                    "priority": 0,
+                    "enabled": True,
+                },
+            ],
+            "default_behavior": "allow",
+        },
+    )
+
+    restored = AgentState.model_validate(state.model_dump(mode="json"))
+
+    assert restored.permission_context == state.permission_context

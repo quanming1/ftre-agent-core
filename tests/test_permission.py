@@ -1,0 +1,253 @@
+# -*- coding: utf-8 -*-
+"""Unit tests for the pure PermissionEngine decision model."""
+import pytest
+from pydantic import ValidationError
+
+from ftre_agent_core import (
+    PermissionBehavior,
+    PermissionDecision,
+    PermissionEngine,
+    PermissionRequest,
+    PermissionRule,
+)
+
+
+@pytest.fixture
+def engine() -> PermissionEngine:
+    return PermissionEngine()
+
+
+def test_default_behavior_when_no_rule_matches(engine: PermissionEngine) -> None:
+    decision = engine.evaluate(
+        PermissionRequest(tool_name="read_file"),
+        rules=[],
+        default_behavior=PermissionBehavior.ASK,
+    )
+
+    assert decision.behavior == PermissionBehavior.ASK
+    assert decision.rule_id is None
+    assert decision.reason == "No permission rule matched"
+
+
+def test_default_behavior_defaults_to_ask(engine: PermissionEngine) -> None:
+    decision = engine.evaluate(PermissionRequest(tool_name="x"), rules=[])
+
+    assert decision.behavior == PermissionBehavior.ASK
+
+
+def test_exact_tool_name_match(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="read_file"), rules)
+
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert decision.rule_id == "allow-read"
+
+
+def test_exact_rule_does_not_match_other_tool(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+        ),
+    ]
+    decision = engine.evaluate(
+        PermissionRequest(tool_name="delete_file"),
+        rules,
+        default_behavior=PermissionBehavior.DENY,
+    )
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.rule_id is None
+
+
+def test_wildcard_rule_matches_any_tool(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="deny-all",
+            tool_name="*",
+            behavior=PermissionBehavior.DENY,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="anything"), rules)
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.rule_id == "deny-all"
+
+
+def test_disabled_rule_is_ignored(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+            enabled=False,
+        ),
+    ]
+    decision = engine.evaluate(
+        PermissionRequest(tool_name="read_file"),
+        rules,
+        default_behavior=PermissionBehavior.ASK,
+    )
+
+    assert decision.behavior == PermissionBehavior.ASK
+    assert decision.rule_id is None
+
+
+def test_higher_priority_rule_wins(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="wildcard-deny",
+            tool_name="*",
+            behavior=PermissionBehavior.DENY,
+            priority=0,
+        ),
+        PermissionRule(
+            id="specific-allow",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+            priority=100,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="read_file"), rules)
+
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert decision.rule_id == "specific-allow"
+
+
+def test_same_priority_conflict_fails_safe_to_deny(
+    engine: PermissionEngine,
+) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+            priority=10,
+        ),
+        PermissionRule(
+            id="ask-read",
+            tool_name="*",
+            behavior=PermissionBehavior.ASK,
+            priority=10,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="read_file"), rules)
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.rule_id is None
+    assert decision.reason == "Conflicting permission rules at the same priority"
+
+
+def test_same_priority_same_behavior_is_not_a_conflict(
+    engine: PermissionEngine,
+) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+            priority=10,
+        ),
+        PermissionRule(
+            id="allow-any",
+            tool_name="*",
+            behavior=PermissionBehavior.ALLOW,
+            priority=10,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="read_file"), rules)
+
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert decision.rule_id in {"allow-read", "allow-any"}
+
+
+def test_evaluate_does_not_mutate_inputs(engine: PermissionEngine) -> None:
+    request = PermissionRequest(tool_name="read_file", arguments={"path": "a"})
+    rules = [
+        PermissionRule(
+            id="allow-read",
+            tool_name="read_file",
+            behavior=PermissionBehavior.ALLOW,
+        ),
+    ]
+    rules_before = [r.model_dump() for r in rules]
+
+    engine.evaluate(request, rules)
+
+    assert [r.model_dump() for r in rules] == rules_before
+    assert request.arguments == {"path": "a"}
+
+
+def test_decision_is_json_serializable(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="deny-all",
+            tool_name="*",
+            behavior=PermissionBehavior.DENY,
+        ),
+    ]
+    decision = engine.evaluate(PermissionRequest(tool_name="x"), rules)
+
+    dumped = decision.model_dump(mode="json")
+    assert dumped["behavior"] == "deny"
+    assert dumped["rule_id"] == "deny-all"
+
+    restored = PermissionDecision.model_validate(dumped)
+    assert restored.behavior == PermissionBehavior.DENY
+
+
+def test_request_requires_tool_name() -> None:
+    with pytest.raises(ValidationError):
+        PermissionRequest()
+
+
+def test_rule_requires_id_tool_name_and_behavior() -> None:
+    with pytest.raises(ValidationError):
+        PermissionRule(tool_name="x", behavior=PermissionBehavior.ALLOW)
+    with pytest.raises(ValidationError):
+        PermissionRule(id="r", behavior=PermissionBehavior.ALLOW)
+    with pytest.raises(ValidationError):
+        PermissionRule(id="r", tool_name="x")
+
+
+def test_rules_loaded_from_agent_state_permission_context(
+    engine: PermissionEngine,
+) -> None:
+    """规则以序列化形式存在 AgentState.permission_context，Core 取出后传给引擎。"""
+    from ftre_agent_core.state import AgentState
+
+    state = AgentState(
+        permission_context={
+            "permission_rules": [
+                PermissionRule(
+                    id="deny-delete",
+                    tool_name="delete_file",
+                    behavior=PermissionBehavior.DENY,
+                ).model_dump(),
+            ],
+            "default_behavior": PermissionBehavior.ALLOW.value,
+        },
+    )
+
+    ctx = state.permission_context
+    rules = [PermissionRule.model_validate(r) for r in ctx["permission_rules"]]
+    default_behavior = PermissionBehavior(ctx["default_behavior"])
+
+    denied = engine.evaluate(
+        PermissionRequest(tool_name="delete_file"), rules, default_behavior
+    )
+    assert denied.behavior == PermissionBehavior.DENY
+    assert denied.rule_id == "deny-delete"
+
+    allowed = engine.evaluate(
+        PermissionRequest(tool_name="read_file"), rules, default_behavior
+    )
+    assert allowed.behavior == PermissionBehavior.ALLOW
+    assert allowed.rule_id is None

@@ -12,6 +12,13 @@ from .tracing import (
 )
 from .message_context import MessageContext
 from .state import AgentState
+from .permission import (
+    PermissionBehavior,
+    PermissionRequest,
+    PermissionRule,
+    PermissionDecision,
+    PermissionEngine,
+)
 from .hooks import (
     FtreCoreHookManager,
     HookInput,
@@ -34,6 +41,12 @@ from .hooks import (
 __all__ = [
     "AgentState",
     "MessageContext",
+    # Permission
+    "PermissionBehavior",
+    "PermissionRequest",
+    "PermissionRule",
+    "PermissionDecision",
+    "PermissionEngine",
     "Tracer",
     "TraceSpan",
     "TraceRun",
