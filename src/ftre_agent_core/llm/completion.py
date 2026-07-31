@@ -46,7 +46,10 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
             message["content"] = None
 
     def has_assistant_payload(message: dict) -> bool:
-        return bool(message.get("content") or message.get("reasoning_content"))
+        # OpenAI-compatible providers require visible content or tool_calls.
+        # reasoning_content alone is provider-specific metadata, not a valid
+        # assistant payload.
+        return bool(message.get("content"))
 
     # OpenAI-compatible provider 要求 assistant.tool_calls 后紧跟、且只紧跟
     # 每个 call 一条对应 tool result。持久化快照在中断或并发工具时可能不完整，
@@ -73,7 +76,8 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
         normalize_assistant_content(current)
         tool_calls = current.get("tool_calls") or []
         if not tool_calls:
-            normalized.append(current)
+            if has_assistant_payload(current):
+                normalized.append(current)
             index += 1
             continue
 

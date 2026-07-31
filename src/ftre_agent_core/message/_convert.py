@@ -104,6 +104,22 @@ def from_openai_part(part: dict) -> ContentBlock:
     return TextBlock(text=json.dumps(part, ensure_ascii=False))
 
 
+def _tool_result_content(output: str | list) -> str:
+    """Flatten textual tool output without exposing internal block JSON to the LLM."""
+    if isinstance(output, str):
+        return output
+    chunks: list[str] = []
+    for item in output:
+        if isinstance(item, TextBlock):
+            chunks.append(item.text)
+        elif isinstance(item, dict) and item.get("type") == "text":
+            chunks.append(str(item.get("text", "")))
+        else:
+            value = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            chunks.append(json.dumps(value, ensure_ascii=False))
+    return "\n".join(chunk for chunk in chunks if chunk)
+
+
 def to_openai_part(block: ContentBlock) -> dict:
     """把 Block 转成单个 OpenAI content part dict（ftre 事件风格）。
 
@@ -150,9 +166,7 @@ def to_openai_part(block: ContentBlock) -> dict:
 
     if isinstance(block, ToolResultBlock):
         # ToolResultBlock 不属于 content part，降级为文本
-        out = block.output
-        text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
-        return {"type": "text", "text": text}
+        return {"type": "text", "text": _tool_result_content(block.output)}
 
     return {"type": "text", "text": str(block)}
 
@@ -247,12 +261,10 @@ def to_openai_message(
     if role == "tool" or (role is None and blocks and isinstance(blocks[0], ToolResultBlock)):
         for b in blocks:
             if isinstance(b, ToolResultBlock):
-                out = b.output
-                content = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
                 return {
                     "role": "tool",
                     "tool_call_id": b.id,
-                    "content": content,
+                    "content": _tool_result_content(b.output),
                 }
         # role=tool 但无 ToolResultBlock —— 返回空 tool 消息
         return {"role": "tool", "tool_call_id": "", "content": ""}
@@ -276,9 +288,7 @@ def to_openai_message(
             reasoning_parts.append(block.thinking)
         elif isinstance(block, ToolResultBlock):
             # assistant 消息里夹带 ToolResultBlock —— 降级为 text part
-            out = block.output
-            text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
-            content_parts.append({"type": "text", "text": text})
+            content_parts.append({"type": "text", "text": _tool_result_content(block.output)})
         else:
             content_parts.append(to_openai_part(block))
 
