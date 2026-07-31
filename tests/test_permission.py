@@ -67,6 +67,74 @@ def test_exact_rule_does_not_match_other_tool(engine: PermissionEngine) -> None:
     assert decision.rule_id is None
 
 
+def test_argument_regex_fullmatch(engine: PermissionEngine) -> None:
+    rules = [
+        PermissionRule(
+            id="allow-git-status",
+            tool_name="bash",
+            argument_regex={"command": r"git status(?:\s+.*)?"},
+            behavior=PermissionBehavior.ALLOW,
+            priority=10,
+        ),
+        PermissionRule(
+            id="ask-bash",
+            tool_name="bash",
+            behavior=PermissionBehavior.ASK,
+        ),
+    ]
+
+    allowed = engine.evaluate(
+        PermissionRequest(
+            tool_name="bash",
+            arguments={"command": "git status --short"},
+        ),
+        rules,
+    )
+    asked = engine.evaluate(
+        PermissionRequest(
+            tool_name="bash",
+            arguments={"command": "git stash pop"},
+        ),
+        rules,
+    )
+
+    assert allowed.behavior == PermissionBehavior.ALLOW
+    assert allowed.rule_id == "allow-git-status"
+    assert asked.behavior == PermissionBehavior.ASK
+    assert asked.rule_id == "ask-bash"
+
+
+def test_argument_regex_requires_argument_and_valid_pattern(
+    engine: PermissionEngine,
+) -> None:
+    missing = PermissionRule(
+        id="missing",
+        tool_name="bash",
+        argument_regex={"command": r"dir"},
+        behavior=PermissionBehavior.ALLOW,
+    )
+    invalid = PermissionRule(
+        id="invalid",
+        tool_name="bash",
+        argument_regex={"command": "("},
+        behavior=PermissionBehavior.ALLOW,
+    )
+
+    missing_decision = engine.evaluate(
+        PermissionRequest(tool_name="bash"),
+        [missing],
+        default_behavior=PermissionBehavior.ASK,
+    )
+    invalid_decision = engine.evaluate(
+        PermissionRequest(tool_name="bash", arguments={"command": "dir"}),
+        [invalid],
+        default_behavior=PermissionBehavior.ASK,
+    )
+
+    assert missing_decision.behavior == PermissionBehavior.ASK
+    assert invalid_decision.behavior == PermissionBehavior.ASK
+
+
 def test_wildcard_rule_matches_any_tool(engine: PermissionEngine) -> None:
     rules = [
         PermissionRule(

@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from ._types import (
     PermissionBehavior,
     PermissionDecision,
@@ -46,11 +48,25 @@ class PermissionEngine:
             一个决策，携带最终行为、可读原因，以及（当由某条规则决定时）
             命中的规则 id。
         """
-        # 1. 找出所有「启用 且 命中（精确名或通配）」的规则
+        def matches(rule: PermissionRule) -> bool:
+            if not rule.enabled or rule.tool_name not in ("*", request.tool_name):
+                return False
+            for name, pattern in rule.argument_regex.items():
+                if name not in request.arguments:
+                    return False
+                try:
+                    if re.fullmatch(pattern, str(request.arguments[name])) is None:
+                        return False
+                except re.error:
+                    # 非法正则不应导致整次 Agent 运行失败，按规则未命中处理。
+                    return False
+            return True
+
+        # 1. 找出所有「启用 且 工具名/参数正则均命中」的规则
         matched = [
             rule
             for rule in rules
-            if rule.enabled and rule.tool_name in ("*", request.tool_name)
+            if matches(rule)
         ]
 
         # 2. 没有任何规则命中 → 用传入的默认行为兜底

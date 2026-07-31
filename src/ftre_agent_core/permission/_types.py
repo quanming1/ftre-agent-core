@@ -33,13 +33,16 @@ class PermissionRequest(BaseModel):
 
 
 class PermissionRule(BaseModel):
-    """一条按工具名匹配的权限规则。
+    """一条按工具名及可选参数正则匹配的权限规则。
 
     ``tool_name`` 是精确工具名，或用 ``"*"`` 匹配任意工具。
+    ``argument_regex`` 为空时只匹配工具名；非空时每个参数都必须通过
+    对应正则的 ``fullmatch``。
     """
 
     id: str                       # 规则唯一标识（也用于决策溯源）
     tool_name: str                # 精确工具名，或 "*" 通配
+    argument_regex: dict[str, str] = Field(default_factory=dict)
     behavior: PermissionBehavior  # 命中后采取的行为
     priority: int = 0             # 优先级，数值越大越优先
     enabled: bool = True          # 是否启用；关闭的规则不参与匹配
