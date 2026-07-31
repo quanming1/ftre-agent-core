@@ -265,7 +265,9 @@ class ReActRunner:
             )
             # 处理确认（纯同步）。返回 False 表示仍有未决 ASKING，
             # 继续挂起、本次调用不进主循环。
-            if not self._accept_confirmation(message):
+            confirmation_complete = self._accept_confirmation(message)
+            if not confirmation_complete:
+                self.state.status = RunStatus.PAUSED
                 return
             # ASKING 已清空：从 context 重建待收尾清单并整批执行，作为 prologue，
             # 随后进主循环。resume_execute 只依赖 context，不依赖实例内存。
@@ -411,15 +413,16 @@ class ReActRunner:
         """
         context = self.agent.state.context
         asking = MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)
-
-        # 校验：非挂起态收到确认 → 拒绝
-        if not asking:
-            raise RuntimeError(
-                "Agent is not awaiting confirmation; "
-                "cannot accept a UserConfirmResultEvent."
-            )
-        # 校验：tool_call_id 必须命中某个 ASKING 调用（tool_call_id 唯一定位待恢复调用）
-        if event.tool_call_id not in {b.id for b in asking}:
+        target = next(
+            (
+                block
+                for message in context
+                for block in message.content
+                if isinstance(block, ToolCallBlock) and block.id == event.tool_call_id
+            ),
+            None,
+        )
+        if target is None:
             raise RuntimeError(
                 f"UserConfirmResultEvent.tool_call_id {event.tool_call_id!r} "
                 f"is not awaiting confirmation."
@@ -431,12 +434,38 @@ class ReActRunner:
         if event.reply_id:
             self.state.reply_id = event.reply_id
 
-        # 应用确认：approved → ALLOWED；rejected → FINISHED（整批处理时写 DENIED）
-        MessageContext.set_tool_call_state(
-            context,
+        # 两种入口都必须支持：
+        # 1) Core 独立使用：宿主直接调用 agent.run(UserConfirmResultEvent)，
+        #    context 中仍是 ASKING，由 Core 在下面应用本次确认。
+        # 2) FTRE 等持久化宿主：为了防止用户确认后进程立即崩溃，宿主会先把
+        #    确认结果 checkpoint 为 ALLOWED / FINISHED，再新建 Agent 恢复。
+        #    此时同一决定已经存在于 context，应按幂等输入继续执行，而不是报错。
+        expected = ToolCallState.ALLOWED if event.approved else ToolCallState.FINISHED
+        logger.info(
+            "[permission] accept confirmation tool_call_id=%s current=%s expected=%s",
             event.tool_call_id,
-            ToolCallState.ALLOWED if event.approved else ToolCallState.FINISHED,
+            target.state,
+            expected,
         )
+        if target.state == ToolCallState.ASKING:
+            # Core 独立调用路径：确认结果尚未由宿主持久化，Core 自己更新状态。
+            logger.info(
+                "[permission] apply pending confirmation tool_call_id=%s approved=%s",
+                event.tool_call_id,
+                event.approved,
+            )
+            MessageContext.set_tool_call_state(context, event.tool_call_id, expected)
+        elif target.state != expected:
+            raise RuntimeError(
+                f"UserConfirmResultEvent.tool_call_id {event.tool_call_id!r} "
+                "conflicts with the persisted confirmation state."
+            )
+        else:
+            # FTRE 路径：宿主已先持久化相同决定，本次输入只负责驱动恢复执行。
+            logger.info(
+                "[permission] confirmation already checkpointed tool_call_id=%s",
+                event.tool_call_id,
+            )
 
         # 仍有未决 ASKING → 继续挂起（保持 PAUSED）；否则可整批收尾
         return not MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)

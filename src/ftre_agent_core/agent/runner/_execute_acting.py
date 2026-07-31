@@ -164,10 +164,11 @@ class ActingExecutor:
         # 被拒绝（用户拒绝）或被 DENY 的调用：写 DENIED 结果 + 产出事件三元组
         reply_id = self.state.reply_id
         for tc in denied:
+            denied_text = f"[USER_DENIED] 用户拒绝了工具 [{tc.name}] 的执行"
             MessageContext.add_tool_result(
                 self.agent.state.context,
                 tc.id,
-                f"[DENIED] 工具 {tc.name} 未获授权执行。",
+                denied_text,
                 state=ToolResultState.DENIED,
                 name=tc.name,
             )
@@ -176,6 +177,13 @@ class ActingExecutor:
             )
             yield ToolResultStartEvent(
                 reply_id=reply_id, tool_call_id=tc.id, tool_call_name=tc.name,
+            )
+            # 与内存中的 ToolResultBlock 保持一致，让宿主投影能够把拒绝原因
+            # 写入持久化快照；否则下次恢复时 provider 只能收到空 tool content。
+            yield ToolResultTextDeltaEvent(
+                reply_id=reply_id,
+                tool_call_id=tc.id,
+                delta=denied_text,
             )
             yield ToolResultEndEvent(
                 reply_id=reply_id, tool_call_id=tc.id,

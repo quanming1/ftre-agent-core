@@ -14,15 +14,46 @@ from .message import (
 )
 
 
-def _msg_to_dict(msg: Msg) -> dict:
-    """Convert a typed message to the provider-compatible dictionary format."""
-    has_tool_result = any(isinstance(block, ToolResultBlock) for block in msg.content)
-    role = None if has_tool_result else msg.role
-    result = to_openai_message(msg.content, role=role)
-    reasoning = msg.metadata.get("reasoning_content")
-    if reasoning and "reasoning_content" not in result:
-        result["reasoning_content"] = reasoning
-    return result
+def _msg_to_dicts(msg: Msg) -> list[dict]:
+    """Expand one typed Msg into provider-compatible protocol messages.
+
+    A persisted assistant reply may aggregate several reasoning/tool rounds in one
+    ``Msg``. Provider protocols require every ``ToolResultBlock`` to be a separate
+    ``role=tool`` message, so split the aggregate while preserving block order.
+    """
+    messages: list[dict] = []
+    assistant_blocks: list = []
+    metadata_reasoning = msg.metadata.get("reasoning_content")
+    metadata_reasoning_used = False
+
+    def flush_assistant() -> None:
+        nonlocal metadata_reasoning_used
+        if not assistant_blocks:
+            return
+        result = to_openai_message(assistant_blocks, role=msg.role)
+        if not metadata_reasoning_used:
+            if metadata_reasoning and "reasoning_content" not in result:
+                result["reasoning_content"] = metadata_reasoning
+            metadata_reasoning_used = True
+        messages.append(result)
+        assistant_blocks.clear()
+
+    for block in msg.content:
+        if isinstance(block, ToolResultBlock):
+            flush_assistant()
+            messages.append(to_openai_message([block], role="tool"))
+        else:
+            assistant_blocks.append(block)
+    flush_assistant()
+
+    # Preserve empty messages for compatibility; the provider boundary may drop
+    # truly empty assistant messages when required by a concrete API.
+    if not messages:
+        result = to_openai_message([], role=msg.role)
+        if metadata_reasoning:
+            result["reasoning_content"] = metadata_reasoning
+        messages.append(result)
+    return messages
 
 
 class MessageContext:
@@ -30,7 +61,7 @@ class MessageContext:
 
     @staticmethod
     def messages(context: list[Msg]) -> list[dict]:
-        return [_msg_to_dict(message) for message in context]
+        return [item for message in context for item in _msg_to_dicts(message)]
 
     @staticmethod
     def get_messages(context: list[Msg], system_prompt: str = "") -> list[dict]:
