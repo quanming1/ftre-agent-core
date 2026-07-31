@@ -37,3 +37,14 @@ def test_normalization_removes_calls_without_all_results_but_preserves_text():
 def test_normalization_drops_non_adjacent_result_and_empty_call_message():
     messages = [_assistant_call("call-a"), {"role": "user", "content": "continue"}, _result("call-a")]
     assert _normalize_chat_messages(messages) == [{"role": "user", "content": "continue"}]
+
+
+def test_normalization_drops_empty_and_reasoning_only_assistant_messages():
+    messages = [
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "reasoning_content": "private reasoning"},
+        {"role": "user", "content": "continue"},
+    ]
+    assert _normalize_chat_messages(messages) == [
+        {"role": "user", "content": "continue"}
+    ]

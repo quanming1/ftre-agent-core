@@ -128,8 +128,11 @@ async def test_resume_execute_after_rejection_writes_denied():
     events = [e async for e in executor.resume_execute()]
 
     end = [e for e in events if e.type == EventType.TOOL_RESULT_END]
+    delta = [e for e in events if e.type == EventType.TOOL_RESULT_TEXT_DELTA]
     assert len(end) == 1
     assert end[0].state == ToolResultState.DENIED
+    assert len(delta) == 1
+    assert "用户拒绝了工具 [echo] 的执行" in delta[0].delta
     # 未执行：结果里没有 echo 输出
     assert "echo:hi" not in str(agent.messages[-1].get("content", ""))
 
@@ -200,6 +203,50 @@ async def test_confirm_event_rejected_when_not_awaiting():
             UserConfirmResultEvent(reply_id="r1", tool_call_id="c1", approved=True)
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_confirmation_updates_state_and_stays_paused():
+    agent = make_agent(rules=[
+        PermissionRule(
+            id="ask-echo",
+            tool_name="echo",
+            behavior=PermissionBehavior.ASK,
+        )
+    ])
+    MessageContext.add_raw(
+        agent.state.context,
+        agent.runner.tool_handler.build_assistant_message(tool_calls=[
+            ToolCall(id="c1", name="echo", input={"text": "one"}),
+            ToolCall(id="c2", name="echo", input={"text": "two"}),
+        ]),
+    )
+    MessageContext.set_tool_call_state(
+        agent.state.context, "c1", ToolCallState.ASKING
+    )
+    MessageContext.set_tool_call_state(
+        agent.state.context, "c2", ToolCallState.ASKING
+    )
+
+    events = [
+        event
+        async for event in agent.run(
+            UserConfirmResultEvent(
+                reply_id="r1",
+                tool_call_id="c1",
+                approved=True,
+            )
+        )
+    ]
+
+    assert events == []
+    assert agent.run_state.status.name == "PAUSED"
+    assert MessageContext.tool_calls_in_state(
+        agent.state.context, ToolCallState.ALLOWED
+    )[0].id == "c1"
+    assert MessageContext.tool_calls_in_state(
+        agent.state.context, ToolCallState.ASKING
+    )[0].id == "c2"
 
 
 @pytest.mark.asyncio
@@ -274,11 +321,7 @@ async def test_resume_execute_rebuilds_from_context_only():
 
 @pytest.mark.asyncio
 async def test_resume_across_fresh_instance_via_persisted_context():
-    """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。
-
-    这是 Gateway "不保活" 方案的核心场景——挂起时销毁实例，用户确认时新建
-    实例并注入历史 context，靠持久化状态恢复，不依赖任何活实例内存。
-    """
+    """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。"""
     from ftre_agent_core.llm import TextDelta, ToolCall as LLMToolCall, StepFinish
     from ftre_agent_core.state import AgentState
 
@@ -308,6 +351,9 @@ async def test_resume_across_fresh_instance_via_persisted_context():
     # 确认 ASKING 状态在往返后仍存活
     asking = MessageContext.tool_calls_in_state(restored_context, ToolCallState.ASKING)
     assert [b.id for b in asking] == [tool_call_id]
+
+    # 模拟宿主已将确认输入先落盘：新 Agent 读到的已是 ALLOWED。
+    MessageContext.set_tool_call_state(restored_context, tool_call_id, ToolCallState.ALLOWED)
 
     # ── 全新 agent B：注入历史 context，恢复执行 ──
     registry_b = ToolRegistry()
