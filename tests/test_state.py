@@ -5,6 +5,7 @@ import pytest
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.agent.runner._state import RunState, RunStatus, CancelledError
 from ftre_agent_core.message import UserMsg
+from ftre_agent_core.permission import PermissionBehavior, PermissionContext
 from ftre_agent_core.state import AgentState
 from ftre_agent_core.types import ReplyFinishedReason
 
@@ -103,14 +104,16 @@ def test_react_agent_uses_injected_state_and_exposes_run_state():
     assert agent.messages[0]["role"] == "user"
 
 
-def test_agent_state_permission_context_defaults_to_empty_dict():
+def test_agent_state_permission_context_defaults_to_empty_allow():
     first = AgentState()
     second = AgentState()
 
-    first.permission_context["default_behavior"] = "ask"
+    first.permission_context.default_behavior = PermissionBehavior.ASK
 
-    assert first.permission_context == {"default_behavior": "ask"}
-    assert second.permission_context == {}
+    assert first.permission_context.default_behavior == PermissionBehavior.ASK
+    assert second.permission_context == PermissionContext()
+    assert second.permission_context.permission_rules == []
+    assert second.permission_context.default_behavior == PermissionBehavior.ALLOW
 
 
 def test_agent_state_permission_context_survives_json_round_trip():

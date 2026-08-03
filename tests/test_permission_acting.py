@@ -13,12 +13,12 @@ from ftre_agent_core.event import (
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.message import ToolCallState, ToolResultState
 from ftre_agent_core.message_context import MessageContext
-from ftre_agent_core.permission import PermissionBehavior, PermissionEngine, PermissionRule
+from ftre_agent_core.permission import PermissionBehavior, PermissionRule
 from ftre_agent_core.tool import tool, ToolRegistry
 
 
 # ── 构造带 echo 工具的 agent，permission_context 由参数注入 ──
-def make_agent(rules=None, default_behavior=None, engine=True):
+def make_agent(rules=None, default_behavior=None):
     @tool(description="Echo text")
     def echo(text: str) -> str:
         return f"echo:{text}"
@@ -26,19 +26,19 @@ def make_agent(rules=None, default_behavior=None, engine=True):
     registry = ToolRegistry()
     registry.register(echo)
 
+    from ftre_agent_core.permission import PermissionContext
     from ftre_agent_core.state import AgentState
 
-    permission_context = {}
-    if rules is not None:
-        permission_context["permission_rules"] = [r.model_dump() for r in rules]
-    if default_behavior is not None:
-        permission_context["default_behavior"] = default_behavior.value
-    state = AgentState(permission_context=permission_context)
+    state = AgentState(
+        permission_context=PermissionContext(
+            permission_rules=list(rules or []),
+            default_behavior=default_behavior or PermissionBehavior.ALLOW,
+        )
+    )
 
     return ReActAgent(
         model="fake", api_key="fake", system_prompt="test",
         tool_registry=registry, max_iterations=5, state=state,
-        permission_engine=PermissionEngine() if engine else None,
     )
 
 
@@ -196,7 +196,7 @@ async def test_new_message_rejected_while_awaiting_confirmation():
 @pytest.mark.asyncio
 async def test_confirm_event_rejected_when_not_awaiting():
     """未挂起时收到确认事件 → run() 拒绝。"""
-    agent = make_agent(engine=False)
+    agent = make_agent()
 
     with pytest.raises(RuntimeError, match="not awaiting confirmation"):
         async for _ in agent.run(
@@ -250,9 +250,9 @@ async def test_partial_batch_confirmation_updates_state_and_stays_paused():
 
 
 @pytest.mark.asyncio
-async def test_no_engine_executes_without_permission_check():
-    """无权限引擎 → 工具直接执行，行为与接线前一致。"""
-    agent = make_agent(engine=False)
+async def test_empty_rules_default_allow_executes_without_interception():
+    """空规则 + default ALLOW → 工具直接执行，等价于旧"无引擎"行为。"""
+    agent = make_agent()
     state = make_state()
 
     tc = ToolCall(id="c1", name="echo", input={"text": "x"})
@@ -323,6 +323,7 @@ async def test_resume_execute_rebuilds_from_context_only():
 async def test_resume_across_fresh_instance_via_persisted_context():
     """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。"""
     from ftre_agent_core.llm import TextDelta, ToolCall as LLMToolCall, StepFinish
+    from ftre_agent_core.permission import PermissionContext
     from ftre_agent_core.state import AgentState
 
     rules = [PermissionRule(id="ask-echo", tool_name="echo", behavior=PermissionBehavior.ASK)]
@@ -365,12 +366,13 @@ async def test_resume_across_fresh_instance_via_persisted_context():
 
     state_b = AgentState(
         context=restored_context,
-        permission_context={"permission_rules": [r.model_dump() for r in rules]},
+        permission_context=PermissionContext(
+            permission_rules=rules,
+        ),
     )
     agent_b = ReActAgent(
         model="fake", api_key="fake", system_prompt="test",
         tool_registry=registry_b, max_iterations=5, state=state_b,
-        permission_engine=PermissionEngine(),
     )
     # B 恢复后还要再调一次 LLM（读工具结果），给个文本收尾避免死循环
     async def fake_stream_b(messages, tools=None):

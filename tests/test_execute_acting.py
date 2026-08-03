@@ -37,7 +37,7 @@ async def test_single_tool_execution():
     state = make_state()
 
     tc = ToolCall(id="c1", name="echo", input={"text": "hello"})
-    executor = ActingExecutor(agent, state, agent.runner.tool_handler)
+    executor = ActingExecutor(agent, state, agent.runner.tool_handler, agent.permission_engine)
     events = [e async for e in executor.stream(Acting(tool_calls=[tc]))]
 
     types = [e.type for e in events]
@@ -59,7 +59,7 @@ async def test_multiple_tool_execution():
     tc1 = ToolCall(id="c1", name="echo", input={"text": "a"})
     tc2 = ToolCall(id="c2", name="echo", input={"text": "b"})
 
-    executor = ActingExecutor(agent, state, agent.runner.tool_handler)
+    executor = ActingExecutor(agent, state, agent.runner.tool_handler, agent.permission_engine)
     events = [e async for e in executor.stream(Acting(tool_calls=[tc1, tc2]))]
 
     tool_end_events = [e for e in events if e.type == EventType.TOOL_RESULT_END]

@@ -28,7 +28,6 @@ class ReActAgent:
         max_tokens: int | None = None,
         reasoning_effort: str = "",
         state: AgentState | None = None,
-        permission_engine: PermissionEngine | None = None,
         max_retries: int = 5,
         retry_delay: float = 3.0,
         tracer: Tracer | None = None,
@@ -47,7 +46,9 @@ class ReActAgent:
         self.tracer = tracer or Tracer()
         self.hook_manager = hook_manager or FtreCoreHookManager()
         self._state = state if state is not None else AgentState()
-        self._permission_engine = permission_engine
+        # 权限引擎始终由 Agent 内部创建：规则的唯一事实源是
+        # AgentState.permission_context，调用方无需也不应注入引擎实例。
+        self._permission_engine = PermissionEngine()
         self._registry = tool_registry if tool_registry is not None else ToolRegistry()
         self._runner = ReActRunner(self)
 
@@ -65,8 +66,8 @@ class ReActAgent:
         return self._state
 
     @property
-    def permission_engine(self) -> PermissionEngine | None:
-        """权限决策引擎；None 表示不启用权限检查（工具直接执行）。"""
+    def permission_engine(self) -> PermissionEngine:
+        """权限决策引擎（Agent 内部创建，始终可用）。"""
         return self._permission_engine
 
     @property

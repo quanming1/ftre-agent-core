@@ -209,7 +209,7 @@ class ReActRunner:
         )
         # 工具并发调度、取消传播和结果归并
         self._tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
-        # 权限决策引擎（由 Agent 提供，可能为 None = 不启用权限检查）
+        # 权限决策引擎（由 Agent 内部创建，始终可用；规则来自 AgentState.permission_context）
         self._permission_engine = agent.permission_engine
 
     @property

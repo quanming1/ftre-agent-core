@@ -288,34 +288,76 @@ def test_rule_requires_id_tool_name_and_behavior() -> None:
 def test_rules_loaded_from_agent_state_permission_context(
     engine: PermissionEngine,
 ) -> None:
-    """规则以序列化形式存在 AgentState.permission_context，Core 取出后传给引擎。"""
+    """规则以类型化模型存在 AgentState.permission_context，Core 取出后传给引擎。"""
+    from ftre_agent_core.permission import PermissionContext
     from ftre_agent_core.state import AgentState
 
     state = AgentState(
-        permission_context={
-            "permission_rules": [
+        permission_context=PermissionContext(
+            permission_rules=[
                 PermissionRule(
                     id="deny-delete",
                     tool_name="delete_file",
                     behavior=PermissionBehavior.DENY,
-                ).model_dump(),
+                ),
             ],
-            "default_behavior": PermissionBehavior.ALLOW.value,
-        },
+            default_behavior=PermissionBehavior.ALLOW,
+        ),
     )
 
     ctx = state.permission_context
-    rules = [PermissionRule.model_validate(r) for r in ctx["permission_rules"]]
-    default_behavior = PermissionBehavior(ctx["default_behavior"])
-
     denied = engine.evaluate(
-        PermissionRequest(tool_name="delete_file"), rules, default_behavior
+        PermissionRequest(tool_name="delete_file"), ctx.permission_rules,
+        ctx.default_behavior,
     )
     assert denied.behavior == PermissionBehavior.DENY
     assert denied.rule_id == "deny-delete"
 
     allowed = engine.evaluate(
-        PermissionRequest(tool_name="read_file"), rules, default_behavior
+        PermissionRequest(tool_name="read_file"), ctx.permission_rules,
+        ctx.default_behavior,
     )
     assert allowed.behavior == PermissionBehavior.ALLOW
     assert allowed.rule_id is None
+
+
+def test_permission_context_roundtrips_legacy_json():
+    """旧 state.json 的 permission_context dict 可直接恢复为类型化模型。"""
+    from ftre_agent_core.permission import PermissionContext
+    from ftre_agent_core.state import AgentState
+
+    legacy = AgentState.model_validate({
+        "context": [],
+        "permission_context": {
+            "permission_rules": [
+                {
+                    "id": "ask-bash",
+                    "tool_name": "bash",
+                    "argument_regex": {},
+                    "behavior": "ask",
+                    "priority": 0,
+                    "enabled": True,
+                },
+            ],
+            "default_behavior": "allow",
+        },
+    })
+
+    assert isinstance(legacy.permission_context, PermissionContext)
+    assert legacy.permission_context.permission_rules[0].id == "ask-bash"
+    assert legacy.permission_context.permission_rules[0].behavior == PermissionBehavior.ASK
+    assert legacy.permission_context.default_behavior == PermissionBehavior.ALLOW
+
+    # 再序列化回 JSON，字段名不变
+    dumped = legacy.model_dump(mode="json")
+    assert dumped["permission_context"]["default_behavior"] == "allow"
+    assert dumped["permission_context"]["permission_rules"][0]["behavior"] == "ask"
+
+
+def test_permission_context_defaults_to_empty_allow():
+    """默认 PermissionContext = 空规则 + ALLOW（不启用拦截的完整表达）。"""
+    from ftre_agent_core.permission import PermissionContext
+
+    ctx = PermissionContext()
+    assert ctx.permission_rules == []
+    assert ctx.default_behavior == PermissionBehavior.ALLOW

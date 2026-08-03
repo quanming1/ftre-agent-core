@@ -17,6 +17,7 @@ from .permission import (
     PermissionRequest,
     PermissionRule,
     PermissionDecision,
+    PermissionContext,
     PermissionEngine,
 )
 from .hooks import (
@@ -46,6 +47,7 @@ __all__ = [
     "PermissionRequest",
     "PermissionRule",
     "PermissionDecision",
+    "PermissionContext",
     "PermissionEngine",
     "Tracer",
     "TraceSpan",

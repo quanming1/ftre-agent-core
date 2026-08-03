@@ -57,7 +57,7 @@ class ActingExecutor:
         agent,
         state: "RunState",
         tool_handler: ToolHandler,
-        permission_engine: "PermissionEngine | None" = None,
+        permission_engine: "PermissionEngine",
     ):
         """初始化 Acting 执行器。
 
@@ -67,8 +67,8 @@ class ActingExecutor:
             is_cancelled 等运行期上下文。
           - tool_handler: 工具执行处理器（ToolHandler），负责 spawn / gather_results /
             build_assistant_message，通常在整个 agent 运行期共享一个实例。
-          - permission_engine: 权限决策引擎。为 None 时不做任何权限检查，
-            所有工具调用直接执行（保持无权限配置时的原行为）。
+          - permission_engine: 权限决策引擎（Agent 内部创建，始终可用）。规则与
+            默认行为从 AgentState.permission_context 读取。
         """
         self.agent = agent
         self.state = state
@@ -79,8 +79,9 @@ class ActingExecutor:
         """执行一轮工具调用；按权限决策决定「整批执行」还是「整批挂起」。
 
         权限分流（A1 整批语义）：
-          1) 无权限引擎，或本轮全部 tool_call 都被判定 ALLOW → 走原执行流程
-             （spawn → gather → 写 assistant + tool 结果），行为与无权限时完全一致；
+          1) 本轮全部 tool_call 都被判定 ALLOW（空规则 + default ALLOW 即不拦截）
+             → 走原执行流程（spawn → gather → 写 assistant + tool 结果），
+             行为与无权限配置时完全一致；
           2) 只要存在任一 ASK 或 DENY → 整批挂起，谁都不执行：
              先写 assistant(tool_calls)，把 ASK 的 tool_call 状态置 ASKING，
              为每个 ASK 逐个 yield RequireUserConfirmEvent，然后 return。
@@ -92,7 +93,7 @@ class ActingExecutor:
         tool_calls = action.tool_calls
 
         # ── 权限分流 ──
-        # decisions: tool_call_id -> PermissionBehavior；无引擎时视为全 ALLOW。
+        # decisions: tool_call_id -> PermissionBehavior；空规则 + default ALLOW 即全放行。
         decisions = self._classify(tool_calls)
         has_pause = any(
             b in (PermissionBehavior.ASK, PermissionBehavior.DENY)
@@ -100,7 +101,7 @@ class ActingExecutor:
         )
 
         if not has_pause:
-            # 全 ALLOW（或无引擎）→ 原执行流程
+            # 全 ALLOW → 原执行流程
             async for event in self._execute_calls(tool_calls):
                 yield event
             return
@@ -193,14 +194,12 @@ class ActingExecutor:
     def _classify(self, tool_calls: list["ToolCall"]) -> dict[str, PermissionBehavior]:
         """对整批 tool_call 逐个求权限决策，返回 id -> behavior。
 
-        无权限引擎时全部视为 ALLOW（保持原行为）。已被确认放行（ALLOWED）的调用
-        跳过检查、直接视为 ALLOW，避免恢复后重复询问。详细决策存 _decisions_detail
-        供挂起时填充 RequireUserConfirmEvent 的 reason/rule_id。
+        规则与默认行为来自 AgentState.permission_context；空规则 + ALLOW 即
+        表达"不启用拦截"，无需额外的引擎 None 判断。已被确认放行（ALLOWED）
+        的调用跳过检查、直接视为 ALLOW，避免恢复后重复询问。详细决策存
+        _decisions_detail 供挂起时填充 RequireUserConfirmEvent 的 reason/rule_id。
         """
         self._decisions_detail = {}
-        if self.permission_engine is None:
-            return {tc.id: PermissionBehavior.ALLOW for tc in tool_calls}
-
         rules, default_behavior = self._load_permission_config()
         result: dict[str, PermissionBehavior] = {}
         for tc in tool_calls:
@@ -217,20 +216,12 @@ class ActingExecutor:
         return result
 
     def _load_permission_config(self) -> tuple[list[PermissionRule], PermissionBehavior]:
-        """从 AgentState.permission_context 读出规则与默认行为。
+        """从 AgentState.permission_context（类型化模型）读出规则与默认行为。
 
-        约定 key：permission_rules（规则 dict 列表）、default_behavior（行为字符串）。
-        缺省时返回空规则 + ASK 兜底。
+        字段名与历史 JSON 一致，旧的 state.json 经 Pydantic 校验后即可直接使用。
         """
-        ctx = self.agent.state.permission_context or {}
-        rules = [
-            PermissionRule.model_validate(r) for r in ctx.get("permission_rules", [])
-        ]
-        default_raw = ctx.get("default_behavior")
-        default_behavior = (
-            PermissionBehavior(default_raw) if default_raw else PermissionBehavior.ASK
-        )
-        return rules, default_behavior
+        ctx = self.agent.state.permission_context
+        return ctx.permission_rules, ctx.default_behavior
 
     def _call_state(self, tool_call_id: str) -> ToolCallState | None:
         """读取 context 里指定 tool_call（ToolCallBlock）的当前状态，找不到返回 None。"""
