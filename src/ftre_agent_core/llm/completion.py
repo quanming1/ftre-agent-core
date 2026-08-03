@@ -33,7 +33,7 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """复制并规范化 Chat Completions 消息，不污染调用方的 memory/history。
 
     遵循 OpenAI-compatible 工具调用语义：
-    - assistant 内容为空（包括 reasoning-only）时统一设 content=None
+    - assistant 内容为空（包括 reasoning-only）时统一设 content=""
     - 不使用占位符字符串：模型会将其作为可见文本 echo 回来，
       导致 runner 误判为正常完成而停止
     """
@@ -43,7 +43,10 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
             isinstance(content, str) and not content.strip()
         )
         if is_empty:
-            message["content"] = None
+            # OpenAI-compatible 网关对 nullable content 的兼容性并不一致。
+            # 统一使用空字符串，避免最终 JSON 请求中出现 content: null；
+            # 没有 tool_calls 的纯空 assistant 仍会在下方被整条过滤。
+            message["content"] = ""
 
     def has_assistant_payload(message: dict) -> bool:
         # OpenAI-compatible providers require visible content or tool_calls.

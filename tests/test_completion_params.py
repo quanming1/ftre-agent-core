@@ -121,8 +121,8 @@ async def test_chat_completions_normalizes_empty_assistant_content(monkeypatch):
     await _collect(handler, messages)
 
     assistant_messages = [m for m in captured["messages"] if m["role"] == "assistant"]
-    assert assistant_messages[0]["content"] is None
-    assert assistant_messages[1]["content"] is None
+    assert assistant_messages[0]["content"] == ""
+    assert assistant_messages[1]["content"] == ""
     assert len(assistant_messages) == 2
     # 请求边界规范化不能污染 memory/history 原对象。
     assert "content" not in messages[0]
