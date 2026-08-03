@@ -408,6 +408,7 @@ class LLMHandler:
             "messages": request_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "tool_choice": "auto",
         }
         if self.max_tokens is not None:
             params["max_tokens"] = max(1, int(self.max_tokens))
@@ -621,6 +622,7 @@ class LLMHandler:
             "input": input_items,
             "stream": True,
             "store": False,
+            "tool_choice": "auto",
         }
         if instructions is not None:
             params["instructions"] = instructions

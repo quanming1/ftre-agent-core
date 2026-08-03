@@ -48,8 +48,30 @@ async def test_llm_handler_passes_configured_max_tokens(monkeypatch):
 
     assert captured["max_tokens"] == 8192
     assert captured["stream"] is True
+    assert captured["tool_choice"] == "auto"
     assert isinstance(events[-1], StepFinish)
     assert events[-1].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_responses_api_uses_auto_tool_choice(monkeypatch):
+    handler = LLMHandler("test-model", "test-key", api_type="responses")
+    captured = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream()
+
+    monkeypatch.setattr(
+        handler._client,
+        "responses",
+        SimpleNamespace(create=create),
+    )
+
+    events = [event async for event in handler.stream([{"role": "user", "content": "hi"}])]
+
+    assert captured["tool_choice"] == "auto"
+    assert isinstance(events[-1], StepFinish)
 
 
 @pytest.mark.asyncio
