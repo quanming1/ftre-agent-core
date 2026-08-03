@@ -252,9 +252,10 @@ def to_openai_message(
       1. 含 ToolResultBlock → ``{role:"tool", tool_call_id, content}``（取首个
          ToolResultBlock；ftre 工具结果是独立消息，一条一结果）
       2. 否则 → ``{role:"assistant", content:[parts], tool_calls:[...],
-         reasoning_content?}``：
+         reasoning_content:str}``：
          * TextBlock/DataBlock/HintBlock → content parts
          * ThinkingBlock 只写 reasoning_content（OpenAI content 不接受 thinking part）
+         * assistant 没有 ThinkingBlock 时 reasoning_content 为空字符串
          * ToolCallBlock → tool_calls 字段（arguments 序列化为 str JSON）
     """
     # 形态 1：工具结果消息
@@ -296,7 +297,9 @@ def to_openai_message(
         "role": role or "assistant",
         "content": content_parts if content_parts else "",
     }
-    if reasoning_parts:
+    # reasoning_content 是 assistant 消息的稳定字段：有推理时写入
+    # 完整内容，无推理时也显式保留为 ""。user/system 不携带该字段。
+    if msg["role"] == "assistant":
         msg["reasoning_content"] = "\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls

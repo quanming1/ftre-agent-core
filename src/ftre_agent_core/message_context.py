@@ -15,41 +15,92 @@ from .message import (
 
 
 def _msg_to_dicts(msg: Msg) -> list[dict]:
-    """Expand one typed Msg into provider-compatible protocol messages.
+    """把一条 Core ``Msg`` 展开为一组 Provider 可接收的 OpenAI 消息。
 
-    A persisted assistant reply may aggregate several reasoning/tool rounds in one
-    ``Msg``. Provider protocols require every ``ToolResultBlock`` to be a separate
-    ``role=tool`` message, so split the aggregate while preserving block order.
+    为什么返回 ``list[dict]`` 而不是单个 ``dict``：
+      FTRE 持久化时，一条 assistant ``Msg.content`` 可能聚合了多轮内容，
+      例如：
+
+      ``ThinkingBlock -> ToolCallBlock -> ToolResultBlock -> TextBlock``
+
+      但 OpenAI 工具协议要求 ``ToolResultBlock`` 必须是独立的
+      ``role="tool"`` 消息。因此上面一条 Msg 需要展开成：
+
+      1. ``assistant(reasoning/content + tool_calls)``
+      2. ``tool(tool_call_id + content)``
+      3. ``assistant(content)``
+
+    这里只负责“按 ToolResultBlock 切分消息序列”。单个 Block 如何
+    转成 OpenAI 字段，由 ``to_openai_message()`` 负责。
     """
+    # 最终展开后的 OpenAI 消息序列。一条 Msg 可能产生多条消息。
     messages: list[dict] = []
+
+    # 暂存尚未输出的非 ToolResultBlock。它们将被合并为一条
+    # assistant/user/system 消息，直到遇到 ToolResultBlock 才 flush。
     assistant_blocks: list = []
+
+    # 兼容旧的消息存储方式：部分 Msg 没有 ThinkingBlock，而是把推理文本
+    # 存在 metadata["reasoning_content"] 里。这个值只能注入第一段 assistant
+    # 消息，否则一条 Msg 被切成多段后会重复发送同一段推理。
     metadata_reasoning = msg.metadata.get("reasoning_content")
     metadata_reasoning_used = False
 
     def flush_assistant() -> None:
+        """把当前累积的非 tool-result blocks 输出为一条 OpenAI 消息。"""
         nonlocal metadata_reasoning_used
+
+        # 没有待输出 block 时不生成空 assistant，避免在 tool 消息之前
+        # 额外插入无意义的协议消息。
         if not assistant_blocks:
             return
+
+        # 真正的 Block -> OpenAI 字段转换点：
+        #   TextBlock       -> content
+        #   ThinkingBlock   -> reasoning_content
+        #   ToolCallBlock   -> tool_calls
+        # role 沿用原 Msg.role，通常是 assistant，也可以是 user/system。
         result = to_openai_message(assistant_blocks, role=msg.role)
+
+        # 旧格式 metadata reasoning 只注入第一个切分片段。如果 blocks 中已经
+        # 有 ThinkingBlock，to_openai_message() 已生成非空 reasoning_content，
+        # 此处不覆盖；如果只有默认空字符串，则用 metadata 中的真实推理补全。
         if not metadata_reasoning_used:
-            if metadata_reasoning and "reasoning_content" not in result:
+            if metadata_reasoning and not result.get("reasoning_content"):
                 result["reasoning_content"] = metadata_reasoning
             metadata_reasoning_used = True
+
+        # 先加入结果，再清空原列表。clear() 不会影响 result，因为
+        # to_openai_message() 已经构造了新的 dict/list。
         messages.append(result)
         assistant_blocks.clear()
 
+    # 严格按 Msg.content 的原始顺序扫描，不重排 block。
     for block in msg.content:
         if isinstance(block, ToolResultBlock):
+            # tool result 前面累积的 reasoning/text/tool_call 必须先输出，
+            # 从而保证 OpenAI 协议中 assistant(tool_calls) 在 tool(result) 之前。
             flush_assistant()
+
+            # 每个 ToolResultBlock 单独转成一条 role="tool" 消息。
+            # tool_call_id 由 ToolResultBlock.id 生成，用来和前面的 tool_calls 配对。
             messages.append(to_openai_message([block], role="tool"))
         else:
+            # 非 ToolResultBlock 保持原顺序累积，稍后合并成一条消息。
             assistant_blocks.append(block)
+
+    # 循环结束后，Msg 尾部可能还有没遇到 tool result 的 blocks，
+    # 例如最终 TextBlock，或尚未获得结果的 ToolCallBlock。
     flush_assistant()
 
-    # Preserve empty messages for compatibility; the provider boundary may drop
-    # truly empty assistant messages when required by a concrete API.
+    # 如果 Msg.content 完全为空，仍保留一条空消息以兼容现有语义。
+    # 注意：这里不判断具体 Provider 是否接受空 assistant。真正发请求前，
+    # completion._normalize_chat_messages() 会再过滤无 content/tool_calls 的无效消息。
     if not messages:
         result = to_openai_message([], role=msg.role)
+
+        # 无 content blocks 但存在旧 metadata reasoning 时，仍把它带到中间结果。
+        # 它之后是否会被 Provider 边界保留，由 normalization 规则决定。
         if metadata_reasoning:
             result["reasoning_content"] = metadata_reasoning
         messages.append(result)
@@ -61,10 +112,19 @@ class MessageContext:
 
     @staticmethod
     def messages(context: list[Msg]) -> list[dict]:
+        """把完整 Core 上下文转成按时序排列的 OpenAI 消息列表。
+
+        ``context`` 中的每条 Msg 依次交给 ``_msg_to_dicts()``；因为一条 Msg
+        可能展开为多条 OpenAI 消息，这里用双层遍历将结果打平。
+
+        该方法不添加 system prompt；需要 system prompt 时调用
+        ``get_messages()``。
+        """
         return [item for message in context for item in _msg_to_dicts(message)]
 
     @staticmethod
     def get_messages(context: list[Msg], system_prompt: str = "") -> list[dict]:
+        """在已转换的历史消息前面插入一条 system 消息。"""
         return [
             {"role": "system", "content": system_prompt},
             *MessageContext.messages(context),

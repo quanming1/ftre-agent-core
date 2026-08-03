@@ -6,6 +6,19 @@ from ftre_agent_core.message import (
 )
 
 
+def test_assistant_without_thinking_has_empty_reasoning_content():
+    message = to_openai_message(
+        [TextBlock(text="visible answer")],
+        role="assistant",
+    )
+
+    assert message == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "visible answer"}],
+        "reasoning_content": "",
+    }
+
+
 def test_thinking_block_stays_out_of_openai_content_parts():
     message = to_openai_message(
         [
