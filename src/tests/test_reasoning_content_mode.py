@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from ftre_agent_core.agent.runner.tool_handler import ToolHandler
-from ftre_agent_core.llm import ToolCall
+from ftre_agent_core.message import TextBlock, ThinkingBlock, ToolCallBlock
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.state import AgentState
-from ftre_agent_core.tool import ToolRegistry
 
 
 def test_message_context_keeps_reasoning_separate_from_content():
     state = AgentState()
 
-    MessageContext.add_assistant(state.context, "answer", reasoning="thinking")
+    MessageContext.append_reply_blocks(
+        state.context,
+        "reply-1",
+        [ThinkingBlock(thinking="thinking"), TextBlock(text="answer")],
+    )
 
     assert MessageContext.messages(state.context) == [
         {
@@ -23,37 +25,64 @@ def test_message_context_keeps_reasoning_separate_from_content():
     ]
 
 
-def test_tool_call_message_preserves_reasoning_content():
-    handler = ToolHandler(ToolRegistry())
-    msg = handler.build_assistant_message(
-        [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
-        reasoning="thinking",
+def test_reply_blocks_preserve_reasoning_with_tool_call():
+    state = AgentState()
+    MessageContext.append_reply_blocks(
+        state.context,
+        "reply-1",
+        [
+            ThinkingBlock(thinking="thinking"),
+            ToolCallBlock(
+                id="call_1",
+                name="bash",
+                arguments={"command": "pwd"},
+            ),
+        ],
     )
+    msg = MessageContext.messages(state.context)[0]
 
     assert msg["content"] == ""
     assert msg["reasoning_content"] == "thinking"
     assert msg["tool_calls"][0]["id"] == "call_1"
 
 
-def test_tool_call_message_preserves_visible_content_as_parts():
-    handler = ToolHandler(ToolRegistry())
-    msg = handler.build_assistant_message(
-        [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
-        content="visible answer",
-        reasoning="thinking",
+def test_reply_blocks_preserve_visible_content_with_tool_call():
+    state = AgentState()
+    MessageContext.append_reply_blocks(
+        state.context,
+        "reply-1",
+        [
+            ThinkingBlock(thinking="thinking"),
+            TextBlock(text="visible answer"),
+            ToolCallBlock(
+                id="call_1",
+                name="bash",
+                arguments={"command": "pwd"},
+            ),
+        ],
     )
+    msg = MessageContext.messages(state.context)[0]
 
     assert msg["content"] == [{"type": "text", "text": "visible answer"}]
     assert msg["reasoning_content"] == "thinking"
     assert msg["tool_calls"][0]["id"] == "call_1"
 
 
-def test_tool_call_message_with_visible_content_without_reasoning():
-    handler = ToolHandler(ToolRegistry())
-    msg = handler.build_assistant_message(
-        [ToolCall(id="call_1", name="bash", input={"command": "pwd"})],
-        content="visible answer",
+def test_reply_blocks_keep_empty_reasoning_field_without_thinking():
+    state = AgentState()
+    MessageContext.append_reply_blocks(
+        state.context,
+        "reply-1",
+        [
+            TextBlock(text="visible answer"),
+            ToolCallBlock(
+                id="call_1",
+                name="bash",
+                arguments={"command": "pwd"},
+            ),
+        ],
     )
+    msg = MessageContext.messages(state.context)[0]
 
     assert msg["content"] == [{"type": "text", "text": "visible answer"}]
     assert msg["reasoning_content"] == ""

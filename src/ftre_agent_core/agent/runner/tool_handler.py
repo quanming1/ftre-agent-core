@@ -1,12 +1,11 @@
 """
-工具执行器、并发调度器和 assistant 消息构造器。
+工具执行器和并发调度器。
 
 本模块职责：
   - run_one(): 执行单个工具调用，返回 ToolResult。
   - spawn(): 为一个 ToolCall 创建并发执行任务，不阻塞 LLM 流消费。
   - drain(): 取消并回收一组工具任务（用于异常清理）。
   - gather_results(): 等待全部工具任务、处理取消、按 tool_calls 顺序归并结果。
-  - build_assistant_message(): 根据 ToolCall 列表构造写入 memory 的 assistant 消息。
   - on_pre_tool / on_post_tool hook 集成。
 
 本模块不负责：
@@ -16,7 +15,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -25,7 +23,6 @@ from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tool.registry import ToolContext
 from ftre_agent_core.event import AgentStreamEvent, EventBase
-from ftre_agent_core.reasoning import format_assistant_message
 from ftre_agent_core.tracing import RunStatus as TraceRunStatus, RunType, TraceSpan
 
 if TYPE_CHECKING:
@@ -458,56 +455,3 @@ class ToolHandler:
         # 任一结果为 cancelled 即认为本轮发生了取消，通知调用方终止
         any_cancelled = any(r.status == "cancelled" for r in results)
         return results, (cancelled_externally or any_cancelled or state.is_cancelled)
-
-    # 构造带 tool_calls 的 assistant 消息。
-    @staticmethod
-    def build_assistant_message(
-        tool_calls: list[ToolCall],
-        content: str | None = None,
-        reasoning: str | None = None,
-    ) -> dict:
-        """构造要写入 memory.add_raw() 的 assistant 原始消息。
-
-        调用时机：
-          react_runner 在拿到 LLM 输出的 tool_calls 后、真正执行工具之前调用本方法，
-          把"模型要求调用哪些工具"这一步先固化成 assistant 消息写入 memory，
-          这样即使后续工具执行失败或被取消，memory 里也保留了模型的工具调用请求。
-
-        参数：
-          - tool_calls: LLM 输出的工具调用列表，保持原始顺序。
-          - content: 模型输出的文本内容（可与 tool_calls 并存），可空。
-          - reasoning: 模型的推理过程文本（若启用 reasoning），可空。
-
-        返回：
-          可直接传给 memory.add_raw() 的 assistant 消息 dict。
-
-        写入顺序约束：
-          assistant 消息只包含 tool_calls 本身；对应的 role="tool" 结果消息不由本方法产生，
-          而是由 react_runner 在所有工具执行完成、gather_results 收齐结果后统一写入。
-          因此必须保证 assistant 消息先于 tool 结果消息写入 memory，否则消息顺序错乱
-          会导致后续 LLM 上下文里 tool 消息出现在 assistant 调用之前，违反协议。
-
-        tool_calls 格式化：
-          把每个 ToolCall 转成 OpenAI 风格的 {"id","type":"function","function":{"name","arguments"}}，
-          其中 arguments 必须是 JSON 字符串（input 为 None 时用 "{}" 占位），
-          因为 OpenAI/Anthropic 协议规定 function.arguments 是字符串而非对象。
-        """
-        # 格式化 tool_calls 为 OpenAI 兼容结构；arguments 序列化为 JSON 字符串
-        formatted_tool_calls = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.name,
-                    # arguments 必须是字符串；input 为 None（解析失败）时用 "{}" 占位
-                    "arguments": json.dumps(tc.input, ensure_ascii=False)
-                    if tc.input is not None else "{}",
-                },
-            }
-            for tc in tool_calls
-        ]
-        return format_assistant_message(
-            content=content,
-            reasoning=reasoning,
-            tool_calls=formatted_tool_calls,
-        )

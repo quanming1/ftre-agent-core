@@ -1,5 +1,12 @@
 """MessageContext stateless helper tests."""
-from ftre_agent_core.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
+from ftre_agent_core.message import (
+    HintBlock,
+    Msg,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.state import AgentState
 
@@ -8,7 +15,11 @@ def test_message_context_updates_agent_state_context():
     state = AgentState()
 
     MessageContext.add_user(state.context, "hello")
-    MessageContext.add_assistant(state.context, "world", reasoning="thinking")
+    MessageContext.append_reply_blocks(
+        state.context,
+        "reply-1",
+        [ThinkingBlock(thinking="thinking"), TextBlock(text="world")],
+    )
 
     assert all(isinstance(message, Msg) for message in state.context)
     assert [message.role for message in state.context] == ["user", "assistant"]
@@ -67,3 +78,35 @@ def test_aggregated_reply_splits_tool_results_at_provider_boundary():
         "content": "tool output",
     }
     assert messages[2]["content"] == [{"type": "text", "text": "after"}]
+
+
+def test_append_reply_blocks_keeps_one_msg_and_splits_hint_as_user():
+    context = []
+
+    MessageContext.append_reply_blocks(
+        context,
+        "reply-1",
+        [TextBlock(text="before")],
+    )
+    MessageContext.append_reply_blocks(
+        context,
+        "reply-1",
+        [HintBlock(hint="继续工作。", source="system"), TextBlock(text="after")],
+    )
+
+    assert len(context) == 1
+    assert context[0].id == "reply-1"
+    assert [block.type for block in context[0].content] == ["text", "hint", "text"]
+    assert MessageContext.messages(context) == [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "before"}],
+            "reasoning_content": "",
+        },
+        {"role": "user", "content": "继续工作。"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "after"}],
+            "reasoning_content": "",
+        },
+    ]

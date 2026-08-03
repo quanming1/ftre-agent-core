@@ -2,6 +2,8 @@
 from typing import Any
 
 from .message import (
+    ContentBlock,
+    HintBlock,
     Msg,
     MsgName,
     TextBlock,
@@ -38,7 +40,7 @@ def _msg_to_dicts(msg: Msg) -> list[dict]:
 
     # 暂存尚未输出的非 ToolResultBlock。它们将被合并为一条
     # assistant/user/system 消息，直到遇到 ToolResultBlock 才 flush。
-    assistant_blocks: list = []
+    assistant_blocks: list[ContentBlock] = []
 
     # 兼容旧的消息存储方式：部分 Msg 没有 ThinkingBlock，而是把推理文本
     # 存在 metadata["reasoning_content"] 里。这个值只能注入第一段 assistant
@@ -77,7 +79,16 @@ def _msg_to_dicts(msg: Msg) -> list[dict]:
 
     # 严格按 Msg.content 的原始顺序扫描，不重排 block。
     for block in msg.content:
-        if isinstance(block, ToolResultBlock):
+        if isinstance(block, HintBlock):
+            # HintBlock 在持久化结构中属于当前 reply，但在 Provider 边界必须表现为
+            # 一条 user 消息。先结束它前面的 assistant 片段，再输出 hint，后续
+            # thinking/text/tool_call 会重新组成下一段 assistant。
+            flush_assistant()
+            if isinstance(block.hint, str):
+                messages.append({"role": "user", "content": block.hint})
+            else:
+                messages.append(to_openai_message([block], role="user"))
+        elif isinstance(block, ToolResultBlock):
             # tool result 前面累积的 reasoning/text/tool_call 必须先输出，
             # 从而保证 OpenAI 协议中 assistant(tool_calls) 在 tool(result) 之前。
             flush_assistant()
@@ -137,45 +148,64 @@ class MessageContext:
         )
 
     @staticmethod
-    def add_assistant(
+    def append_reply_blocks(
         context: list[Msg],
-        content: str,
-        usage: dict | None = None,
-        reasoning: str | None = None,
+        reply_id: str,
+        blocks: list[ContentBlock],
     ) -> None:
-        blocks = [TextBlock(text=content)] if content else []
-        metadata: dict[str, Any] = {}
-        if reasoning:
-            metadata["reasoning_content"] = reasoning
-        context.append(
-            Msg(name=MsgName.DEFAULT, content=blocks, role="assistant", metadata=metadata)
-        )
+        """把内容块追加到 ``reply_id`` 对应的 assistant 消息。
 
-    @staticmethod
-    def add_tool_result(
-        context: list[Msg],
-        tool_call_id: str,
-        content: str,
-        state: ToolResultState = ToolResultState.SUCCESS,
-        **kwargs,
-    ) -> None:
+        一次 ``agent.run()`` 只产生一个 ``reply_id``。同一次回复内可能经历多次
+        Reasoning / Acting，但它们都必须聚合到同一个 ``Msg`` 中；真正发送给
+        Provider 时，再由 ``_msg_to_dicts()`` 按 ToolResultBlock / HintBlock 切分。
+
+        这与 AgentScope ``AgentState.append_context()`` 的规则一致：只有尾消息
+        同时是 assistant 且 id 等于当前 reply_id 时才扩展，否则创建新的回复消息。
+        空 blocks 不创建空 assistant，避免产生无 content/tool_calls 的非法请求。
+        """
+        if not blocks:
+            return
+        if (
+            context
+            and context[-1].role == "assistant"
+            and context[-1].id == reply_id
+        ):
+            context[-1].content.extend(blocks)
+            return
         context.append(
             Msg(
+                id=reply_id,
                 name=MsgName.DEFAULT,
-                content=[
-                    ToolResultBlock(
-                        id=tool_call_id,
-                        name=kwargs.get("name", ""),
-                        output=content,
-                        state=state,
-                    )
-                ],
+                content=blocks,
                 role="assistant",
             )
         )
 
     @staticmethod
-    def add_raw(context: list[Msg], message: Any, usage=None) -> None:
+    def add_tool_result(
+        context: list[Msg],
+        *,
+        reply_id: str,
+        tool_call_id: str,
+        name: str,
+        content: str,
+        state: ToolResultState = ToolResultState.SUCCESS,
+    ) -> None:
+        """把工具结果追加到其所属 reply。
+
+        ``reply_id`` 和 ``name`` 必须显式提供：缺少 reply_id 会重新创建 assistant
+        Msg，破坏单 Reply 单 Msg；缺少 name 会让持久化的 ToolResultBlock 信息不完整。
+        """
+        block = ToolResultBlock(
+            id=tool_call_id,
+            name=name,
+            output=content,
+            state=state,
+        )
+        MessageContext.append_reply_blocks(context, reply_id, [block])
+
+    @staticmethod
+    def add_raw(context: list[Msg], message: Any) -> None:
         if isinstance(message, Msg):
             context.append(message)
             return

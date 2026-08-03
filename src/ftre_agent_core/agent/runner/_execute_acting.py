@@ -23,7 +23,13 @@ from ...event import (
     ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent,
 )
 from ...llm import ToolCall
-from ...message import ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
+from ...message import (
+    HintBlock,
+    ToolCallBlock,
+    ToolCallState,
+    ToolResultBlock,
+    ToolResultState,
+)
 from ...message_context import MessageContext
 from ...permission import PermissionBehavior, PermissionRequest, PermissionRule
 from ...types import ReplyFinishedReason
@@ -44,9 +50,9 @@ class ActingExecutor:
     """执行 Acting 动作：并发跑工具、成组写入 Memory、产出流事件。
 
     职责定位（与 ToolHandler 的分工）：
-      - 本类是“编排层”：拿到一轮 LLM 输出的 tool_calls 后，调度它们的并发执行、
-        决定 assistant(tool_calls) 与 tool(result) 写入 memory 的先后顺序、
-        向上层 yield 工具结果事件与 hint 事件、在取消时抛出 CancelledError。
+      - 本类是“编排层”：拿到 Reasoning 已写入 context 的 tool_calls 后，负责
+        权限分流、调度工具并把 tool(result) 追加到同一个 reply Msg，向上层
+        yield 工具结果与 hint 事件，并在取消时抛出 CancelledError。
       - ToolHandler 是“执行层”：负责单个工具的真正派发、on_pre_tool/on_post_tool
         hook 集成、异常归一化、tracing span 管理；它不关心 memory 写入与事件产出。
       本类不直接 await 单个工具，而是通过 ToolHandler.spawn / gather_results 间接驱动。
@@ -65,8 +71,8 @@ class ActingExecutor:
           - agent: 宿主 Agent 实例，提供 memory（写入消息）、tool_registry 等。
           - state: 当前 run() 的运行状态（RunState），提供 reply_id、trace_span、
             is_cancelled 等运行期上下文。
-          - tool_handler: 工具执行处理器（ToolHandler），负责 spawn / gather_results /
-            build_assistant_message，通常在整个 agent 运行期共享一个实例。
+          - tool_handler: 工具执行处理器（ToolHandler），负责 spawn / gather_results，
+            通常在整个 agent 运行期共享一个实例。
           - permission_engine: 权限决策引擎（Agent 内部创建，始终可用）。规则与
             默认行为从 AgentState.permission_context 读取。
         """
@@ -80,10 +86,10 @@ class ActingExecutor:
 
         权限分流（A1 整批语义）：
           1) 本轮全部 tool_call 都被判定 ALLOW（空规则 + default ALLOW 即不拦截）
-             → 走原执行流程（spawn → gather → 写 assistant + tool 结果），
+             → Reasoning 已保存完整模型响应，再走 spawn → gather → 写 tool 结果，
              行为与无权限配置时完全一致；
           2) 只要存在任一 ASK 或 DENY → 整批挂起，谁都不执行：
-             先写 assistant(tool_calls)，把 ASK 的 tool_call 状态置 ASKING，
+             把已经保存的 ASK tool_call 状态置 ASKING，
              为每个 ASK 逐个 yield RequireUserConfirmEvent，然后 return。
              DENY 的调用此时不写结果（甲方案：一起等，恢复时整批处理才写 DENIED）。
 
@@ -107,13 +113,8 @@ class ActingExecutor:
             return
 
         # ── 有 ASK/DENY：整批挂起，不执行任何工具 ──
-        # 先写 assistant(tool_calls)，让 context 里出现带全部 tool_call 的 assistant 消息，
-        # 后续每个 tool_call 都会补一条配对结果（恢复整批处理时写），保证协议完整。
-        MessageContext.add_raw(
-            self.agent.state.context,
-            self.tool_handler.build_assistant_message(tool_calls=tool_calls),
-        )
-
+        # Reasoning 已把完整响应写入当前 reply；后续每个 tool_call 都会补一条
+        # 配对结果（恢复整批处理时写），保证协议完整。
         reply_id = self.state.reply_id
         for tc in tool_calls:
             if decisions[tc.id] == PermissionBehavior.ASK:
@@ -143,7 +144,7 @@ class ActingExecutor:
 
         不接收 action 参数——待执行清单完全从持久化的 context 重建，因此进程重启后
         加载 state.json 也能恢复，不依赖任何实例内存。
-        assistant(tool_calls) 消息在挂起时已写过，这里不再重复写。
+        完整 assistant 响应在挂起时已写过，这里不再重复写。
         """
         pending_blocks = self._pending_tool_calls_from_context()
         # ToolCallBlock → ToolCall（执行所需）
@@ -159,7 +160,7 @@ class ActingExecutor:
 
         # 已确认放行的调用：走原执行流程，但跳过 assistant 消息（挂起时已写）
         if allowed:
-            async for event in self._execute_calls(allowed, write_assistant=False):
+            async for event in self._execute_calls(allowed):
                 yield event
 
         # 被拒绝（用户拒绝）或被 DENY 的调用：写 DENIED 结果 + 产出事件三元组
@@ -168,10 +169,11 @@ class ActingExecutor:
             denied_text = f"[USER_DENIED] 用户拒绝了工具 [{tc.name}] 的执行"
             MessageContext.add_tool_result(
                 self.agent.state.context,
-                tc.id,
-                denied_text,
-                state=ToolResultState.DENIED,
+                reply_id=reply_id,
+                tool_call_id=tc.id,
                 name=tc.name,
+                content=denied_text,
+                state=ToolResultState.DENIED,
             )
             MessageContext.set_tool_call_state(
                 self.agent.state.context, tc.id, ToolCallState.FINISHED
@@ -252,18 +254,19 @@ class ActingExecutor:
         return pending
 
     async def _execute_calls(
-        self, tool_calls: list["ToolCall"], write_assistant: bool = True
+        self, tool_calls: list["ToolCall"]
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """并发执行一批 tool_call 并成组写入结果、产出事件（原 stream 的执行逻辑）。
 
-        参数 write_assistant 为 False 时跳过写 assistant(tool_calls) 消息，
-        供 resume_execute 复用——恢复时该消息在挂起阶段已写过。
+        完整 assistant 响应由 ReasoningExecutor 写入；恢复执行时则已经存在于
+        持久化 context。本方法只追加工具结果，不创建 assistant 消息。
 
         整体流程分四个阶段：
           1) spawn：为每个 tool_call 创建并发任务（不 await，立即返回 Task）；
           2) gather_results：阻塞等待全部完成，归一化异常与取消，按原序拿回结果；
-          3) 成组写入 memory：先写 assistant(tool_calls)，再逐条写 tool(result)；
-          4) 延后追加 pending_hints 并 yield 对应事件；若发生取消则抛出 CancelledError。
+          3) 逐条写 tool(result)；
+          4) 延后追加 pending_hints 并 yield 对应事件；若发生取消则抛出
+             CancelledError。
         """
         reply_id = self.state.reply_id
 
@@ -288,22 +291,12 @@ class ActingExecutor:
             tool_calls, tool_tasks, self.state,
         )
 
-        # ── 阶段 3：成组写入 memory ──
-        # 顺序约束：assistant(tool_calls) 消息必须先于所有 tool(result) 写入。
-        # OpenAI / Anthropic 协议要求 role="tool" 的结果消息紧跟在带 tool_calls 的
-        # assistant 消息之后、且同组的 tool 结果必须连续；若 assistant 消息缺失或
-        # 顺序颠倒，后续 LLM 上下文会出现“无主 tool 消息”，直接违反协议导致报错。
-        if write_assistant:
-            MessageContext.add_raw(
-                self.agent.state.context,
-                self.tool_handler.build_assistant_message(
-                    tool_calls=tool_calls,
-                ),
-            )
-
+        # ── 阶段 3：成组写入 tool results ──
+        # 对应的 assistant(tool_calls) 已由 ReasoningExecutor 写入，或在确认恢复时
+        # 从持久化 context 还原。这里只连续追加结果，维持工具协议的相邻约束。
         # 工具可能返回事件对象（ToolResult.event，如 HintBlockEvent）而非纯文本，
         # 这些事件需要向上冒泡给调用方。但它们不能在下面的循环里立即写入 memory，
-        # 否则会被插在 tool(result) 序列中间——见阶段 4 的说明。先收集起来。
+        # 否则会被插在 tool(result) 序列中间。先收集起来，待结果全部写完再处理。
         pending_hints: list[AgentStreamEvent] = []
 
         for tc, result in zip(tool_calls, results):
@@ -314,10 +307,15 @@ class ActingExecutor:
             # 写入这一条 tool 结果（role="tool"），与上面的 assistant 消息配对
             MessageContext.add_tool_result(
                 self.agent.state.context,
-                tc.id,
-                result.result or f"[{tc.name}] 已完成",
-                state=ToolResultState.SUCCESS if not result.error else ToolResultState.ERROR,
+                reply_id=reply_id,
+                tool_call_id=tc.id,
                 name=tc.name,
+                content=result.result or f"[{tc.name}] 已完成",
+                state=(
+                    ToolResultState.SUCCESS
+                    if not result.error
+                    else ToolResultState.ERROR
+                ),
             )
 
             # 产出工具结果事件三元组：Start → (TextDelta) → End
@@ -348,10 +346,19 @@ class ActingExecutor:
                 content = ev.hint if isinstance(ev.hint, str) else str(ev.hint)
             else:
                 content = str(ev)
-            MessageContext.add_raw(self.agent.state.context, {"role": "user", "content": content})
+            hint_block = HintBlock(
+                id=uuid.uuid4().hex[:16],
+                source="tool",
+                hint=content,
+            )
+            MessageContext.append_reply_blocks(
+                self.agent.state.context,
+                reply_id,
+                [hint_block],
+            )
             yield HintBlockEvent(
                 reply_id=reply_id,
-                block_id=uuid.uuid4().hex[:16],
+                block_id=hint_block.id,
                 source="tool",
                 hint=content,
             )
@@ -433,18 +440,27 @@ class ExitExecutor:
 
             # ── ON_STOP block：不退出，注入续写提示 ──
             # Hook 返回 decision="block" 表示“别停，接着干”。行为：
-            #   1) 把 Hook 的 reason（或默认“继续工作。”）作为 role="user" 消息写入 memory，
-            #      让下一轮 LLM 调用能看到这条续写指令；
+            #   1) 把 Hook 的 reason（或默认“继续工作。”）作为当前 reply 的 HintBlock
+            #      写入 memory；Provider 边界会把它切成 user 消息供下一轮读取；
             #   2) yield 一个 HintBlockEvent（hide=True / internal=True），用于向上层 / 前端
             #      传达“本次停止被 Hook 拦截”，但标记为内部隐藏事件，不直接展示给用户；
             #   3) 置 outcome.should_continue=True，react_runner._loop 据此不 return 而是
             #      continue 进入下一轮迭代；本方法提前 return，不产出 ReplyEndEvent、不设终态。
             if stop_output is not None and stop_output.decision == "block":
                 hint = stop_output.reason or "继续工作。"
-                MessageContext.add_raw(self.agent.state.context, {"role": "user", "content": hint})
+                hint_block = HintBlock(
+                    id=uuid.uuid4().hex[:16],
+                    source="system",
+                    hint=hint,
+                )
+                MessageContext.append_reply_blocks(
+                    self.agent.state.context,
+                    reply_id,
+                    [hint_block],
+                )
                 yield HintBlockEvent(
                     reply_id=reply_id,
-                    block_id=uuid.uuid4().hex[:16],
+                    block_id=hint_block.id,
                     source="system",
                     hint=hint,
                     metadata={"hide": True, "internal": True, "reason": "stop_hook_block"},

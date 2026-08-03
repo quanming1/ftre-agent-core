@@ -36,6 +36,7 @@ from ...event import (
     RetryEvent,
 )
 from ...llm import LLMHandler, LLMError, TextDelta, ReasoningDelta, ToolInputDelta, ToolCall, StepFinish
+from ...message import HintBlock, TextBlock, ThinkingBlock, ToolCallBlock
 from ...message_context import MessageContext
 from ...tracing import RunType, RunStatus as TraceRunStatus
 from ._state import Reasoning, TurnResult
@@ -117,8 +118,9 @@ class ReasoningExecutor:
 
         5. 成功完成
             关闭 LLM span（输出 text/reasoning/finish_reason/has_tool_calls/usage/
-            response_metadata），把完整文本写入 memory（add_assistant，reasoning 存
-            metadata），组装成功 TurnResult 写入 self.result 并 return。
+            response_metadata），把本次 Provider 响应的 thinking/text/tool_calls
+            作为内容块追加到当前 reply_id 对应的 assistant Msg。最后组装成功
+            TurnResult 写入 self.result 并 return。
 
         6. 异常处理
             - CancelledError：关闭 span（CANCELLED 状态）→ 收尾 open blocks → 把
@@ -136,13 +138,19 @@ class ReasoningExecutor:
         # 对模型可见；否则模型无法据此调整行为。同时向下游发一个 HintBlockEvent，
         # 标记 hide/internal 以便 UI 层隐藏渲染。
         if action.hint:
-            MessageContext.add_raw(
+            hint_block = HintBlock(
+                id=uuid.uuid4().hex[:16],
+                source="system",
+                hint=action.hint,
+            )
+            MessageContext.append_reply_blocks(
                 self.agent.state.context,
-                {"role": "user", "content": action.hint},
+                reply_id,
+                [hint_block],
             )
             yield HintBlockEvent(
                 reply_id=reply_id,
-                block_id=uuid.uuid4().hex[:16],
+                block_id=hint_block.id,
                 source="system",
                 hint=action.hint,
                 metadata={"hide": True, "internal": True, "reason": "finalization_retry"},
@@ -302,8 +310,28 @@ class ReasoningExecutor:
                         "response_metadata": response_metadata,
                     })
 
-                # 写入 memory：assistant 消息，reasoning 存入 metadata（不进入正文）
-                MessageContext.add_assistant(self.agent.state.context, full_text, reasoning=full_reasoning or None)
+                # AgentScope 的关键约束：一次 run() 的整个 reply 只对应一个 Msg。
+                # 每次 Provider 响应完成后，将同轮 thinking/text/tool_calls 一次性
+                # 追加到当前 reply_id；Acting 之后只追加 ToolResultBlock。这样实时
+                # context 与 FTRE 根据事件重建的 state.json 具有完全相同的块结构。
+                response_blocks = []
+                if full_reasoning:
+                    response_blocks.append(ThinkingBlock(thinking=full_reasoning))
+                if full_text:
+                    response_blocks.append(TextBlock(text=full_text))
+                response_blocks.extend(
+                    ToolCallBlock(
+                        id=tool_call.id,
+                        name=tool_call.name,
+                        arguments=tool_call.input or {},
+                    )
+                    for tool_call in tool_calls
+                )
+                MessageContext.append_reply_blocks(
+                    self.agent.state.context,
+                    reply_id,
+                    response_blocks,
+                )
 
                 # 组装成功的 TurnResult 写入 self.result，结束本轮
                 self.result = TurnResult(
@@ -329,11 +357,19 @@ class ReasoningExecutor:
                 if thinking_block_id is not None:
                     yield ThinkingBlockEndEvent(reply_id=reply_id, block_id=thinking_block_id)
                     thinking_block_id = None
-                # 把已生成的半截文本写入 memory，尽量保留已有产出（非空才写）
+                # 把已生成的半截 thinking/text 追加到当前 reply，尽量保留已有产出。
                 _full_text = "".join(text_parts)
                 _full_reasoning = "".join(reasoning_parts)
-                if _full_text.strip():
-                    MessageContext.add_assistant(self.agent.state.context, _full_text, reasoning=_full_reasoning or None)
+                partial_blocks = []
+                if _full_reasoning:
+                    partial_blocks.append(ThinkingBlock(thinking=_full_reasoning))
+                if _full_text:
+                    partial_blocks.append(TextBlock(text=_full_text))
+                MessageContext.append_reply_blocks(
+                    self.agent.state.context,
+                    reply_id,
+                    partial_blocks,
+                )
                 raise
 
             # ── 阶段 6b：其他异常路径 ─────────────────────────────────────────
@@ -351,11 +387,19 @@ class ReasoningExecutor:
                     yield ThinkingBlockEndEvent(reply_id=reply_id, block_id=thinking_block_id)
                     thinking_block_id = None
 
-                # 把已生成的半截文本写入 memory（非空才写）
+                # 把已生成的半截 thinking/text 追加到当前 reply（非空才写）。
                 _full_text = "".join(text_parts)
                 _full_reasoning = "".join(reasoning_parts)
-                if _full_text.strip():
-                    MessageContext.add_assistant(self.agent.state.context, _full_text, reasoning=_full_reasoning or None)
+                partial_blocks = []
+                if _full_reasoning:
+                    partial_blocks.append(ThinkingBlock(thinking=_full_reasoning))
+                if _full_text:
+                    partial_blocks.append(TextBlock(text=_full_text))
+                MessageContext.append_reply_blocks(
+                    self.agent.state.context,
+                    reply_id,
+                    partial_blocks,
+                )
 
                 # 错误归类：已是 LLMError 直接用，否则用 LLMError.classify 推断 code
                 err = exc if isinstance(exc, LLMError) else LLMError.classify(exc)

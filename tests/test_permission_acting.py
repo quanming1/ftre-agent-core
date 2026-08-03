@@ -11,7 +11,7 @@ from ftre_agent_core.event import (
     UserConfirmResultEvent,
 )
 from ftre_agent_core.llm import ToolCall
-from ftre_agent_core.message import ToolCallState, ToolResultState
+from ftre_agent_core.message import ToolCallBlock, ToolCallState, ToolResultState
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.permission import PermissionBehavior, PermissionRule
 from ftre_agent_core.tool import tool, ToolRegistry
@@ -56,6 +56,28 @@ def _executor(agent, state):
     )
 
 
+def _append_tool_calls(agent, reply_id, tool_calls):
+    """按正式 Block 路径把 tool_calls 追加到指定 reply。"""
+    MessageContext.append_reply_blocks(
+        agent.state.context,
+        reply_id,
+        [
+            ToolCallBlock(
+                id=call.id,
+                name=call.name,
+                arguments=call.input or {},
+            )
+            for call in tool_calls
+        ],
+    )
+
+
+def _acting(agent, state, tool_calls):
+    """模拟 Reasoning 已保存本轮响应，再单测 Acting。"""
+    _append_tool_calls(agent, state.reply_id, tool_calls)
+    return Acting(tool_calls=tool_calls)
+
+
 @pytest.mark.asyncio
 async def test_all_allow_executes_normally():
     """全 ALLOW（规则放行）→ 正常执行，产出工具结果，无确认事件。"""
@@ -64,7 +86,7 @@ async def test_all_allow_executes_normally():
     state = make_state()
 
     tc = ToolCall(id="c1", name="echo", input={"text": "hi"})
-    events = [e async for e in _executor(agent, state).stream(Acting(tool_calls=[tc]))]
+    events = [e async for e in _executor(agent, state).stream(_acting(agent, state, [tc]))]
 
     types = [e.type for e in events]
     assert EventType.TOOL_RESULT_END in types
@@ -80,7 +102,7 @@ async def test_ask_pauses_and_emits_confirm_event():
     state = make_state()
 
     tc = ToolCall(id="c1", name="echo", input={"text": "hi"})
-    events = [e async for e in _executor(agent, state).stream(Acting(tool_calls=[tc]))]
+    events = [e async for e in _executor(agent, state).stream(_acting(agent, state, [tc]))]
 
     confirms = [e for e in events if e.type == EventType.REQUIRE_USER_CONFIRM]
     assert len(confirms) == 1
@@ -101,7 +123,11 @@ async def test_resume_execute_after_approval():
     state = make_state()
     executor = _executor(agent, state)
 
-    action = Acting(tool_calls=[ToolCall(id="c1", name="echo", input={"text": "hi"})])
+    action = _acting(
+        agent,
+        state,
+        [ToolCall(id="c1", name="echo", input={"text": "hi"})],
+    )
     [e async for e in executor.stream(action)]  # 挂起
 
     # 用户确认放行 → 置 ALLOWED（模拟 runner._resume 的动作）
@@ -120,7 +146,11 @@ async def test_resume_execute_after_rejection_writes_denied():
     state = make_state()
     executor = _executor(agent, state)
 
-    action = Acting(tool_calls=[ToolCall(id="c1", name="echo", input={"text": "hi"})])
+    action = _acting(
+        agent,
+        state,
+        [ToolCall(id="c1", name="echo", input={"text": "hi"})],
+    )
     [e async for e in executor.stream(action)]  # 挂起
 
     # 用户拒绝 → 置 FINISHED
@@ -154,10 +184,11 @@ async def test_deny_pauses_with_ask_batch():
     state = make_state()
     executor = _executor(agent, state)
 
-    action = Acting(tool_calls=[
+    tool_calls = [
         ToolCall(id="c1", name="echo", input={"text": "a"}),
         ToolCall(id="c2", name="echo2", input={"text": "b"}),
-    ])
+    ]
+    action = _acting(agent, state, tool_calls)
     events = [e async for e in executor.stream(action)]
 
     # 只有 ASK 的 c1 产出确认事件；DENY 的 c2 不产
@@ -180,11 +211,10 @@ async def test_new_message_rejected_while_awaiting_confirmation():
     agent = make_agent(rules=rules)
 
     # 手动往 context 塞一个 ASKING 的 tool_call（模拟已挂起）
-    MessageContext.add_raw(
-        agent.state.context,
-        agent.runner.tool_handler.build_assistant_message(
-            tool_calls=[ToolCall(id="c1", name="echo", input={"text": "hi"})]
-        ),
+    _append_tool_calls(
+        agent,
+        "r1",
+        [ToolCall(id="c1", name="echo", input={"text": "hi"})],
     )
     MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.ASKING)
 
@@ -214,12 +244,13 @@ async def test_partial_batch_confirmation_updates_state_and_stays_paused():
             behavior=PermissionBehavior.ASK,
         )
     ])
-    MessageContext.add_raw(
-        agent.state.context,
-        agent.runner.tool_handler.build_assistant_message(tool_calls=[
+    _append_tool_calls(
+        agent,
+        "r1",
+        [
             ToolCall(id="c1", name="echo", input={"text": "one"}),
             ToolCall(id="c2", name="echo", input={"text": "two"}),
-        ]),
+        ],
     )
     MessageContext.set_tool_call_state(
         agent.state.context, "c1", ToolCallState.ASKING
@@ -256,7 +287,7 @@ async def test_empty_rules_default_allow_executes_without_interception():
     state = make_state()
 
     tc = ToolCall(id="c1", name="echo", input={"text": "x"})
-    events = [e async for e in _executor(agent, state).stream(Acting(tool_calls=[tc]))]
+    events = [e async for e in _executor(agent, state).stream(_acting(agent, state, [tc]))]
 
     assert EventType.TOOL_RESULT_END in [e.type for e in events]
     assert EventType.REQUIRE_USER_CONFIRM not in [e.type for e in events]
@@ -303,11 +334,10 @@ async def test_resume_execute_rebuilds_from_context_only():
     state = make_state()
 
     # 直接往 context 塞一条带 tool_call 的 assistant 消息（模拟持久化加载）
-    MessageContext.add_raw(
-        agent.state.context,
-        agent.runner.tool_handler.build_assistant_message(
-            tool_calls=[ToolCall(id="c1", name="echo", input={"text": "hi"})]
-        ),
+    _append_tool_calls(
+        agent,
+        state.reply_id,
+        [ToolCall(id="c1", name="echo", input={"text": "hi"})],
     )
     # 模拟：挂起时置 ASKING，用户确认后置 ALLOWED
     MessageContext.set_tool_call_state(agent.state.context, "c1", ToolCallState.ALLOWED)
@@ -394,3 +424,15 @@ async def test_resume_across_fresh_instance_via_persisted_context():
     assert EventType.REPLY_END in types
     assert "echo:hi" in str(agent_b.messages[-2].get("content", "")) or \
            any("echo:hi" in str(m.get("content", "")) for m in agent_b.messages)
+
+    # 新实例恢复后仍继续扩展原 reply，而不是为 tool result / 最终文本创建新 Msg。
+    assistant_replies = [
+        message for message in agent_b.state.context if message.role == "assistant"
+    ]
+    assert len(assistant_replies) == 1
+    assert assistant_replies[0].id == reply_id
+    assert [block.type for block in assistant_replies[0].content] == [
+        "tool_call",
+        "tool_result",
+        "text",
+    ]
