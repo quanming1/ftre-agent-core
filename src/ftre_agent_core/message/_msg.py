@@ -89,10 +89,13 @@ class MsgName(StrEnum):
     不能复用为 agent id 或模型名。
 
     - DEFAULT：普通用户/助手/系统消息
-    - COMPACT：上下文压缩摘要（role=user，正文为完整摘要）
+    - COMPACT：上下文压缩摘要（role=user，正文为完整摘要，是上下文锚点）
+    - COMPACT_FAST：快速压缩提示气泡（role=assistant，正文为提示文案，仅供前端
+      展示与提醒 Agent 工具输出已被裁剪；**不是**上下文锚点，不参与 tail 计算）
     """
     DEFAULT = "default"
     COMPACT = "compact"
+    COMPACT_FAST = "compact_fast"
 
 
 # ══════════════════════════════════════════════════════════════════
