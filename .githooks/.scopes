@@ -1,0 +1,13 @@
+# ftre-agent-core module scopes
+agent
+llm
+tool
+hook
+runner
+message
+event
+permission
+state
+tracing
+tests
+docs
