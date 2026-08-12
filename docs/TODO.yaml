@@ -1,0 +1,77 @@
+# TODO.yaml — ftre-agent-core 功能阶段规划
+# 状态图例：done 已完成 · in_progress 进行中 · todo 未开始
+# PRD 驱动：每个阶段开工前先写 PRD（docs/prd/PRD-<阶段>-<名称>.md），流程见 docs/PROCESS.md。
+# 消费方：.githooks/check_commit_msg.py 校验 feat/fix 的 scope 阶段标识真实存在。
+
+meta:
+  project: ftre-agent-core
+  status_legend:
+    done: 已完成
+    in_progress: 进行中
+    todo: 未开始
+
+stages:
+  - id: A
+    name: 核心引擎
+    steps:
+      - id: A1
+        title: ReActAgent + LLM Handler
+        status: done
+        date: 2026-08-12
+        prd: docs/prd/PRD-A1-react-agent-llm.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/agent/react.py（ReAct 循环）
+          - src/ftre_agent_core/llm/completion.py（LLM 调用）
+          - src/ftre_agent_core/llm/utils.py
+        acceptance: ReAct 循环正确执行；流式输出无丢失；cancel 在 await 处立即生效
+
+      - id: A2
+        title: Tool 体系
+        status: done
+        date: 2026-08-12
+        prd: docs/prd/PRD-A2-tool-system.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/tool/base.py（Tool/ToolParameter/Injected）
+          - src/ftre_agent_core/tool/registry.py（ToolRegistry）
+          - src/ftre_agent_core/tool/cancellation.py
+        acceptance: 工具可注册和查找；Injected 参数自动注入；ToolRegistry.run_one 执行正确
+
+      - id: A3
+        title: Hook 系统
+        status: done
+        date: 2026-08-12
+        prd: docs/prd/PRD-A3-hook-system.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/hooks.py（FtreCoreHookManager）
+        acceptance: hook 在正确时机触发；coroutine 返回值被 await；hook 可修改 messages 和 config
+
+      - id: A4
+        title: Message + Event
+        status: done
+        date: 2026-08-12
+        prd: docs/prd/PRD-A4-message-event.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/message/_msg.py（Msg/MsgName）
+          - src/ftre_agent_core/message/_block.py（ContentBlock）
+          - src/ftre_agent_core/event/_event.py（EventBase/CustomEvent）
+        acceptance: Msg 序列化/反序列化正确；ContentBlock 类型完整；Event 可被 Tracer 捕获
+
+  - id: B
+    name: 状态与权限
+    steps:
+      - id: B1
+        title: Permission + State + Tracing
+        status: done
+        date: 2026-08-12
+        prd: docs/prd/PRD-B1-permission-state.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/permission/（权限引擎）
+          - src/ftre_agent_core/state/（AgentState）
+          - src/ftre_agent_core/threading.py
+          - src/ftre_agent_core/tracing.py（Tracer）
+        acceptance: 权限规则正确匹配；AgentState 可序列化；Tracer 记录完整调用链
