@@ -6,12 +6,14 @@
         └─ 将 hint（若有）写入 memory，使其对后续 LLM 可见；从 memory 拉取最新
            messages；依据 force_no_tools / tool_registry 决定是否附带 tools。
     → LLM stream
-        └─ 通过 self.llm.stream(messages, tools) 异步迭代获取模型增量输出。
+        └─ 通过 self.llm.stream(messages, tools) 异步迭代获取 StreamChunk 流
+           （B2：DSH StreamChunk 协议，BlockAssembler 组装完整块）。
     → 重试循环
         └─ 以 max_attempts = 1 + max_retries 为上限反复尝试，直到成功或耗尽。
     → 流式 yield 事件
-        └─ 将 LLM 产出的五种事件（TextDelta / ReasoningDelta / ToolInputDelta /
-           ToolCall / StepFinish）转译为面向上层（UI / 调用方）的 AgentStreamEvent。
+        └─ 将七种 chunk（block-start / text-delta / reasoning-delta /
+           tool-call-delta / block-end / usage / finish）转译为面向上层
+           （UI / 调用方）的 AgentStreamEvent；error finish 触发重试路径。
     → 组装 TurnResult
         └─ 成功时把文本、推理、工具调用、finish_reason、usage 封装为 TurnResult，
            写入 self.result；失败且不可重试或耗尽时封装带 error 的 TurnResult。
@@ -21,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -35,7 +38,19 @@ from ...event import (
     HintBlockEvent,
     RetryEvent,
 )
-from ...llm import LLMHandler, LLMError, TextDelta, ReasoningDelta, ToolInputDelta, ToolCall, StepFinish
+from ...llm import (
+    BlockAssembler,
+    BlockEnd,
+    FinishChunk,
+    LLMAdapter,
+    LLMError,
+    ReasoningDeltaChunk,
+    StreamChunk,
+    TextDeltaChunk,
+    ToolCall,
+    ToolCallDeltaChunk,
+    UsageChunk,
+)
 from ...message import HintBlock, TextBlock, ThinkingBlock, ToolCallBlock
 from ...message_context import MessageContext
 from ...tracing import RunType, RunStatus as TraceRunStatus
@@ -64,7 +79,7 @@ class ReasoningExecutor:
         self,
         agent,
         state: "RunState",
-        llm: LLMHandler,
+        llm: LLMAdapter,
         hook_manager: "FtreCoreHookManager",
     ):
         """初始化执行器。
@@ -74,8 +89,8 @@ class ReasoningExecutor:
                 max_retries、retry_delay 以及 memory（对话记忆）等运行时配置。
             state: 当前一次 run 的共享状态（RunState）。包含 reply_id、iteration、
                 trace_span（可选的追踪 span）、token_usage（跨轮累计的 token 用量）等。
-            llm: LLM 处理器实例，提供 ``stream(messages, tools)`` 异步迭代接口，
-                负责与具体模型 API 通信并把响应归一化为五种增量事件。
+            llm: LLM 适配器实例（B2：LLMAdapter 契约），提供 ``stream(messages, tools)``
+                异步迭代接口，产出 StreamChunk（七种 chunk，BlockAssembler 组装）。
             hook_manager: 钩子管理器（当前实现中保留以供扩展使用）。
 
         属性：
@@ -108,13 +123,15 @@ class ReasoningExecutor:
             max_attempts = 1 + max_retries，逐次尝试调用 LLM，直到成功返回或耗尽次数。
 
         4. 流式消费 LLM 输出
-            迭代 self.llm.stream(...) 产出的五种事件并分别处理：
-              - TextDelta        → 累积正文文本，按需开启 TextBlock 并 yield 增量
-              - ReasoningDelta   → 累积推理文本，按需开启 ThinkingBlock 并 yield 增量
-              - ToolInputDelta   → 工具入参的流式增量，首次出现时发 ToolCallStart
-              - ToolCall         → 工具调用完成，发 ToolCallEnd 并收录到 tool_calls
-              - StepFinish       → 本步结束：记录 finish_reason/usage，关闭仍开启的
-                                    block，yield ModelCallEndEvent
+            迭代 self.llm.stream(...) 产出的 StreamChunk 并分别处理：
+              - text-delta        → 累积正文文本，按需开启 TextBlock 并 yield 增量
+              - reasoning-delta   → 累积推理文本，按需开启 ThinkingBlock 并 yield 增量
+              - tool-call-delta   → 工具入参的流式增量，首次出现时发 ToolCallStart
+              - block-end(tool)   → 工具调用完成，发 ToolCallEnd 并收录到 tool_calls
+              - usage             → 记录 token 用量（finish 之前）
+              - finish            → 本步结束：记录 finish_reason、关闭仍开启的 block、
+                                    yield ModelCallEndEvent；error/aborted 还原为
+                                    LLMError 走统一重试路径
 
         5. 成功完成
             关闭 LLM span（输出 text/reasoning/finish_reason/has_tool_calls/usage/
@@ -207,9 +224,12 @@ class ReasoningExecutor:
                 # 已发过 ToolCallStart 的工具调用 id 集合，避免重复发 Start
                 tool_call_started: set[str] = set()
 
-                # ── 阶段 4：流式消费 LLM 输出 ───────────────────────────────────
-                async for event in self.llm.stream(messages, tools):
-                    # 首个事件到达时记录 TTFT（仅本轮一次）
+                # B2：BlockAssembler 组装完整块（配对校验在流末 validate）
+                assembler = BlockAssembler()
+
+                # ── 阶段 4：流式消费 StreamChunk ───────────────────────────────
+                async for chunk in self.llm.stream(messages, tools):
+                    # 首个 chunk 到达时记录 TTFT（仅本轮一次）
                     if not first_token_logged:
                         first_token_logged = True
                         elapsed_ms = (time.perf_counter() - turn_start_ts) * 1000
@@ -217,44 +237,82 @@ class ReasoningExecutor:
                         if llm_span and not llm_span.ended:
                             llm_span.add_event("ttft", {"ms": round(elapsed_ms)})
 
-                    # ① 正文文本增量：累积文本，首次时开启 TextBlock
-                    if isinstance(event, TextDelta):
-                        text_parts.append(event.text)
+                    # 协议组装（delta 累积 / 块闭合 / finish 校验）
+                    assembler.feed(chunk)
+
+                    # ① 正文文本增量：旁路转发 UI，首次时开启 TextBlock
+                    if isinstance(chunk, TextDeltaChunk):
+                        text_parts.append(chunk.text)
                         if text_block_id is None:
                             text_block_id = uuid.uuid4().hex[:16]
                             yield TextBlockStartEvent(reply_id=reply_id, block_id=text_block_id)
-                        yield TextBlockDeltaEvent(reply_id=reply_id, block_id=text_block_id, delta=event.text)
+                        yield TextBlockDeltaEvent(reply_id=reply_id, block_id=text_block_id, delta=chunk.text)
 
-                    # ② 推理文本增量：累积 reasoning，首次时开启 ThinkingBlock
-                    elif isinstance(event, ReasoningDelta):
-                        reasoning_parts.append(event.text)
+                    # ② 推理文本增量：旁路转发 UI，首次时开启 ThinkingBlock
+                    elif isinstance(chunk, ReasoningDeltaChunk):
+                        reasoning_parts.append(chunk.text)
                         if thinking_block_id is None:
                             thinking_block_id = uuid.uuid4().hex[:16]
                             yield ThinkingBlockStartEvent(reply_id=reply_id, block_id=thinking_block_id)
-                        yield ThinkingBlockDeltaEvent(reply_id=reply_id, block_id=thinking_block_id, delta=event.text)
+                        yield ThinkingBlockDeltaEvent(reply_id=reply_id, block_id=thinking_block_id, delta=chunk.text)
 
-                    # ③ 工具入参增量：流式拼接工具调用参数，首次出现该 id 时发 ToolCallStart
-                    elif isinstance(event, ToolInputDelta):
-                        if event.id not in tool_call_started:
-                            tool_call_started.add(event.id)
-                            yield ToolCallStartEvent(reply_id=reply_id, tool_call_id=event.id, tool_call_name=event.name or "")
-                        yield ToolCallDeltaEvent(reply_id=reply_id, tool_call_id=event.id, delta=event.text)
+                    # ③ 工具入参增量：旁路转发 UI，首次出现该 call_id 时发 ToolCallStart
+                    elif isinstance(chunk, ToolCallDeltaChunk):
+                        if chunk.call_id and chunk.call_id not in tool_call_started:
+                            tool_call_started.add(chunk.call_id)
+                            yield ToolCallStartEvent(reply_id=reply_id, tool_call_id=chunk.call_id, tool_call_name=chunk.name or "")
+                        if chunk.call_id:
+                            yield ToolCallDeltaEvent(reply_id=reply_id, tool_call_id=chunk.call_id, delta=chunk.arguments_delta)
 
-                    # ④ 工具调用完成：发 ToolCallEnd 并收录到 tool_calls；
-                    #    若此前没有 ToolInputDelta（无流式入参），此处补发 ToolCallStart
-                    elif isinstance(event, ToolCall):
-                        if event.id not in tool_call_started:
-                            tool_call_started.add(event.id)
-                            yield ToolCallStartEvent(reply_id=reply_id, tool_call_id=event.id, tool_call_name=event.name)
-                        yield ToolCallEndEvent(reply_id=reply_id, tool_call_id=event.id)
-                        tool_calls.append(event)
+                    # ④ 块闭合：tool-call 块发 ToolCallEnd 并收录完整调用；
+                    #    text / thinking 块关闭对应 UI block
+                    elif isinstance(chunk, BlockEnd):
+                        block = chunk.block or {}
+                        block_type = block.get("type")
+                        if block_type == "tool-call":
+                            call_id = block.get("id", "")
+                            name = block.get("name", "")
+                            arguments = block.get("arguments", "")
+                            try:
+                                parsed = json.loads(arguments) if arguments else {}
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    "[react] 工具 %s 的 JSON 参数解析失败: %r",
+                                    name, arguments[:200],
+                                )
+                                parsed = None
+                            if call_id not in tool_call_started:
+                                tool_call_started.add(call_id)
+                                yield ToolCallStartEvent(reply_id=reply_id, tool_call_id=call_id, tool_call_name=name)
+                            yield ToolCallEndEvent(reply_id=reply_id, tool_call_id=call_id)
+                            tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
+                        elif block_type == "text":
+                            if text_block_id is not None:
+                                yield TextBlockEndEvent(reply_id=reply_id, block_id=text_block_id)
+                                text_block_id = None
+                        elif block_type == "thinking":
+                            if thinking_block_id is not None:
+                                yield ThinkingBlockEndEvent(reply_id=reply_id, block_id=thinking_block_id)
+                                thinking_block_id = None
 
-                    # ⑤ 本步结束：记录 finish_reason 与 usage，关闭仍开启的 block，
-                    #    并 yield ModelCallEndEvent 通知下游本次模型调用结束
-                    elif isinstance(event, StepFinish):
-                        finish_reason = event.finish_reason
-                        response_metadata = event.response_metadata
-                        usage = event.usage
+                    # ⑤ usage：记录（协议保证在 finish 之前）
+                    elif isinstance(chunk, UsageChunk):
+                        usage = chunk.usage
+
+                    # ⑥ finish：本步结束——error/aborted 还原为异常走重试路径，
+                    #    正常 kinds 记录 finish_reason 并发 ModelCallEndEvent
+                    elif isinstance(chunk, FinishChunk):
+                        reason = chunk.reason
+                        if reason.kind in ("error", "aborted"):
+                            # 适配器已把 provider 异常收敛为 error finish；
+                            # 这里还原为 LLMError 交给统一重试 / 取消处理。
+                            failure = reason.failure
+                            raise LLMError(
+                                message=failure.message if failure else reason.kind,
+                                code=failure.code if failure else reason.kind.upper(),
+                            )
+                        finish_reason = reason.kind
+                        response_metadata = reason.response_metadata
                         required_usage_fields = {
                             "prompt_tokens",
                             "completion_tokens",

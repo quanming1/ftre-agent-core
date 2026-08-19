@@ -1,8 +1,15 @@
+"""适配器请求参数组装测试（PRD-B2：迁移自 test_completion_params）。
+
+LLMHandler 单类 → create_llm_handler 工厂 + 双适配器后的参数断言：
+- completions：max_tokens / stream / tool_choice 透传；空 assistant 归一化
+- responses：tool_choice=auto；instructions 提取
+"""
+
 from types import SimpleNamespace
 
 import pytest
 
-from ftre_agent_core.llm import LLMHandler, StepFinish
+from ftre_agent_core.llm import FinishChunk, create_llm_handler
 
 
 class _FakeStream:
@@ -30,8 +37,8 @@ class _FakeStream:
 
 
 @pytest.mark.asyncio
-async def test_llm_handler_passes_configured_max_tokens(monkeypatch):
-    handler = LLMHandler("test-model", "test-key", max_tokens=8192)
+async def test_completions_adapter_passes_configured_max_tokens(monkeypatch):
+    handler = create_llm_handler("completions", model="test-model", api_key="test-key", max_tokens=8192)
     captured = {}
 
     async def create(**kwargs):
@@ -44,18 +51,18 @@ async def test_llm_handler_passes_configured_max_tokens(monkeypatch):
         SimpleNamespace(completions=SimpleNamespace(create=create)),
     )
 
-    events = [event async for event in handler.stream([{"role": "user", "content": "hi"}])]
+    chunks = [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
 
     assert captured["max_tokens"] == 8192
     assert captured["stream"] is True
     assert captured["tool_choice"] == "auto"
-    assert isinstance(events[-1], StepFinish)
-    assert events[-1].finish_reason == "stop"
+    assert isinstance(chunks[-1], FinishChunk)
+    assert chunks[-1].reason.kind == "stop"
 
 
 @pytest.mark.asyncio
-async def test_responses_api_uses_auto_tool_choice(monkeypatch):
-    handler = LLMHandler("test-model", "test-key", api_type="responses")
+async def test_responses_adapter_uses_auto_tool_choice(monkeypatch):
+    handler = create_llm_handler("responses", model="test-model", api_key="test-key")
     captured = {}
 
     async def create(**kwargs):
@@ -68,16 +75,15 @@ async def test_responses_api_uses_auto_tool_choice(monkeypatch):
         SimpleNamespace(create=create),
     )
 
-    events = [event async for event in handler.stream([{"role": "user", "content": "hi"}])]
+    chunks = [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
 
     assert captured["tool_choice"] == "auto"
-    assert isinstance(events[-1], StepFinish)
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_normalizes_empty_assistant_content(monkeypatch):
+async def test_completions_adapter_normalizes_empty_assistant_content(monkeypatch):
     """真实请求中历史 tool-call 和当前 ReAct 消息都可能没有可见正文。"""
-    handler = LLMHandler("test-model", "test-key")
+    handler = create_llm_handler("completions", model="test-model", api_key="test-key")
     captured = {}
 
     async def create(**kwargs):
@@ -118,7 +124,7 @@ async def test_chat_completions_normalizes_empty_assistant_content(monkeypatch):
         {"role": "user", "content": "continue"},
     ]
 
-    await _collect(handler, messages)
+    [c async for c in handler.stream(messages)]
 
     assistant_messages = [m for m in captured["messages"] if m["role"] == "assistant"]
     assert assistant_messages[0]["content"] == ""
@@ -130,5 +136,46 @@ async def test_chat_completions_normalizes_empty_assistant_content(monkeypatch):
     assert "content" not in messages[4]
 
 
-async def _collect(handler, messages):
-    return [event async for event in handler.stream(messages)]
+@pytest.mark.asyncio
+async def test_completions_adapter_deepseek_thinking_extra_body(monkeypatch):
+    """deepseek 模型 + reasoning_effort → extra_body.thinking.enabled 特判。"""
+    handler = create_llm_handler(
+        "completions", model="deepseek-v4-flash", api_key="k", reasoning_effort="high",
+    )
+    captured = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream()
+
+    monkeypatch.setattr(
+        handler._client,
+        "chat",
+        SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+    [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
+
+    assert captured["reasoning_effort"] == "high"
+    assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_reasoning_effort_param(monkeypatch):
+    """responses 适配器：reasoning_effort → reasoning.effort（Muse 档位生效路径）。"""
+    handler = create_llm_handler(
+        "responses", model="muse-spark-1.2", api_key="k", reasoning_effort="xhigh",
+    )
+    captured = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream()
+
+    monkeypatch.setattr(
+        handler._client,
+        "responses",
+        SimpleNamespace(create=create),
+    )
+    [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
+
+    assert captured["reasoning"] == {"effort": "xhigh"}

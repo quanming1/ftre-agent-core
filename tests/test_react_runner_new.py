@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.event import EventType
-from ftre_agent_core.llm import ReasoningDelta, TextDelta, ToolCall, StepFinish
+from fake_llm import seq, ReasoningDelta, TextDelta, StepFinish, ToolCall
 from ftre_agent_core.message import Msg
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.tool import tool, ToolRegistry
@@ -31,8 +31,11 @@ async def test_simple_text_reply():
     agent = make_agent()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello world")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="hello world"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("hi")]
@@ -56,11 +59,17 @@ async def test_tool_call_then_text():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("echo hi")]
@@ -88,13 +97,19 @@ async def test_tool_call_turn_is_one_atomic_assistant_message():
         nonlocal call_count, second_call_messages
         call_count += 1
         if call_count == 1:
-            yield ReasoningDelta(text="先调用 echo 获取结果")
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ReasoningDelta(text="先调用 echo 获取结果"),
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
             second_call_messages = messages
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("echo hi")]
@@ -154,8 +169,11 @@ async def test_max_iterations():
     async def fake_stream(messages, tools=None):
         nonlocal counter
         counter += 1
-        yield ToolCall(id=f"c{counter}", name="nonexistent", input={})
-        yield StepFinish(finish_reason="tool_calls")
+        for chunk in seq(
+            ToolCall(id=f"c{counter}", name="nonexistent", input={}),
+            StepFinish(finish_reason="tool_calls"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     [e async for e in agent.run("loop")]
@@ -169,8 +187,11 @@ async def test_cancel_via_task_cancel():
 
     async def fake_stream(messages, tools=None):
         await asyncio.sleep(10)
-        yield TextDelta(text="never")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="never"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
         yield  # make it an async generator
 
     agent.runner.llm.stream = fake_stream
@@ -191,7 +212,10 @@ async def test_concurrent_run_raises():
 
     async def fake_stream(messages, tools=None):
         await asyncio.sleep(10)
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
         yield  # make it an async generator
 
     agent.runner.llm.stream = fake_stream

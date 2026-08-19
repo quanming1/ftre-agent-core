@@ -25,7 +25,7 @@ from ftre_agent_core.hooks import (
     StopInput,
     TurnEndInput,
 )
-from ftre_agent_core.llm import TextDelta, StepFinish, ToolCall
+from fake_llm import seq, TextDelta, StepFinish, ToolCall
 
 
 # ── 测试辅助 ──────────────────────────────────────────────────────
@@ -280,14 +280,20 @@ async def test_on_stop_hook_blocks_and_continues():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield TextDelta(text="working on it")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="working on it"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
             # 第二轮：continuation prompt 已注入，Agent 应该能看到它
             assert messages[-1]["role"] == "user"
             assert "keep going" in _content_text(messages[-1]["content"])
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -326,8 +332,11 @@ async def test_on_stop_hook_allow_lets_agent_stop():
     hook_calls = 0
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="final answer")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="final answer"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -363,11 +372,17 @@ async def test_on_stop_hook_not_called_when_tool_calls_present():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="final")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="final"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -394,11 +409,17 @@ async def test_on_stop_hook_system_message():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield TextDelta(text="first")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="first"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="final")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="final"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -439,11 +460,17 @@ async def test_on_turn_start_injects_message():
             roles = [m["role"] for m in messages]
             assert "system" in roles  # system_prompt
             assert messages[-1]["role"] == "user"  # injected message
-            yield TextDelta(text="ack")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="ack"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -472,8 +499,11 @@ async def test_on_turn_start_no_injection_when_no_hook():
     agent = make_agent(max_iterations=3, hook_manager=mgr)
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="hello"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
@@ -496,8 +526,11 @@ async def test_on_turn_end_called_on_completion():
     turn_end_calls = []
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="done")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="done"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -532,11 +565,17 @@ async def test_on_turn_end_called_after_tool_iteration():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="final")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="final"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -568,14 +607,23 @@ async def test_multiple_stop_hooks_chain():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield TextDelta(text="attempt 1")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="attempt 1"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         elif call_count == 2:
-            yield TextDelta(text="attempt 2")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="attempt 2"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -615,8 +663,11 @@ async def test_goal_simulation_block_twice_then_allow():
         nonlocal call_count
         call_count += 1
         texts = ["still building", "added tests", "verified working"]
-        yield TextDelta(text=texts[min(call_count - 1, 2)])
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text=texts[min(call_count - 1, 2)]),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -683,11 +734,17 @@ async def test_on_pre_tool_block_prevents_execution():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -724,11 +781,17 @@ async def test_on_pre_tool_modify_args():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "original"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "original"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -760,11 +823,17 @@ async def test_on_pre_tool_allow_executes_normally():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hello"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hello"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -802,11 +871,17 @@ async def test_on_post_tool_modify_result():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "secret"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "secret"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -843,11 +918,17 @@ async def test_on_post_tool_allow_keeps_original():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "hi"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -883,11 +964,17 @@ async def test_on_post_tool_sees_error_on_failure():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="fail_tool", input={})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="fail_tool", input={}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -923,11 +1010,17 @@ async def test_pre_and_post_tool_both_registered():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            yield ToolCall(id="c1", name="echo", input={"text": "original"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="echo", input={"text": "original"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 

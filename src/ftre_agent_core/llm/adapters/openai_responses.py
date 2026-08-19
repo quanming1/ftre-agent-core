@@ -1,0 +1,360 @@
+"""OpenAI Responses API 适配器（PRD-B2 FR4）。
+
+迁移自 completion.py 的 _stream_responses 路径，产出改为 StreamChunk。
+
+Responses API 的流事件有显式的 item 边界（OutputItemAdded / OutputItemDone），
+比 chat 协议更贴合 StreamChunk：每个 output item 一个块。
+- ResponseTextDeltaEvent          → text delta
+- ResponseReasoningDeltaEvent     → reasoning delta（网关支持时）
+- ResponseFunctionCallArgumentsDeltaEvent → tool-call arguments delta
+- ResponseOutputItemAddedEvent    → block-start（function_call；text/reasoning
+                                    item 的 start 在首个 delta 时延迟发）
+- ResponseOutputItemDoneEvent     → block-end（携带完整 item）
+- ResponseCompletedEvent          → usage + finish
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+from collections.abc import AsyncGenerator
+from typing import Any
+
+from ..base import OpenAIAdapterBase
+from ..errors import LLMError, get_attr
+from ..events import (
+    BlockEnd,
+    BlockStart,
+    FinishChunk,
+    FinishReason,
+    LlmFailure,
+    ReasoningDeltaChunk,
+    StreamChunk,
+    TextDeltaChunk,
+    ToolCallDeltaChunk,
+    UsageChunk,
+)
+from ..utils import LLMLogger
+from ..wire.normalize import _normalize_chat_messages, normalize_usage
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIResponsesAdapter(OpenAIAdapterBase):
+    """OpenAI Responses API 协议适配器。"""
+
+    async def stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[StreamChunk, None]:
+        llm_log = LLMLogger(self.model)
+        response = None
+        emitted_finish = False
+        try:
+            # Responses API 也从同一份 Chat 消息历史转换而来，先复用同一个工具调用
+            # 协议边界，避免把孤立 function_call_output 传给 provider。
+            request_messages = _normalize_chat_messages(messages)
+            llm_log.log_input(request_messages, tools)
+
+            instructions, input_items = _convert_messages_to_responses_input(request_messages)
+            resp_tools = _convert_tools_to_responses(tools) if tools else []
+
+            params: dict[str, Any] = {
+                "model": self.model,
+                "input": input_items,
+                "stream": True,
+                "store": False,
+                "tool_choice": "auto",
+            }
+            if instructions is not None:
+                params["instructions"] = instructions
+            if self.max_tokens is not None:
+                params["max_output_tokens"] = max(1, int(self.max_tokens))
+            if self.temperature is not None:
+                params["temperature"] = self.temperature
+            if self.reasoning_effort and self.reasoning_effort != "none":
+                params["reasoning"] = {"effort": self.reasoning_effort}
+            if resp_tools:
+                params["tools"] = resp_tools
+
+            self._active_loop = asyncio.get_running_loop()
+            response = await self._client.responses.create(**params)
+            self._active_stream = response
+
+            usage: dict | None = None
+            finish_kind: str = "unknown"
+            response_metadata: dict[str, Any] = {}
+            # item_id → 块信息 {kind, index, started}
+            items: dict[str, dict] = {}
+            next_index = 0
+
+            async for event in response:
+                if self._cancelled:
+                    logger.info("[completion] responses stream cancelled by cancel()")
+                    break
+
+                llm_log.log_chunk(event)
+
+                event_type = type(event).__name__
+
+                # ── 文本增量 ──
+                if event_type == "ResponseTextDeltaEvent":
+                    item_id = get_attr(event, "item_id", "")
+                    delta = get_attr(event, "delta")
+                    if delta:
+                        entry = items.setdefault(item_id, {"kind": "text", "index": None, "started": False, "text": ""})
+                        if entry["index"] is None:
+                            entry["index"] = next_index
+                            next_index += 1
+                        if not entry["started"]:
+                            entry["started"] = True
+                            yield BlockStart(index=entry["index"], block_type="text")
+                        entry["text"] += delta
+                        yield TextDeltaChunk(index=entry["index"], text=delta)
+
+                # ── 推理增量（如果网关支持流式返回推理文本）──
+                elif event_type == "ResponseReasoningDeltaEvent":
+                    item_id = get_attr(event, "item_id", "")
+                    delta = get_attr(event, "delta")
+                    if delta:
+                        entry = items.setdefault(item_id, {"kind": "reasoning", "index": None, "started": False, "text": ""})
+                        if entry["index"] is None:
+                            entry["index"] = next_index
+                            next_index += 1
+                        if not entry["started"]:
+                            entry["started"] = True
+                            yield BlockStart(index=entry["index"], block_type="reasoning")
+                        entry["text"] += delta
+                        yield ReasoningDeltaChunk(index=entry["index"], text=delta)
+
+                # ── 工具调用参数增量 ──
+                elif event_type == "ResponseFunctionCallArgumentsDeltaEvent":
+                    item_id = get_attr(event, "item_id", "")
+                    delta = get_attr(event, "delta", "")
+                    if delta:
+                        entry = items.setdefault(item_id, {"kind": "tool-call", "index": None, "started": False})
+                        if entry["index"] is None:
+                            entry["index"] = next_index
+                            next_index += 1
+                        if not entry["started"]:
+                            entry["started"] = True
+                            yield BlockStart(index=entry["index"], block_type="tool-call")
+                        # call_id / name 在 OutputItemAdded 时记录
+                        yield ToolCallDeltaChunk(
+                            index=entry["index"],
+                            call_id=entry.get("call_id", ""),
+                            name=entry.get("name", ""),
+                            arguments_delta=delta,
+                        )
+
+                # ── 输出项添加：记录 function_call 的 call_id 和 name ──
+                elif event_type == "ResponseOutputItemAddedEvent":
+                    item = get_attr(event, "item", {})
+                    item_id = get_attr(item, "id", "")
+                    if get_attr(item, "type") == "function_call":
+                        entry = items.setdefault(item_id, {"kind": "tool-call", "index": None, "started": False})
+                        entry["call_id"] = get_attr(item, "call_id", "")
+                        entry["name"] = get_attr(item, "name", "")
+
+                # ── 输出项完成：block-end（携带完整 item 内容）──
+                elif event_type == "ResponseOutputItemDoneEvent":
+                    item = get_attr(event, "item", {})
+                    item_id = get_attr(item, "id", "")
+                    item_type = get_attr(item, "type", "")
+                    if item_type == "function_call":
+                        entry = items.setdefault(item_id, {"kind": "tool-call", "index": None, "started": False})
+                        if entry["index"] is None:
+                            entry["index"] = next_index
+                            next_index += 1
+                        if not entry["started"]:
+                            entry["started"] = True
+                            yield BlockStart(index=entry["index"], block_type="tool-call")
+                        yield BlockEnd(
+                            index=entry["index"],
+                            block={
+                                "type": "tool-call",
+                                "id": get_attr(item, "call_id", ""),
+                                "name": get_attr(item, "name", ""),
+                                "arguments": get_attr(item, "arguments", ""),
+                            },
+                        )
+                        entry["ended"] = True
+                        if entry.get("call_id") or get_attr(item, "call_id"):
+                            finish_kind = "tool-calls" if finish_kind == "unknown" else finish_kind
+
+                # ── 响应完成 ──
+                elif event_type == "ResponseCompletedEvent":
+                    resp = get_attr(event, "response", {})
+                    usage = normalize_usage(get_attr(resp, "usage"))
+                    for key in ("id", "model", "created_at"):
+                        value = get_attr(resp, key)
+                        if value is not None:
+                            response_metadata[key] = value
+                    status = get_attr(resp, "status", "")
+                    incomplete = get_attr(resp, "incomplete_details", None)
+                    if incomplete:
+                        finish_kind = "max-tokens"
+                    elif finish_kind == "tool-calls":
+                        pass
+                    elif status == "completed":
+                        finish_kind = "stop"
+
+            # ── 流末收尾：闭块 → usage → finish ─────────────────────────
+            # text / reasoning item 若未收到 OutputItemDone（部分网关不发），
+            # 在流末补 block-end（全文从增量累积重建）。
+            for item_id, entry in items.items():
+                if entry["kind"] in ("text", "reasoning") and entry.get("started") and not entry.get("ended"):
+                    if entry["kind"] == "text":
+                        block = {"type": "text", "text": entry.get("text", "")}
+                    else:
+                        block = {"type": "thinking", "thinking": entry.get("text", "")}
+                    yield BlockEnd(index=entry["index"], block=block)
+
+            if usage is not None:
+                yield UsageChunk(usage=usage)
+
+            if finish_kind not in ("stop", "tool-calls", "max-tokens"):
+                logger.warning(
+                    "[completion] responses stream ended: finish_kind=%s items=%s",
+                    finish_kind,
+                    {k: v["kind"] for k, v in items.items()},
+                )
+                yield FinishChunk(reason=FinishReason(
+                    kind="error",
+                    failure=LlmFailure(
+                        message=f"responses stream ended with status {finish_kind!r}",
+                        code="UNKNOWN_FINISH",
+                    ),
+                    raw=finish_kind,
+                    response_metadata=response_metadata,
+                ))
+            else:
+                yield FinishChunk(reason=FinishReason(
+                    kind=finish_kind,
+                    raw=finish_kind,
+                    response_metadata=response_metadata,
+                ))
+            emitted_finish = True
+
+        except Exception as exc:
+            err = LLMError.classify(exc)
+            logger.warning("[adapter] responses stream failed: %s (%s)", err.message[:200], err.code)
+            if not emitted_finish:
+                yield FinishChunk(reason=FinishReason(
+                    kind="error",
+                    failure=LlmFailure(message=err.message, code=err.code),
+                ))
+                emitted_finish = True
+        finally:
+            self._active_stream = None
+            self._active_loop = None
+            was_cancelled = self._cancelled
+            self._cancelled = False
+            if response is not None:
+                close_result = response.close()
+                if inspect.isawaitable(close_result):
+                    try:
+                        await close_result
+                    except Exception:  # noqa: BLE001
+                        pass
+            llm_log.flush()
+        if not emitted_finish:
+            if was_cancelled:
+                yield FinishChunk(reason=FinishReason(
+                    kind="aborted",
+                    failure=LlmFailure(message="stream cancelled by cancel()", code="ABORTED"),
+                ))
+            else:
+                yield FinishChunk(reason=FinishReason(
+                    kind="error",
+                    failure=LlmFailure(message="stream ended without finish chunk", code="STREAM_CLOSED"),
+                ))
+
+
+def _convert_messages_to_responses_input(
+    messages: list[dict],
+) -> tuple[str | None, list[dict]]:
+    """Chat Completions messages → Responses API (instructions, input)。
+
+    迁移自 completion.py，逻辑保持等价：
+      system       → instructions 参数（多条拼接）
+      user         → {role: user, content}
+      assistant    → {role: assistant, content}（无 tool_calls 时）
+      assistant+tc → 先 assistant content（如有），再若干 function_call 条目
+      tool         → {type: function_call_output, call_id, output}
+    """
+    instructions: str | None = None
+    input_items: list[dict] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if role == "system":
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "\n".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") in ("text", "input_text")
+                )
+            else:
+                text = ""
+            if text:
+                instructions = text if not instructions else f"{instructions}\n\n{text}"
+
+        elif role == "user":
+            input_items.append({"role": "user", "content": content})
+
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                if content:
+                    input_items.append({"role": "assistant", "content": content})
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", ""),
+                    })
+            else:
+                input_items.append({"role": "assistant", "content": content})
+
+        elif role == "tool":
+            call_id = msg.get("tool_call_id", "")
+            if isinstance(content, str):
+                output = content
+            else:
+                output = json.dumps(content, ensure_ascii=False)
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            })
+
+    return instructions, input_items
+
+
+def _convert_tools_to_responses(tools: list[dict]) -> list[dict]:
+    """Chat Completions tools → Responses API tools。
+
+    迁移自 completion.py：
+      Chat Completions: {type: function, function: {name, description, parameters}}
+      Responses API:    {type: function, name, description, parameters}
+    """
+    result: list[dict] = []
+    for tool in tools:
+        if tool.get("type") == "function":
+            fn = tool.get("function", {})
+            result.append({
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            })
+    return result
