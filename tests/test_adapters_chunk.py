@@ -392,3 +392,52 @@ class TestResponsesAdapter:
         assert isinstance(finish, FinishChunk)
         assert finish.reason.kind == "error"
         assert "net down" in finish.reason.failure.message
+
+    @pytest.mark.asyncio
+    async def test_user_content_normalized_to_input_text(self, monkeypatch):
+        """chat 风格 [{"type": "text"}] user content → input_text（Muse 严格校验）。"""
+        captured = {}
+
+        adapter = OpenAIResponsesAdapter(model="t", api_key="k")
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseTextDeltaEvent", item_id="m1", delta="ok"),
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [
+            {"role": "system", "content": "be nice"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]},
+        ]
+        [c async for c in adapter.stream(messages)]
+
+        first_input = captured["input"][0]
+        assert first_input == {"role": "user", "content": [
+            {"type": "input_text", "text": "hello"},
+            {"type": "input_image", "image_url": "data:image/png;base64,x"},
+        ]}
+        assert captured["instructions"] == "be nice"
+
+    @pytest.mark.asyncio
+    async def test_user_content_string_passthrough(self, monkeypatch):
+        """字符串 user content 原生支持，直接透传不包数组。"""
+        captured = {}
+
+        adapter = OpenAIResponsesAdapter(model="t", api_key="k")
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        [c async for c in adapter.stream([{"role": "user", "content": "plain hi"}])]
+
+        assert captured["input"][0]["content"] == "plain hi"
