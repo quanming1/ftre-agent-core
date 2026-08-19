@@ -9,9 +9,9 @@
 |---|---|
 | 阶段 | B2 |
 | 名称 | LLM 协议适配层 |
-| 状态 | 草稿 |
+| 状态 | approved |
 | 创建日期 | 2026-08-18 |
-| 定稿日期 | （approved 时填写） |
+| 定稿日期 | 2026-08-19 |
 | 验收日期 | （已验收时填写） |
 | 关联文档 | docs/TODO.yaml 阶段 B2；docs/litellm-migration.md（历史决策）；docs/response-to-ai-base.md（历史架构）；DSH 参考 deepseek-harness packages/llm/llm/src/types.ts（StreamChunk 协议参考来源）；AGENTS.md |
 
@@ -184,3 +184,4 @@ class BlockAssembler:
 | 日期 | 变更内容 | 理由 |
 |---|---|---|
 | 2026-08-19 | 评审前修订：适配器输出协议由「保留 LLMEvent」改为「DSH StreamChunk」（七种 chunk + BlockAssembler + error/aborted finish 通道）；FR5/FR6/FR7/FR8 与 AC1/AC2/AC4/AC5 相应重写；目录结构新增 block_assembler.py；非目标删除「不改 LLMEvent」、新增「不留骑墙层」 | 用户评审决策：采用 DSH 协议（与 Msg ContentBlock 同构、desktop 块渲染就绪、error finish 通道、对齐 DSH 适配器生态） |
+| 2026-08-19 | 状态 草稿 → approved（定稿） | 用户评审通过 |
