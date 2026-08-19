@@ -42,7 +42,7 @@ from ...event import (
 )
 from ...tracing import RunStatus as TraceRunStatus, RunType
 from ...types import ReplyFinishedReason
-from ...llm import LLMHandler, ToolCall
+from ...llm import LLMAdapter, ToolCall, create_llm_handler
 from ...message import ToolCallBlock, ToolCallState
 from ...message_context import MessageContext
 from ._state import Reasoning, Acting, Exit, TurnResult, RunState, RunStatus, CancelledError
@@ -198,12 +198,12 @@ class ReActRunner:
         self.state = RunState()
         # 当前 run() 对应的 asyncio.Task，用于取消和并发锁检查
         self._run_task: asyncio.Task | None = None
-        # LLM 调用封装（Provider 调用、流式解析、reasoning 提取等）
-        self._llm = LLMHandler(
-            agent.model,
-            agent.api_key,
-            agent.api_base,
+        # LLM 适配器（B2：协议注册表工厂按 api_type 分发，消费方零协议感知）
+        self._llm: LLMAdapter = create_llm_handler(
             agent.api_type,
+            model=agent.model,
+            api_key=agent.api_key,
+            api_base=agent.api_base,
             max_tokens=agent.max_tokens,
             reasoning_effort=agent.reasoning_effort,
         )
@@ -213,8 +213,8 @@ class ReActRunner:
         self._permission_engine = agent.permission_engine
 
     @property
-    def llm(self) -> LLMHandler:
-        """LLM 调用封装实例。"""
+    def llm(self) -> LLMAdapter:
+        """LLM 适配器实例（B2：LLMAdapter 契约）。"""
         return self._llm
 
     @property

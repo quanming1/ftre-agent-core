@@ -9,7 +9,7 @@ import pytest
 
 from ftre_agent_core.agent import EventType, ReActAgent
 from ftre_agent_core.event import ReplyFinishedReason
-from ftre_agent_core.llm import ReasoningDelta, StepFinish, TextDelta, ToolCall
+from fake_llm import seq, ReasoningDelta, StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool, ToolRegistry
 
 
@@ -51,11 +51,17 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ReasoningDelta(text="need more work")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                ReasoningDelta(text="need more work"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -82,11 +88,16 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
             if tools is None:
                 raise RuntimeError(f"tools should not be None on call {calls}")
             if calls < 3:
-                yield StepFinish(finish_reason="stop")
-                yield  # make it an async generator
+                for chunk in seq(
+                    StepFinish(finish_reason="stop"),
+                ):
+                    yield chunk
             else:
-                yield TextDelta(text=" \n ")
-                yield StepFinish(finish_reason="stop")
+                for chunk in seq(
+                    TextDelta(text=" \n "),
+                    StepFinish(finish_reason="stop"),
+                ):
+                    yield chunk
         else:
             # 第四轮：最终化（不带工具）
             if tools is not None:
@@ -96,8 +107,11 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
             content = _content_text(messages[-1]["content"])
             if "直接给出回复用户的最终内容" not in content:
                 raise RuntimeError(f"finalization prompt not found: {content}")
-            yield TextDelta(text="final")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="final"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -116,8 +130,11 @@ async def test_unknown_finish_with_text_completes(caplog):
     async def fake_stream(messages, tools=None):
         nonlocal calls
         calls += 1
-        yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="unknown")
+        for chunk in seq(
+            TextDelta(text="hello"),
+            StepFinish(finish_reason="unknown"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -137,10 +154,16 @@ async def test_unknown_finish_with_empty_response_continues_without_finalization
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield StepFinish(finish_reason="unknown")
+            for chunk in seq(
+                StepFinish(finish_reason="unknown"),
+            ):
+                yield chunk
         elif calls == 2:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
         else:
             pytest.fail("should not reach 3rd call")
 
@@ -164,11 +187,17 @@ async def test_tool_call_turn_produces_tool_result_events():
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ToolCall(id="call_echo", name="echo", input={"text": "x"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="call_echo", name="echo", input={"text": "x"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="finished")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="finished"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -197,12 +226,18 @@ async def test_multi_tool_call_events_are_emitted_before_results():
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ToolCall(id="call_echo", name="echo", input={"text": "x"})
-            yield ToolCall(id="call_upper", name="upper", input={"text": "y"})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="call_echo", name="echo", input={"text": "x"}),
+                ToolCall(id="call_upper", name="upper", input={"text": "y"}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="finished")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="finished"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -223,11 +258,17 @@ async def test_single_reply_start_and_reply_end():
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ToolCall(id="c1", name="nonexistent", input={})
-            yield StepFinish(finish_reason="tool_calls")
+            for chunk in seq(
+                ToolCall(id="c1", name="nonexistent", input={}),
+                StepFinish(finish_reason="tool_calls"),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(finish_reason="stop")
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish(finish_reason="stop"),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
 

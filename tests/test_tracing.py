@@ -4,7 +4,7 @@ import pytest
 
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.event import ReplyFinishedReason
-from ftre_agent_core.llm import StepFinish, TextDelta, ToolCall
+from fake_llm import seq, StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool
 from ftre_agent_core.tracing import (
     InMemoryTraceExporter,
@@ -35,19 +35,17 @@ async def test_agent_trace_records_llm_and_tool_run_tree():
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ToolCall(id="call_echo", name="echo", input={"text": "x"})
-            yield StepFinish(
-                finish_reason="tool_calls",
-                usage={"total_tokens": 10},
-                response_metadata={"model": "routed-model"},
-            )
+            for chunk in seq(
+                ToolCall(id="call_echo", name="echo", input={"text": "x"}),
+                StepFinish( finish_reason="tool_calls", usage={"total_tokens": 10}, response_metadata={"model": "routed-model"}, ),
+            ):
+                yield chunk
         else:
-            yield TextDelta(text="done")
-            yield StepFinish(
-                finish_reason="stop",
-                usage={"total_tokens": 4},
-                response_metadata={"model": "routed-model"},
-            )
+            for chunk in seq(
+                TextDelta(text="done"),
+                StepFinish( finish_reason="stop", usage={"total_tokens": 4}, response_metadata={"model": "routed-model"}, ),
+            ):
+                yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]
@@ -63,7 +61,7 @@ async def test_agent_trace_records_llm_and_tool_run_tree():
     assert len(tool_runs) == 1
     assert all(run.parent_run_id == root.id for run in llm_runs + tool_runs)
     assert root.outputs == {"success": True, "done_reason": "completed", "iterations": 2}
-    assert llm_runs[0].outputs["finish_reason"] == "tool_calls"
+    assert llm_runs[0].outputs["finish_reason"] == "tool-calls"
     assert llm_runs[0].outputs["response_metadata"]["model"] == "routed-model"
     assert llm_runs[1].outputs["finish_reason"] == "stop"
     assert llm_runs[1].outputs["has_tool_calls"] is False
@@ -80,8 +78,11 @@ async def test_process_text_with_stop_is_observable_as_legal_completion():
     )
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="我现在开始执行。")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="我现在开始执行。"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]
@@ -123,8 +124,11 @@ async def test_exporter_failure_does_not_break_agent_run():
     )
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="done")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="done"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [event async for event in agent.run("start")]

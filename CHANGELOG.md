@@ -1,5 +1,25 @@
 # 版本变更公告
 
+## [未发布]
+
+### B2 LLM 协议适配层（DSH StreamChunk 协议）
+
+**重构**：`llm/completion.py`（764 行单类双 if 分支）拆分为协议适配层：
+
+- `events.py`：StreamChunk 七种 chunk（block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish，DSH 协议的 Python/dataclass 形态）+ FinishReason（stop / tool-calls / max-tokens / error / aborted，error/aborted 带 failure）
+- `block_assembler.py`：BlockAssembler——按 index 组装交错 delta 为完整 ContentBlock，配对校验（fail-fast）
+- `errors.py`：LLMError + classify（从 completion.py 迁出，逻辑等价）
+- `base.py`：LLMAdapter ABC + OpenAIAdapterBase 共享骨架（异常统一收敛为终止性 error/aborted finish，消费方永不面对裸异常）
+- `registry.py`：协议注册表 + `create_llm_handler(api_type)` 工厂（未知协议抛 INVALID_API_TYPE）——协议是数据不是代码，新协议接入 = adapters/ 加文件 + 注册表一行
+- `adapters/openai_completions.py` / `adapters/openai_responses.py`：双协议适配器（responses 路径支持 reasoning effort 透传）
+- `wire/normalize.py`：协议共用消息归一化
+
+**移除**：`LLMHandler` 类与 LLMEvent 家族（TextDelta/ReasoningDelta/ToolInputDelta/ToolCall/StepFinish）——消费方（react_runner / compact_manager / title_gen / fake_llm）一步到位迁移，无兼容层。
+
+**语义增强**：畸形 finish_reason（如 Muse 的 null）→ 有内容产出时宽容映射 stop、无产出时 error finish（不再静默）。
+
+**测试**：基线 168 → 201 全过（新增契约测试 14 + registry 5 + 适配器 13）。
+
 ## 变更日期：2026-04-10
 
 ---

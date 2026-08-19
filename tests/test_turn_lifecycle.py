@@ -7,7 +7,8 @@ import pytest
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.agent.runner import RunStatus
-from ftre_agent_core.llm import LLMError, TextDelta, StepFinish, ToolCall
+from fake_llm import seq, TextDelta, StepFinish, ToolCall
+from ftre_agent_core.llm import LLMError
 from ftre_agent_core.tool import tool
 
 
@@ -29,8 +30,11 @@ async def test_turn_id_from_runtime_context():
     agent = make_agent()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="hello"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("hi", runtime_context={"turn_id": "turn_test123"})]
@@ -46,8 +50,11 @@ async def test_turn_id_auto_generated():
     agent = make_agent()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="hello"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("hi")]
@@ -64,8 +71,11 @@ async def test_done_reason_completed():
     agent = make_agent()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="done")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="done"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]
@@ -87,8 +97,11 @@ async def test_done_reason_max_iterations():
     agent._registry.register(echo)
 
     async def fake_stream(messages, tools=None):
-        yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-        yield StepFinish(finish_reason="tool_calls")
+        for chunk in seq(
+            ToolCall(id="c1", name="echo", input={"text": "hi"}),
+            StepFinish(finish_reason="tool_calls"),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
     events = [e async for e in agent.run("start")]

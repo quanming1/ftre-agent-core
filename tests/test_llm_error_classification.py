@@ -1,4 +1,4 @@
-from ftre_agent_core.llm.completion import LLMError
+from ftre_agent_core.llm import LLMError
 
 
 class StatusError(Exception):

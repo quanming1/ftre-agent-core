@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """权限系统接线的集成测试：Acting 分流、挂起、恢复、拒绝、挂起期间拒绝新消息。"""
 import pytest
 
@@ -10,7 +10,7 @@ from ftre_agent_core.event import (
     RequireUserConfirmEvent,
     UserConfirmResultEvent,
 )
-from ftre_agent_core.llm import ToolCall
+from fake_llm import seq, ToolCall
 from ftre_agent_core.message import ToolCallBlock, ToolCallState, ToolResultState
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.permission import PermissionBehavior, PermissionRule
@@ -352,7 +352,8 @@ async def test_resume_execute_rebuilds_from_context_only():
 @pytest.mark.asyncio
 async def test_resume_across_fresh_instance_via_persisted_context():
     """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。"""
-    from ftre_agent_core.llm import TextDelta, ToolCall as LLMToolCall, StepFinish
+    from fake_llm import seq, TextDelta, StepFinish
+    from ftre_agent_core.llm import ToolCall as LLMToolCall
     from ftre_agent_core.permission import PermissionContext
     from ftre_agent_core.state import AgentState
 
@@ -362,8 +363,11 @@ async def test_resume_across_fresh_instance_via_persisted_context():
     agent_a = make_agent(rules=rules)
 
     async def fake_stream_a(messages, tools=None):
-        yield LLMToolCall(id="c1", name="echo", input={"text": "hi"})
-        yield StepFinish(finish_reason="tool_calls")
+        for chunk in seq(
+            LLMToolCall(id="c1", name="echo", input={"text": "hi"}),
+            StepFinish(finish_reason="tool_calls"),
+        ):
+            yield chunk
 
     agent_a.runner.llm.stream = fake_stream_a
     confirm_events = []
@@ -406,8 +410,11 @@ async def test_resume_across_fresh_instance_via_persisted_context():
     )
     # B 恢复后还要再调一次 LLM（读工具结果），给个文本收尾避免死循环
     async def fake_stream_b(messages, tools=None):
-        yield TextDelta(text="完成")
-        yield StepFinish(finish_reason="stop")
+        for chunk in seq(
+            TextDelta(text="完成"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
 
     agent_b.runner.llm.stream = fake_stream_b
 

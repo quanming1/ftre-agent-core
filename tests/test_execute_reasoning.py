@@ -5,7 +5,8 @@ from ftre_agent_core.agent.runner._execute_reasoning import ReasoningExecutor
 from ftre_agent_core.agent.runner._state import Reasoning, TurnResult
 from ftre_agent_core.agent.runner._state import RunState
 from ftre_agent_core.agent.react import ReActAgent
-from ftre_agent_core.llm import TextDelta, ToolCall, StepFinish, LLMError
+from fake_llm import seq, TextDelta, StepFinish, ToolCall
+from ftre_agent_core.llm import LLMError
 from ftre_agent_core.event import EventType
 
 
@@ -30,15 +31,11 @@ async def test_text_only_turn():
     state = make_state()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="hello")
-        yield StepFinish(
-            finish_reason="stop",
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-        )
+        for chunk in seq(
+            TextDelta(text="hello"),
+            StepFinish( finish_reason="stop", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -65,15 +62,11 @@ async def test_tool_call_turn():
     state = make_state()
 
     async def fake_stream(messages, tools=None):
-        yield ToolCall(id="c1", name="echo", input={"text": "hi"})
-        yield StepFinish(
-            finish_reason="tool_calls",
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-        )
+        for chunk in seq(
+            ToolCall(id="c1", name="echo", input={"text": "hi"}),
+            StepFinish( finish_reason="tool_calls", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -83,7 +76,7 @@ async def test_tool_call_turn():
     assert executor.result.text == ""
     assert len(executor.result.tool_calls) == 1
     assert executor.result.tool_calls[0].id == "c1"
-    assert executor.result.finish_reason == "tool_calls"
+    assert executor.result.finish_reason == "tool-calls"
 
 
 @pytest.mark.asyncio
@@ -96,15 +89,11 @@ async def test_hint_written_to_memory_before_llm_call():
     async def fake_stream(messages, tools=None):
         nonlocal hint_seen
         hint_seen = messages[-1]
-        yield TextDelta(text="done")
-        yield StepFinish(
-            finish_reason="stop",
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-        )
+        for chunk in seq(
+            TextDelta(text="done"),
+            StepFinish( finish_reason="stop", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -132,15 +121,11 @@ async def test_force_no_tools_passes_none():
     async def fake_stream(messages, tools=None):
         nonlocal tools_received
         tools_received = tools
-        yield TextDelta(text="final")
-        yield StepFinish(
-            finish_reason="stop",
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-        )
+        for chunk in seq(
+            TextDelta(text="final"),
+            StepFinish( finish_reason="stop", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -156,11 +141,11 @@ async def test_incomplete_usage_does_not_emit_model_call_end_or_update_state(cap
     state = make_state()
 
     async def fake_stream(messages, tools=None):
-        yield TextDelta(text="done")
-        yield StepFinish(
-            finish_reason="stop",
-            usage={"prompt_tokens": 10, "completion_tokens": 5},
-        )
+        for chunk in seq(
+            TextDelta(text="done"),
+            StepFinish( finish_reason="stop", usage={"prompt_tokens": 10, "completion_tokens": 5}, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 
@@ -189,15 +174,11 @@ async def test_retry_on_rate_limit():
         call_count += 1
         if call_count == 1:
             raise LLMError(message="rate limited", code="rate_limit")
-        yield TextDelta(text="success")
-        yield StepFinish(
-            finish_reason="stop",
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-        )
+        for chunk in seq(
+            TextDelta(text="success"),
+            StepFinish( finish_reason="stop", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
 
     agent.runner.llm.stream = fake_stream
 

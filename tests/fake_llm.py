@@ -1,6 +1,9 @@
 """
 FakeAdapter - 假的 LLM 适配器，用于本地测试，不需要真实 API。
 
+B2：产 StreamChunk 协议（七种 chunk + 配对契约），供 runner 测试与
+契约测试复用。
+
 支持几种场景：
   - 普通文本输出
   - 工具调用
@@ -14,19 +17,27 @@ FakeAdapter - 假的 LLM 适配器，用于本地测试，不需要真实 API。
         "rate_limit", retries=2, text="重试成功！"
     )
 
-    # 替换到 LLMHandler 上：
-    agent.runner.llm._adapter = adapter
+    # 替换到 runner 的 llm 上：
+    agent.runner._llm = adapter
 """
 import json
 import time
-import litellm
 
-from ftre_agent_core.llm.completion import (
-    StreamAdapter,
-    StreamDelta,
-    LLMResponse,
-    ToolCallWrapper,
+import openai
+
+from ftre_agent_core.llm import (
+    BlockEnd,
+    BlockStart,
+    FinishChunk,
+    FinishReason,
+    LLMAdapter,
+    LlmFailure,
+    ReasoningDeltaChunk,
+    StreamChunk,
+    TextDeltaChunk,
+    ToolCall,
     ToolCallDeltaChunk,
+    UsageChunk,
 )
 
 
@@ -39,36 +50,180 @@ def _chunk_text(text: str, size: int = 4) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)]
 
 
+def legacy_event_sequence(*events) -> list[StreamChunk]:
+    """把旧式事件序列（TextDelta/ReasoningDelta/ToolCall/StepFinish）转成
+    合法的 StreamChunk 序列——测试迁移辅助（B2 FR7）。
+
+    旧式测试 fake 的典型形态::
+
+        yield TextDelta(text="hello")
+        yield StepFinish(finish_reason="stop")
+
+    迁移后::
+
+        for chunk in legacy_event_sequence(
+            TextDelta(text="hello"),
+            StepFinish(finish_reason="stop"),
+        ):
+            yield chunk
+
+    转换规则：
+    - 旧 TextDelta(text=...)     → BlockStart(text) + TextDeltaChunk + BlockEnd
+    - 旧 ReasoningDelta(text=..) → BlockStart(reasoning) + ReasoningDeltaChunk + BlockEnd
+    - 旧 ToolCall(id,name,input) → BlockStart(tool-call) + BlockEnd（完整块）
+    - 旧 StepFinish(finish_reason="stop"|"tool_calls"|"length"|其他)
+      → UsageChunk（如带 usage）+ FinishChunk（kind 映射；未知 kind → error）
+    """
+    chunks: list[StreamChunk] = []
+    index = 0
+    kind_map = {"stop": "stop", "tool_calls": "tool-calls", "length": "max-tokens"}
+    text_buf: str | None = None
+    reasoning_buf: str | None = None
+
+    def flush_text():
+        nonlocal index, text_buf
+        if text_buf is not None:
+            chunks.append(BlockStart(index=index, block_type="text"))
+            chunks.append(TextDeltaChunk(index=index, text=text_buf))
+            chunks.append(BlockEnd(index=index, block={"type": "text", "text": text_buf}))
+            index += 1
+            text_buf = None
+
+    def flush_reasoning():
+        nonlocal index, reasoning_buf
+        if reasoning_buf is not None:
+            chunks.append(BlockStart(index=index, block_type="reasoning"))
+            chunks.append(ReasoningDeltaChunk(index=index, text=reasoning_buf))
+            chunks.append(BlockEnd(index=index, block={"type": "thinking", "thinking": reasoning_buf}))
+            index += 1
+            reasoning_buf = None
+
+    for ev in events:
+        ev_type = getattr(ev, "type", "")
+        if ev_type == "text-delta":
+            text_buf = (text_buf or "") + ev.text
+        elif ev_type == "reasoning-delta":
+            reasoning_buf = (reasoning_buf or "") + ev.text
+        elif ev_type == "tool-call":
+            # 旧 ToolCall（完整调用）→ 一个完整 tool-call 块
+            flush_text()
+            flush_reasoning()
+            args = json.dumps(ev.input, ensure_ascii=False) if ev.input is not None else ""
+            chunks.append(BlockStart(index=index, block_type="tool-call"))
+            chunks.append(BlockEnd(index=index, block={
+                "type": "tool-call", "id": ev.id, "name": ev.name, "arguments": args,
+            }))
+            index += 1
+        elif ev_type == "step-finish":
+            flush_text()
+            flush_reasoning()
+            if getattr(ev, "usage", None):
+                chunks.append(UsageChunk(usage=ev.usage))
+            raw = getattr(ev, "finish_reason", "unknown")
+            kind = kind_map.get(raw)
+            if kind is None:
+                # 与适配器同语义：有内容产出时宽容映射 stop（内容完整可信），
+                # 无产出时 error（接住 Muse 式 finish_reason: null）
+                has_output = bool(text_buf or reasoning_buf) or any(
+                    isinstance(c, BlockEnd) for c in chunks
+                )
+                if has_output:
+                    kind = "stop"
+            if kind is None:
+                chunks.append(FinishChunk(reason=FinishReason(
+                    kind="error",
+                    failure=LlmFailure(message=f"model stopped: {raw}", code=str(raw).upper()),
+                    raw=raw,
+                    response_metadata=getattr(ev, "response_metadata", {}) or {},
+                )))
+            else:
+                chunks.append(FinishChunk(reason=FinishReason(
+                    kind=kind, raw=raw,
+                    response_metadata=getattr(ev, "response_metadata", {}) or {},
+                )))
+    return chunks
+
+
 def _make_error(code: str) -> Exception:
-    """根据 code 构造对应的 litellm 异常。"""
+    """根据 code 构造对应的 openai SDK 异常（LLMError.classify 可识别）。"""
     msg = f"[FakeAdapter] 模拟错误: {code}"
     mapping = {
-        "rate_limit":     litellm.RateLimitError,
-        "timeout":        litellm.Timeout,
-        "network":        litellm.APIConnectionError,
-        "api_error":      litellm.APIError,
+        "rate_limit":     openai.RateLimitError,
+        "timeout":        openai.APITimeoutError,
+        "network":        openai.APIConnectionError,
+        "auth_error":     openai.AuthenticationError,
     }
     cls = mapping.get(code)
     if cls is None:
         raise ValueError(f"不支持的错误类型: {code}，可选: {list(mapping)}")
-    return cls(msg, llm_provider="fake", model="fake")
+    if cls is openai.APITimeoutError:
+        return cls(request=None)
+    if cls is openai.APIConnectionError:
+        return cls(request=None)
+    # RateLimitError / AuthenticationError 需要 response 构造参数
+    class _FakeResponse:
+        status_code = 429 if cls is openai.RateLimitError else 401
+        headers = {}
+        def json(self):
+            return {}
+        def text(self):
+            return msg
+    return cls(message=msg, response=_FakeResponse(), body=None)
+
+
+# ============================================================
+# 旧事件形态 shim（测试迁移辅助，B2 FR7）
+# ============================================================
+# 旧测试大量使用 `yield TextDelta(text=...) + StepFinish(finish_reason=...)`
+# 形态的 fake LLM。这里提供三个纯数据 shim + sequence_events() 组合器，
+# 使旧式 fake 以最小改动迁移到 StreamChunk 协议：
+#   for chunk in seq(TextDelta(text="hi"), StepFinish(finish_reason="stop")): yield chunk
+
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class TextDelta:
+    """旧事件 shim：正文文本增量（配合 legacy_event_sequence 使用）。"""
+    type: str = _dc_field(default="text-delta", init=False)
+    text: str = ""
+
+
+@dataclass
+class ReasoningDelta:
+    """旧事件 shim：推理文本增量（配合 legacy_event_sequence 使用）。"""
+    type: str = _dc_field(default="reasoning-delta", init=False)
+    text: str = ""
+
+
+@dataclass
+class StepFinish:
+    """旧事件 shim：一轮结束（配合 legacy_event_sequence 使用）。"""
+    type: str = _dc_field(default="step-finish", init=False)
+    finish_reason: str = "unknown"
+    usage: dict | None = None
+    response_metadata: dict = _dc_field(default_factory=dict)
+
+
+def seq(*events) -> list[StreamChunk]:
+    """旧事件序列 → StreamChunk 序列（legacy_event_sequence 的短名）。"""
+    return legacy_event_sequence(*events)
 
 
 # ============================================================
 # FakeAdapter
 # ============================================================
 
-class FakeAdapter(StreamAdapter):
-    """假的 LLM 适配器，直接继承 StreamAdapter。"""
+class FakeAdapter(LLMAdapter):
+    """假的 LLM 适配器，实现 LLMAdapter 契约（StreamChunk 协议）。"""
 
     def __init__(self, scenario: dict):
-        """不调用父类 __init__，直接设置必要属性。"""
         self.model = "fake"
-        self.api_key = "fake"
-        self.api_base = None
-        self._cancelled_check = lambda: False
-        self._active_response = None
         self._scenario = scenario
+
+    def cancel(self) -> None:
+        """fake 适配器不需要取消逻辑（同步产 chunk）。"""
 
     # --------------------------------------------------------
     # 工厂方法
@@ -119,15 +274,22 @@ class FakeAdapter(StreamAdapter):
                 yield from self._stream_text(scenario["text"])
 
     # --------------------------------------------------------
-    # 内部：文本流式输出
+    # 内部：文本流式输出（block 配对 + usage + finish）
     # --------------------------------------------------------
 
     def _stream_text(self, content: str, chunk_size: int = 4, delay: float = 0.0):
+        yield BlockStart(index=0, block_type="text")
         for chunk in _chunk_text(content, chunk_size):
             if delay > 0:
                 time.sleep(delay)
-            yield StreamDelta(content=chunk)
-        yield StreamDelta(usage={"prompt_tokens": 10, "completion_tokens": len(content) // 4, "total_tokens": 10 + len(content) // 4})
+            yield TextDeltaChunk(index=0, text=chunk)
+        yield BlockEnd(index=0, block={"type": "text", "text": content})
+        yield UsageChunk(usage={
+            "prompt_tokens": 10,
+            "completion_tokens": len(content) // 4,
+            "total_tokens": 10 + len(content) // 4,
+        })
+        yield FinishChunk(reason=FinishReason(kind="stop"))
 
     # --------------------------------------------------------
     # 内部：工具调用输出
@@ -136,14 +298,17 @@ class FakeAdapter(StreamAdapter):
     def _stream_tool_call(self, call_id: str, name: str, arguments: dict):
         args_str = json.dumps(arguments, ensure_ascii=False)
 
-        # 流式透出 tool_call delta（模拟真实 API 分批推送参数）
-        yield StreamDelta(tool_calls=[ToolCallDeltaChunk(index=0, id=call_id, name=name, arguments_delta="")])
+        yield BlockStart(index=0, block_type="tool-call")
+        # 流式透出 arguments delta（模拟真实 API 分批推送参数）
         for chunk in _chunk_text(args_str, size=8):
-            yield StreamDelta(tool_calls=[ToolCallDeltaChunk(index=0, id=None, name=None, arguments_delta=chunk)])
-
-        # 最后产出 LLMResponse，触发 _handle_tool_calls
-        yield LLMResponse(
-            content=None,
-            tool_calls=[ToolCallWrapper({"id": call_id, "type": "function", "function": {"name": name, "arguments": args_str}})],
-            usage={"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
-        )
+            yield ToolCallDeltaChunk(
+                index=0, call_id=call_id, name=name, arguments_delta=chunk,
+            )
+        yield BlockEnd(index=0, block={
+            "type": "tool-call",
+            "id": call_id,
+            "name": name,
+            "arguments": args_str,
+        })
+        yield UsageChunk(usage={"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30})
+        yield FinishChunk(reason=FinishReason(kind="tool-calls"))

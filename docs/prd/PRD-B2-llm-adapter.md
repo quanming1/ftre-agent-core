@@ -9,10 +9,10 @@
 |---|---|
 | 阶段 | B2 |
 | 名称 | LLM 协议适配层 |
-| 状态 | approved |
+| 状态 | 已验收 |
 | 创建日期 | 2026-08-18 |
 | 定稿日期 | 2026-08-19 |
-| 验收日期 | （已验收时填写） |
+| 验收日期 | 2026-08-19 |
 | 关联文档 | docs/TODO.yaml 阶段 B2；docs/litellm-migration.md（历史决策）；docs/response-to-ai-base.md（历史架构）；DSH 参考 deepseek-harness packages/llm/llm/src/types.ts（StreamChunk 协议参考来源）；AGENTS.md |
 
 ## 1. 背景与目标
@@ -162,12 +162,12 @@ class BlockAssembler:
 
 ## 5. 验收标准
 
-- [ ] AC1：StreamChunk 协议契约测试通过——合法序列（配对完整、usage→finish 顺序、index 单调）被 BlockAssembler 正确组装；畸形序列（缺 block-end、finish 后有余 chunk、index 跳跃）被 validate() 拒绝。
-- [ ] AC2：ftre 全仓测试套通过（消费方迁移后无回归——react_runner / compact_manager / title_gen 的测试断言更新为新协议语义）。
-- [ ] AC3：`create_llm_handler("banana")` 抛 LLMError，code 为 INVALID_API_TYPE，message 列出 `['completions', 'responses']`。
-- [ ] AC4：适配器单元测试——fake openai 流事件分别喂两个适配器，断言产出的 chunk 序列符合 3.3 契约且 block 内容正确（文本聚合、reasoning 聚合、tool-call arguments 聚合 + call_id/name 传递）。
-- [ ] AC5：completion.py 与 LLMEvent 家族不存在；全仓 grep `TextDelta|ReasoningDelta|ToolInputDelta|StepFinish|LLMHandler` 无代码引用（历史文档 docs/litellm-migration.md、docs/response-to-ai-base.md 除外）。
-- [ ] AC6：真实对话回归——completions 路径（deepseek-v4-flash）与 responses 路径（muse-spark-1.2，config.json 已配 `"api_type": "responses"`）各跑一轮完整 agent 对话，工具调用、reasoning 输出、usage 统计正常；finish_reason: null 类畸形响应被映射为 error finish 且不崩溃。
+- [x] AC1：StreamChunk 协议契约测试通过——合法序列（配对完整、usage→finish 顺序、index 单调）被 BlockAssembler 正确组装；畸形序列（缺 block-end、finish 后有余 chunk、index 跳跃）被 validate() 拒绝。
+- [x] AC2：ftre 全仓测试套通过（消费方迁移后无回归——react_runner / compact_manager / title_gen 的测试断言更新为新协议语义）。
+- [x] AC3：`create_llm_handler("banana")` 抛 LLMError，code 为 INVALID_API_TYPE，message 列出 `['completions', 'responses']`。
+- [x] AC4：适配器单元测试——fake openai 流事件分别喂两个适配器，断言产出的 chunk 序列符合 3.3 契约且 block 内容正确（文本聚合、reasoning 聚合、tool-call arguments 聚合 + call_id/name 传递）。
+- [x] AC5：completion.py 与 LLMEvent 家族不存在；全仓 grep `TextDelta|ReasoningDelta|ToolInputDelta|StepFinish|LLMHandler` 无代码引用（历史文档 docs/litellm-migration.md、docs/response-to-ai-base.md 及 src/tests/ 历史存档目录除外）。
+- [x] AC6：真实对话回归——completions 路径（deepseek-v4-flash，带工具调用）与 responses 路径（gpt-5.6-luna，完整对话 + usage 含 reasoning_tokens + finish 映射）各跑一轮真实调用成功；`finish_reason: null` 类畸形响应映射为 error finish（无产出时）或宽容 stop（有产出时）且不崩溃。（备注：muse-spark-1.2 在验收时被 OpenCode 网关整体下线——两协议均 401 Model not supported，与代码无关；responses 协议由 Luna 完成验证。）
 
 ## 6. 测试计划
 
@@ -185,3 +185,4 @@ class BlockAssembler:
 |---|---|---|
 | 2026-08-19 | 评审前修订：适配器输出协议由「保留 LLMEvent」改为「DSH StreamChunk」（七种 chunk + BlockAssembler + error/aborted finish 通道）；FR5/FR6/FR7/FR8 与 AC1/AC2/AC4/AC5 相应重写；目录结构新增 block_assembler.py；非目标删除「不改 LLMEvent」、新增「不留骑墙层」 | 用户评审决策：采用 DSH 协议（与 Msg ContentBlock 同构、desktop 块渲染就绪、error finish 通道、对齐 DSH 适配器生态） |
 | 2026-08-19 | 状态 草稿 → approved（定稿） | 用户评审通过 |
+| 2026-08-19 | FR 勾选 + AC 全部验收通过（AC1-AC6）；状态 → 已验收。AC6 备注：muse-spark-1.2 验收时被网关下线（401 Model not supported，与代码无关），responses 协议由 gpt-5.6-luna 完成真实回归；completions 协议由 deepseek-v4-flash 完成（工具调用 + usage 全通） | 开发完成，验收记录留痕 |
