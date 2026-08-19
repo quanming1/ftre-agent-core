@@ -274,14 +274,43 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 ))
 
 
+def _convert_user_content_to_responses(content: Any) -> Any:
+    """user content → Responses API 兼容形态。
+
+    ftre 的消息转换器（chat-completions 风格）可能产出：
+    - 字符串（纯文本，Responses 原生支持，直接透传）
+    - [{"type": "text", "text": ...}] 数组——OpenAI 官方宽容接受，
+      但 Muse 等严格实现会 400（"did not match any supported type"），
+      必须映射为 [{"type": "input_text", "text": ...}]
+    - [{"type": "image_url", "image_url": {"url": ...}}] → input_image
+    """
+    if not isinstance(content, list):
+        return content
+    converted: list[dict] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type", "")
+        if part_type in ("text", "input_text"):
+            converted.append({"type": "input_text", "text": part.get("text", "")})
+        elif part_type in ("image_url", "input_image"):
+            image = part.get("image_url")
+            url = image.get("url", "") if isinstance(image, dict) else str(image or "")
+            converted.append({"type": "input_image", "image_url": url})
+        else:
+            # 未知 part（如插件扩展块）：按文本占位，保持 index 对齐
+            converted.append({"type": "input_text", "text": ""})
+    return converted
+
+
 def _convert_messages_to_responses_input(
     messages: list[dict],
 ) -> tuple[str | None, list[dict]]:
     """Chat Completions messages → Responses API (instructions, input)。
 
-    迁移自 completion.py，逻辑保持等价：
+    迁移自 completion.py，user content 增加 Responses 形态归一化：
       system       → instructions 参数（多条拼接）
-      user         → {role: user, content}
+      user         → {role: user, content}（列表 content 归一化为 input_text / input_image）
       assistant    → {role: assistant, content}（无 tool_calls 时）
       assistant+tc → 先 assistant content（如有），再若干 function_call 条目
       tool         → {type: function_call_output, call_id, output}
@@ -307,7 +336,10 @@ def _convert_messages_to_responses_input(
                 instructions = text if not instructions else f"{instructions}\n\n{text}"
 
         elif role == "user":
-            input_items.append({"role": "user", "content": content})
+            input_items.append({
+                "role": "user",
+                "content": _convert_user_content_to_responses(content),
+            })
 
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
