@@ -17,7 +17,8 @@ ReActAgent(
     max_retries: int = 5,
     retry_delay: float = 3.0,
     tracer: Tracer | None = None,
-    hook_manager: FtreCoreHookManager | None = None,
+    hooks: HookDispatcher | None = None,
+    hook_context: object | None = None,
 )
 ```
 

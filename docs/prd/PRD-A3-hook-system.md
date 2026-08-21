@@ -1,5 +1,8 @@
 # PRD-A3-Hook-System
 
+> 历史基线：本阶段的 Core 自有 HookManager 已由 C1（`PRD-C1-core-hook-integration.md`）
+> 取代。当前实现和新开发入口以 C1 的 `HookDispatcher` 协议为准；本文件仅保留历史验收记录。
+
 ## 元信息
 
 | 字段 | 值 |

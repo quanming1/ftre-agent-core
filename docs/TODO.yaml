@@ -45,7 +45,7 @@ stages:
         prd: docs/prd/PRD-A3-hook-system.md
         prd_status: 已验收
         modules:
-          - src/ftre_agent_core/hooks.py（FtreCoreHookManager）
+          - src/ftre_agent_core/hooks.py（HookDispatcher + typed contracts）
         acceptance: hook 在正确时机触发；coroutine 返回值被 await；hook 可修改 messages 和 config
 
       - id: A4
@@ -85,3 +85,18 @@ stages:
         modules:
           - src/ftre_agent_core/llm/（契约层 + 协议注册表 + 适配器）
         acceptance: LLMAdapter 契约 + create_llm_handler 工厂就位；completions/responses 两适配器行为与现状逐字节等价；消费方零协议感知；新协议接入只加文件 + 注册表一行
+
+  - id: C
+    name: 宿主 Hook 协议集成
+    steps:
+      - id: C1
+        title: Agent Core 直接消费 ftre Hook 协议与 Turn-stopping Continuation
+        status: done
+        date: 2026-08-21
+        prd: docs/prd/PRD-C1-core-hook-integration.md
+        prd_status: 已验收
+        modules:
+          - src/ftre_agent_core/hooks.py（共享协议、Spec、Dispatcher）
+          - src/ftre_agent_core/agent/runner/（Tool、LLM、停止决策注入点）
+          - tests/（Core Hook 合同与状态机回归）
+        acceptance: Core 不再持有 Hook 注册表；ftre 可直接注入 Cordis HookRuntime；Tool、LLM stream、turn-stopping 管线全量测试通过
