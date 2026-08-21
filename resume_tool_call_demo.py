@@ -5,7 +5,11 @@ from pathlib import Path
 
 from ftre_agent_core.agent.react import ReActAgent
 from ftre_agent_core.event import UserConfirmResultEvent
-from ftre_agent_core.permission import PermissionBehavior, PermissionEngine, PermissionRule
+from ftre_agent_core.permission import (
+    PermissionBehavior,
+    PermissionEngine,
+    PermissionRule,
+)
 from ftre_agent_core.state import AgentState
 from ftre_agent_core.tool import ToolRegistry, tool
 

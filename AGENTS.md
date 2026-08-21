@@ -61,9 +61,9 @@ master（仅发布，永不直接提交）← develop（默认基底，只接受
 
 <modules>
 - agent/：ReActAgent（react.py，ReAct 循环）+ runner/
-- llm/：LLM 调用（completion.py LLMHandler / utils.py）
+- llm/：LLM 调用（LLMAdapter、StreamChunk、协议适配器与 registry 工厂）
 - tool/：工具体系（base.py Tool/ToolParameter/Injected / registry.py ToolRegistry / cancellation.py）
-- hooks.py：FtreCoreHookManager（全异步 filter chain）
+- hooks.py：宿主注入的 HookDispatcher、HookSpec 与 Tool/LLM/turn-stopping typed contracts
 - message/：Msg/MsgName + ContentBlock（text/toolCall/toolResult/image/think）
 - event/：EventBase/CustomEvent（被 Tracer 捕获）
 - permission/：权限引擎（allow/deny/ask，_engine.py/_types.py/_context.py）
@@ -74,8 +74,8 @@ master（仅发布，永不直接提交）← develop（默认基底，只接受
 
 <core_invariants>
 - 无状态：本库不持有进程级可变状态，不依赖具体 Channel/后端
-- ToolHandler.run_one() 返回值：str / EventBase / tuple[str, dict]，metadata 透传到 ToolResultEndEvent
-- Hook 回调必须 async def，自动 await coroutine
+- ToolHandler.run_one() 返回结构化 ToolResult；原始工具的 str / EventBase / tuple[str, dict] 在 Core 内归一化
+- Hook Dispatcher 为 async protocol；宿主负责 await、Scope、生命周期和 failure policy
 </core_invariants>
 
 </architecture>

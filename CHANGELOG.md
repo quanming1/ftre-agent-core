@@ -2,6 +2,8 @@
 
 ## [未发布]
 
+## [0.1.1] - 2026-08-22
+
 ### C1 Agent Core 直接 Hook 协议
 
 - 删除 Core 自持有的 `FtreCoreHookManager`、旧 `ON_*` 输入输出和注册入口。

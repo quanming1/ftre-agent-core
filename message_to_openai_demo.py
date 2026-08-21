@@ -7,7 +7,6 @@ from pathlib import Path
 from ftre_agent_core.message import Msg
 from ftre_agent_core.message_context import MessageContext
 
-
 DEFAULT_INPUT = Path(__file__).resolve().parent / "Njiknfgjinr.json"
 
 
