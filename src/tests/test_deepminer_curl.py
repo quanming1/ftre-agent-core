@@ -81,53 +81,55 @@ def stream_chat(
             pool=60.0,
         )
         # 禁用 HTTP/2，使用 HTTP/1.1 避免 SSL 问题
-        with httpx.Client(timeout=timeout, http2=False) as client:
-            with client.stream("POST", url, headers=headers, json=payload) as resp:
-                result["http_status"] = resp.status_code
+        with (
+            httpx.Client(timeout=timeout, http2=False) as client,
+            client.stream("POST", url, headers=headers, json=payload) as resp,
+        ):
+            result["http_status"] = resp.status_code
 
-                if resp.status_code != 200:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    result["error"] = f"HTTP {resp.status_code}: {body[:500]}"
-                    result["total_time"] = time.perf_counter() - start
-                    return result
+            if resp.status_code != 200:
+                body = resp.read().decode("utf-8", errors="replace")
+                result["error"] = f"HTTP {resp.status_code}: {body[:500]}"
+                result["total_time"] = time.perf_counter() - start
+                return result
 
-                # 逐行解析 SSE
-                buffer = ""
-                for raw_bytes in resp.iter_bytes():
-                    now = time.perf_counter()
-                    buffer += raw_bytes.decode("utf-8", errors="replace")
+            # 逐行解析 SSE
+            buffer = ""
+            for raw_bytes in resp.iter_bytes():
+                now = time.perf_counter()
+                buffer += raw_bytes.decode("utf-8", errors="replace")
 
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
 
-                        if not line or line.startswith(":"):
-                            continue
-                        if not line.startswith("data:"):
-                            continue
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
 
-                        data_str = line[len("data:") :].strip()
-                        if data_str == "[DONE]":
-                            continue
+                    data_str = line[len("data:") :].strip()
+                    if data_str == "[DONE]":
+                        continue
 
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
 
-                        choices = data.get("choices", [])
-                        if not choices:
-                            continue
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
 
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content")
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
 
-                        if content:
-                            elapsed = now - start
-                            if result["ttft"] is None:
-                                result["ttft"] = elapsed
-                            result["text"] += content
-                            result["chunk_count"] += 1
+                    if content:
+                        elapsed = now - start
+                        if result["ttft"] is None:
+                            result["ttft"] = elapsed
+                        result["text"] += content
+                        result["chunk_count"] += 1
 
     except (httpx.ConnectError, httpx.ConnectTimeout, ssl.SSLError) as e:
         # 连接错误，尝试重试
@@ -140,7 +142,7 @@ def stream_chat(
         result["error"] = f"连接失败 (重试 {MAX_RETRIES} 次后): {type(e).__name__}"
     except httpx.ReadTimeout:
         result["error"] = "读取超时"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script reports failure
         result["error"] = f"{type(e).__name__}: {e}"
 
     result["total_time"] = time.perf_counter() - start
@@ -218,7 +220,7 @@ def run_all():
 
     # ── 汇总 ──
     print(f"\n\n{'═' * 55}")
-    print(f"  📊 TTFT 汇总统计")
+    print("  📊 TTFT 汇总统计")
     print(f"{'═' * 55}")
 
     if ttft_samples:

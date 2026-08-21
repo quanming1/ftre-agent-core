@@ -91,6 +91,33 @@ class TestValidSequence:
         assert asm.blocks() == []
         assert asm.finish_reason().reason.kind == "stop"
 
+    def test_max_tokens_finish_drops_tool_call_blocks(self):
+        """max-tokens 截断时 tool-call 的 arguments 不完整，不可安全执行，
+        blocks() 输出时丢弃（对齐 DSH assembled()）。"""
+        asm = BlockAssembler()
+        asm.feed(BlockStart(index=0, block_type="text"))
+        asm.feed(TextDeltaChunk(index=0, text="partial"))
+        asm.feed(BlockEnd(index=0, block={"type": "text", "text": "partial"}))
+        asm.feed(BlockStart(index=1, block_type="tool-call"))
+        asm.feed(
+            ToolCallDeltaChunk(index=1, call_id="c1", name="bash", arguments_delta='{"command":')
+        )
+        asm.feed(
+            BlockEnd(
+                index=1,
+                block={
+                    "type": "tool-call",
+                    "id": "c1",
+                    "name": "bash",
+                    "arguments": '{"command":',
+                },
+            )
+        )
+        asm.feed(FinishChunk(reason=FinishReason(kind="max-tokens")))
+        asm.validate()
+
+        assert asm.blocks() == [{"type": "text", "text": "partial"}]
+
 
 class TestMalformedSequence:
     def test_missing_block_end_rejected(self):

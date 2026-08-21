@@ -1,8 +1,9 @@
 """
 测试 ToolRegistry
 """
-import pytest
-from ftre_agent_core.tool import Tool, ToolParameter, ToolRegistry, tool
+from typing import ClassVar
+
+from ftre_agent_core.tool import Tool, ToolRegistry, tool
 
 
 class TestToolRegistry:
@@ -71,7 +72,7 @@ class TestToolRegistry:
         class CustomTool(Tool):
             name = "custom"
             description = "自定义工具"
-            parameters = []
+            parameters: ClassVar[list] = []
             
             def _run(self) -> str:
                 return "custom result"
@@ -141,4 +142,4 @@ class TestToolRegistry:
         registry.register(tool_b)
         
         assert len(registry) == 2
-        assert set(t.name for t in registry) == {"tool_a", "tool_b"}
+        assert {t.name for t in registry} == {"tool_a", "tool_b"}

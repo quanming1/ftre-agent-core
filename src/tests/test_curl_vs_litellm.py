@@ -18,7 +18,6 @@ import time
 import httpx
 
 from ftre_agent_core.agent import EventType, ReActAgent
-from ftre_agent_core.tool import tool
 
 # ── 配置 ───────────────────────────────────────────────────────
 API_KEY = "sk-REDACTED"
@@ -77,8 +76,7 @@ def curl_stream(prompt: str, max_tokens: int = 512) -> dict:
             write=60.0,
             pool=60.0,
         )
-        with httpx.Client(timeout=timeout, http2=False) as client:
-            with client.stream("POST", url, headers=headers, json=payload) as resp:
+        with httpx.Client(timeout=timeout, http2=False) as client, client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     result["error"] = f"HTTP {resp.status_code}"
                     return result
@@ -117,7 +115,7 @@ def curl_stream(prompt: str, max_tokens: int = 512) -> dict:
                             result["text"] += content
                             result["chunk_count"] += 1
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script reports failure
         result["error"] = f"{type(e).__name__}: {e}"
 
     result["total_time"] = time.perf_counter() - start
@@ -168,7 +166,7 @@ def litellm_stream(prompt: str, max_tokens: int = 512) -> dict:
 
         result["chunk_count"] = chunks
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script reports failure
         result["error"] = f"{type(e).__name__}: {e}"
 
     result["total_time"] = time.perf_counter() - start
@@ -216,7 +214,7 @@ def run_comparison():
         ttft_diff = llm_ttft - curl_ttft
         total_diff = llm_total - curl_total
 
-        print(f"\n  📊 对比结果:")
+        print("\n  📊 对比结果:")
         print(f"     TTFT 差异:   {ttft_diff:+.0f}ms ({'litellm慢' if ttft_diff > 0 else 'litellm快'})")
         print(f"     总耗时差异:  {total_diff:+.0f}ms ({'litellm慢' if total_diff > 0 else 'litellm快'})")
 
@@ -238,7 +236,7 @@ def run_comparison():
 
     # 汇总
     print(f"\n\n{'═' * 60}")
-    print(f"  📊 汇总")
+    print("  📊 汇总")
     print(f"{'═' * 60}")
     print(f"  {'测试':<10} {'curl TTFT':<12} {'litellm TTFT':<14} {'差异':<10}")
     print(f"  {'-' * 50}")

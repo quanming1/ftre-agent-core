@@ -31,7 +31,6 @@ from ._block import (
     URLSource,
 )
 
-
 # ══════════════════════════════════════════════════════════════════
 # 单个 content part ↔ Block
 # ══════════════════════════════════════════════════════════════════
@@ -82,7 +81,7 @@ def from_openai_part(part: dict) -> ContentBlock:
         path = part.get("path", "")
         mime = part.get("mime_type", "image/png")
         try:
-            with open(path, "rb") as f:  # noqa: PTH123
+            with open(path, "rb") as f:
                 raw = f.read()
             b64 = base64.b64encode(raw).decode("ascii")
             return DataBlock(

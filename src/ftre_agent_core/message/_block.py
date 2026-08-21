@@ -18,10 +18,10 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
-from enum import StrEnum
-from typing import Any, Literal, Union
 import uuid
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,7 +33,7 @@ def _gen_id() -> str:
 
 def _now_iso() -> str:
     """ISO 8601 时间戳。"""
-    return datetime.now().isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -178,14 +178,7 @@ class ToolResultBlock(BaseModel):
 # ══════════════════════════════════════════════════════════════════
 
 # 所有内容块的联合类型
-ContentBlock = Union[
-    TextBlock,
-    ThinkingBlock,
-    DataBlock,
-    HintBlock,
-    ToolCallBlock,
-    ToolResultBlock,
-]
+ContentBlock = TextBlock | ThinkingBlock | DataBlock | HintBlock | ToolCallBlock | ToolResultBlock
 
 # 内容块类型字符串字面量集合
 ContentBlockTypes = (

@@ -9,7 +9,6 @@ completions / responses 两个适配器分别喂 fake 流，验证：
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,16 +16,11 @@ import pytest
 
 from ftre_agent_core.llm import (
     BlockAssembler,
-    BlockEnd,
     FinishChunk,
     OpenAICompletionsAdapter,
     OpenAIResponsesAdapter,
-    ReasoningDeltaChunk,
-    TextDeltaChunk,
-    ToolCallDeltaChunk,
     UsageChunk,
 )
-
 
 # ── fake openai 流对象 ─────────────────────────────────────────────────
 
@@ -99,6 +93,22 @@ class _FakeUsageObj:
         return {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+@dataclass
+class _FakeResponsesUsageObj:
+    """Responses API 标准字段形态的 SDK usage 对象。"""
+
+    input_tokens: int = 10
+    output_tokens: int = 5
+    total_tokens: int = 15
+
+    def model_dump(self, exclude_none: bool = True):
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
         }
 
@@ -311,6 +321,28 @@ def _make_responses_adapter(events):
 
 class TestResponsesAdapter:
     @pytest.mark.asyncio
+    async def test_standard_responses_usage_maps_to_core_fields(self):
+        """Responses 的 input/output token 字段应满足 Runner 的统一契约。"""
+        events = [
+            _FakeRespEvent(
+                "ResponseCompletedEvent",
+                response=_FakeResponse(usage=_FakeResponsesUsageObj()),
+            ),
+        ]
+        adapter, _ = _make_responses_adapter(events)
+
+        out = await _collect(adapter.stream([{"role": "user", "content": "hi"}]))
+
+        usage = next(chunk.usage for chunk in out if isinstance(chunk, UsageChunk))
+        assert usage == {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+        }
+
+    @pytest.mark.asyncio
     async def test_text_toolcall_chunks(self):
         events = [
             _FakeRespEvent("ResponseTextDeltaEvent", item_id="msg-1", delta="Hi"),
@@ -441,3 +473,79 @@ class TestResponsesAdapter:
         [c async for c in adapter.stream([{"role": "user", "content": "plain hi"}])]
 
         assert captured["input"][0]["content"] == "plain hi"
+
+    @pytest.mark.asyncio
+    async def test_user_text_only_array_flattened_to_string(self):
+        """纯文本 user 数组 → 扁平化字符串（对齐 DSH pi-ai context.ts：
+        content.every(text) ? join('') : 数组；chat 词汇数组被严格实现 400）。"""
+        captured = {}
+
+        adapter = OpenAIResponsesAdapter(model="t", api_key="k")
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"},
+        ]}]
+        [c async for c in adapter.stream(messages)]
+
+        assert captured["input"][0]["content"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_react_history_assistant_content_flattened(self):
+        """ReAct 多轮历史：assistant chat 数组 content → 字符串。
+
+        回归测试（Muse / gpt-5.6-terra 实测 400 根因）：Responses API 的
+        assistant content 只接受字符串或 output_text 数组，to_openai_message
+        产出的 [{"type": "text"}] 数组必须扁平化，否则第二轮带 assistant
+        历史即触发 400 input[N].content。
+        """
+        captured = {}
+
+        adapter = OpenAIResponsesAdapter(model="t", api_key="k")
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": [{"type": "text", "text": "list files"}]},
+            # assistant：chat 数组 content + tool_calls（to_openai_message 形态）
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "我来查看。"}],
+                "reasoning_content": "thinking...",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "a.py\nb.py"},
+            # 无 tool_calls 的 assistant 历史同样要扁平化
+            {"role": "assistant", "content": [{"type": "text", "text": "done."}]},
+            {"role": "user", "content": "thanks"},
+        ]
+        [c async for c in adapter.stream(messages)]
+
+        input_items = captured["input"]
+        assert input_items == [
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": "我来查看。"},
+            {"type": "function_call", "call_id": "call-1", "name": "bash",
+             "arguments": '{"command": "ls"}'},
+            {"type": "function_call_output", "call_id": "call-1", "output": "a.py\nb.py"},
+            {"role": "assistant", "content": "done."},
+            {"role": "user", "content": "thanks"},
+        ]
+        assert captured["instructions"] == "sys"

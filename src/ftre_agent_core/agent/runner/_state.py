@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from ...types import ReplyFinishedReason
+from ...llm import LLMError, ToolCall
 from ...tool import CancellationToken
-from ...llm import ToolCall, LLMError
+from ...types import ReplyFinishedReason
 
 if TYPE_CHECKING:
     from ...tracing import TraceSpan
@@ -40,7 +40,6 @@ class RunStatus(str, Enum):
 
 class CancelledError(Exception):
     """内部取消异常，与 asyncio.CancelledError 区分。"""
-    pass
 
 
 @dataclass
@@ -57,7 +56,7 @@ class RunState:
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
 
     # Tracing
-    trace_span: "TraceSpan | None" = None
+    trace_span: TraceSpan | None = None
 
     # 运行上下文
     runtime_context: dict = field(default_factory=dict)

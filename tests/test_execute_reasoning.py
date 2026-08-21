@@ -1,13 +1,13 @@
 # tests/test_execute_reasoning.py
 """ReasoningExecutor 单元测试。"""
 import pytest
-from ftre_agent_core.agent.runner._execute_reasoning import ReasoningExecutor
-from ftre_agent_core.agent.runner._state import Reasoning, TurnResult
-from ftre_agent_core.agent.runner._state import RunState
+from fake_llm import StepFinish, TextDelta, ToolCall, seq
+
 from ftre_agent_core.agent.react import ReActAgent
-from fake_llm import seq, TextDelta, StepFinish, ToolCall
-from ftre_agent_core.llm import LLMError
+from ftre_agent_core.agent.runner._execute_reasoning import ReasoningExecutor
+from ftre_agent_core.agent.runner._state import Reasoning, RunState
 from ftre_agent_core.event import EventType
+from ftre_agent_core.llm import LLMError
 
 
 def make_agent():
@@ -39,7 +39,7 @@ async def test_text_only_turn():
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
     events = [e async for e in executor.stream(Reasoning())]
 
     assert executor.result.text == "hello"
@@ -70,13 +70,44 @@ async def test_tool_call_turn():
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
-    events = [e async for e in executor.stream(Reasoning())]
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    [e async for e in executor.stream(Reasoning())]
 
     assert executor.result.text == ""
     assert len(executor.result.tool_calls) == 1
     assert executor.result.tool_calls[0].id == "c1"
     assert executor.result.finish_reason == "tool-calls"
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_drops_truncated_tool_calls():
+    """max-tokens 截断时 tool-call 参数不完整，整体丢弃不可执行（对齐 DSH）；
+    text / reasoning 保留。"""
+    agent = make_agent()
+    state = make_state()
+
+    async def fake_stream(messages, tools=None):
+        for chunk in seq(
+            TextDelta(text="partial"),
+            ToolCall(id="c1", name="echo", input={"text": "hi"}),
+            StepFinish( finish_reason="length", usage={ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, }, ),
+        ):
+            yield chunk
+
+    agent.runner.llm.stream = fake_stream
+
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    [e async for e in executor.stream(Reasoning())]
+
+    assert executor.result.text == "partial"
+    assert executor.result.tool_calls == []
+    assert executor.result.finish_reason == "max-tokens"
+    # 被丢弃的 tool-call 不写入 reply（context 中无 ToolCallBlock）
+    assistant_msg = agent.messages[-1]
+    assert assistant_msg["role"] == "assistant"
+    content = assistant_msg["content"]
+    block_types = [b.get("type") for b in content] if isinstance(content, list) else []
+    assert "tool-call" not in block_types
 
 
 @pytest.mark.asyncio
@@ -97,8 +128,8 @@ async def test_hint_written_to_memory_before_llm_call():
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
-    events = [e async for e in executor.stream(Reasoning(hint="test hint"))]
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    _events = [e async for e in executor.stream(Reasoning(hint="test hint"))]
 
     assert hint_seen is not None
     assert hint_seen["role"] == "user"
@@ -129,8 +160,8 @@ async def test_force_no_tools_passes_none():
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
-    events = [e async for e in executor.stream(Reasoning(force_no_tools=True))]
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    _events = [e async for e in executor.stream(Reasoning(force_no_tools=True))]
 
     assert tools_received is None
 
@@ -149,7 +180,7 @@ async def test_incomplete_usage_does_not_emit_model_call_end_or_update_state(cap
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
     with caplog.at_level("WARNING"):
         events = [e async for e in executor.stream(Reasoning())]
 
@@ -182,7 +213,7 @@ async def test_retry_on_rate_limit():
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
     events = [e async for e in executor.stream(Reasoning())]
 
     assert call_count == 2
@@ -198,12 +229,12 @@ async def test_retry_exhausted_returns_error():
 
     async def fake_stream(messages, tools=None):
         raise LLMError(message="rate limited", code="rate_limit")
-        yield  # noqa: unreachable — makes it an async generator
+        yield
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
-    events = [e async for e in executor.stream(Reasoning())]
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    _events = [e async for e in executor.stream(Reasoning())]
 
     assert executor.result.error is not None
     assert executor.result.error.code == "rate_limit"
@@ -220,12 +251,12 @@ async def test_unretryable_error_returns_error_immediately():
         nonlocal call_count
         call_count += 1
         raise LLMError(message="bad request", code="bad_request")
-        yield  # noqa: unreachable — makes it an async generator
+        yield
 
     agent.runner.llm.stream = fake_stream
 
-    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hook_manager)
-    events = [e async for e in executor.stream(Reasoning())]
+    executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
+    [e async for e in executor.stream(Reasoning())]
 
     assert call_count == 1
     assert executor.result.error is not None

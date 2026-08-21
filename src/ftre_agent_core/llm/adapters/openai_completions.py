@@ -275,7 +275,7 @@ class OpenAICompletionsAdapter(OpenAIAdapterBase):
                 ))
                 emitted_finish = True
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - normalize provider failures
             from ..errors import LLMError
             err = LLMError.classify(exc)
             logger.warning("[adapter] completions stream failed: %s (%s)", err.message[:200], err.code)
@@ -295,8 +295,8 @@ class OpenAICompletionsAdapter(OpenAIAdapterBase):
                 if inspect.isawaitable(close_result):
                     try:
                         await close_result
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:
+                        logger.debug("failed to close completions response", exc_info=True)
             llm_log.flush()
         # 取消路径：子循环 break 后未发 finish（正常路径已在上面发出）
         if not emitted_finish:

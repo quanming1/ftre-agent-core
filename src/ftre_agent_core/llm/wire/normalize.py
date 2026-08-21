@@ -109,13 +109,33 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
 
 
 def normalize_usage(usage: Any) -> dict | None:
-    """把 SDK usage 对象规范化成普通 dict。"""
+    """把 SDK usage 对象规范化成 core 统一的 token 字段。
+
+    Chat Completions 使用 ``prompt_tokens`` / ``completion_tokens``，而
+    Responses API 的标准字段是 ``input_tokens`` / ``output_tokens``。
+    下游 Runner 只消费前一组规范字段，因此在协议边界补齐别名，保留原始
+    字段及明细以便追踪系统使用。
+    """
     if usage is None:
         return None
     if isinstance(usage, dict):
-        return usage
-    if hasattr(usage, "model_dump"):
-        return usage.model_dump(exclude_none=True)
-    if hasattr(usage, "__dict__"):
-        return {k: v for k, v in vars(usage).items() if v is not None and not k.startswith("_")}
-    return None
+        normalized = dict(usage)
+    elif hasattr(usage, "model_dump"):
+        normalized = usage.model_dump(exclude_none=True)
+    elif hasattr(usage, "__dict__"):
+        normalized = {
+            key: value
+            for key, value in vars(usage).items()
+            if value is not None and not key.startswith("_")
+        }
+    else:
+        return None
+
+    aliases = {
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+    }
+    for canonical, responses_field in aliases.items():
+        if canonical not in normalized and responses_field in normalized:
+            normalized[canonical] = normalized[responses_field]
+    return normalized

@@ -12,7 +12,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _json_safe(value: Any) -> Any:
@@ -115,7 +115,7 @@ class TraceExporter(Protocol):
 
 
 class TraceSpan:
-    def __init__(self, tracer: "Tracer", run: TraceRun):
+    def __init__(self, tracer: Tracer, run: TraceRun):
         self._tracer = tracer
         self.run = run
 
@@ -139,7 +139,7 @@ class TraceSpan:
         inputs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         tags: list[str] | None = None,
-    ) -> "TraceSpan":
+    ) -> TraceSpan:
         return self._tracer.start_run(
             name,
             run_type,

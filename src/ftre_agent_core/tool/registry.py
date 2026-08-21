@@ -1,21 +1,23 @@
 """
 ToolRegistry - 工具注册表
 """
+
 import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
-from .base import Tool, Injected
+from .base import Injected, Tool
 from .cancellation import CancellationToken
-
 
 # ============================================================
 # 调用上下文
 # ============================================================
 
+
 @dataclass
 class ToolContext:
     """单次 tool 调用的上下文"""
+
     call_id: str
     name: str
     arguments: dict[str, Any]
@@ -26,6 +28,7 @@ class ToolContext:
 # ============================================================
 # 注册表
 # ============================================================
+
 
 class ToolRegistry:
     """工具注册表"""
@@ -52,7 +55,9 @@ class ToolRegistry:
 
     # --- 注入 ---
 
-    def _resolve_injections(self, name: str, kwargs: dict, runtime_context: dict | None) -> dict:
+    def _resolve_injections(
+        self, name: str, kwargs: dict, runtime_context: dict | None
+    ) -> dict:
         inject_map = self._inject_map.get(name)
         if not inject_map:
             return kwargs
@@ -65,7 +70,11 @@ class ToolRegistry:
 
     @staticmethod
     def _parse_injections(tool: Tool) -> dict[str, str]:
-        func = tool.func if tool.func is not None else (type(tool)._run if type(tool)._run is not Tool._run else None)
+        func = (
+            tool.func
+            if tool.func is not None
+            else (type(tool)._run if type(tool)._run is not Tool._run else None)
+        )
         if func is None:
             return {}
         result = {}

@@ -20,7 +20,8 @@ import asyncio
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import openai
 
@@ -124,7 +125,7 @@ class OpenAIAdapterBase(LLMAdapter):
                 if isinstance(chunk, FinishChunk):
                     emitted_finish = True
                 yield chunk
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - normalize provider failures
             err = LLMError.classify(exc)
             logger.warning("[adapter] stream failed: %s (%s)", err.message[:200], err.code)
             yield _error_finish(err)
@@ -139,8 +140,8 @@ class OpenAIAdapterBase(LLMAdapter):
                 if inspect.isawaitable(close_result):
                     try:
                         await close_result
-                    except Exception:  # noqa: BLE001 - 关闭期的异常不掩盖主流程
-                        pass
+                    except Exception:
+                        logger.debug("failed to close provider response", exc_info=True)
             llm_log.flush()
         if not emitted_finish:
             # 取消：子类 break 后未发 finish；或协议违规（未以 finish 收尾）

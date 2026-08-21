@@ -9,9 +9,7 @@
    5. ftre 后端引用无断裂
 """
 
-import sys
 import pytest
-
 
 # ─── 1. import 可达性 ──────────────────────────────────────────
 
@@ -19,8 +17,8 @@ class TestImportReachability:
     """所有公开导出都能正常导入，不报 ImportError"""
 
     def test_llm_handler(self):
-        from ftre_agent_core.llm import LLMHandler
-        assert LLMHandler is not None
+        from ftre_agent_core.llm import LLMAdapter
+        assert LLMAdapter is not None
 
     def test_llm_error(self):
         from ftre_agent_core.llm import LLMError
@@ -28,29 +26,32 @@ class TestImportReachability:
 
     def test_llm_event_types(self):
         from ftre_agent_core.llm import (
-            LLMEvent, TextDelta, ReasoningDelta,
-            ToolInputDelta, ToolCall, StepFinish,
+            BlockEnd,
+            FinishChunk,
+            ReasoningDeltaChunk,
+            TextDeltaChunk,
+            ToolCall,
+            ToolCallDeltaChunk,
         )
         # 全部非空
-        for cls in [TextDelta, ReasoningDelta, ToolInputDelta,
-                     ToolCall, StepFinish]:
+        for cls in [TextDeltaChunk, ReasoningDeltaChunk, ToolCallDeltaChunk,
+                     ToolCall, FinishChunk, BlockEnd]:
             assert cls is not None
-        assert LLMEvent is not None
 
     def test_agent_event_module(self):
         from ftre_agent_core.event import EventType
         assert EventType is not None
 
     def test_react_runner(self):
-        from ftre_agent_core.agent.runner import ReActRunner, RunState, RunStatus
+        from ftre_agent_core.agent.runner import ReActRunner
         assert ReActRunner is not None
 
     def test_tool_handler(self):
-        from ftre_agent_core.agent.runner import ToolHandler, ToolResult
+        from ftre_agent_core.agent.runner import ToolHandler
         assert ToolHandler is not None
 
     def test_tool_base(self):
-        from ftre_agent_core.tool import Tool, ToolParameter, Injected, tool
+        from ftre_agent_core.tool import Tool
         assert Tool is not None
 
     def test_tool_registry(self):
@@ -58,7 +59,7 @@ class TestImportReachability:
         assert ToolRegistry is not None
 
     def test_cancellation(self):
-        from ftre_agent_core.tool import CancellationToken, ToolCancelledError
+        from ftre_agent_core.tool import CancellationToken
         assert CancellationToken is not None
 
 
@@ -74,10 +75,12 @@ class TestLLMErrorClassify:
         assert err.message == "test"
 
     def test_rate_limit(self):
-        import openai
-        from ftre_agent_core.llm import LLMError
         # 构造 openai 异常需要 response 对象，用 mock 绕过
         from unittest.mock import MagicMock
+
+        import openai
+
+        from ftre_agent_core.llm import LLMError
         resp = MagicMock()
         resp.request = MagicMock()
         err = LLMError.classify(openai.RateLimitError("too many", response=resp, body=None))
@@ -85,23 +88,28 @@ class TestLLMErrorClassify:
 
     def test_timeout(self):
         import openai
+
         from ftre_agent_core.llm import LLMError
         err = LLMError.classify(openai.APITimeoutError(request=None))
         assert err.code == "timeout"
 
     def test_bad_request(self):
-        import openai
-        from ftre_agent_core.llm import LLMError
         from unittest.mock import MagicMock
+
+        import openai
+
+        from ftre_agent_core.llm import LLMError
         resp = MagicMock()
         resp.request = MagicMock()
         err = LLMError.classify(openai.BadRequestError("bad", response=resp, body=None))
         assert err.code == "bad_request"
 
     def test_auth_error(self):
-        import openai
-        from ftre_agent_core.llm import LLMError
         from unittest.mock import MagicMock
+
+        import openai
+
+        from ftre_agent_core.llm import LLMError
         resp = MagicMock()
         resp.request = MagicMock()
         err = LLMError.classify(openai.AuthenticationError("no key", response=resp, body=None))
@@ -113,9 +121,11 @@ class TestLLMErrorClassify:
         assert LLMError.UNRETRYABLE_CODES == {"auth_error", "bad_request", "content_filter"}
 
     def test_api_error(self):
-        import openai
-        from ftre_agent_core.llm import LLMError
         from unittest.mock import MagicMock
+
+        import openai
+
+        from ftre_agent_core.llm import LLMError
         resp = MagicMock()
         resp.request = MagicMock()
         # 通用 APIError 应归入 api_error
@@ -165,7 +175,7 @@ class TestFtreBackendImports:
         assert ReActAgent is not None
 
     def test_tool_exports(self):
-        from ftre_agent_core.tool import Tool, ToolParameter, Injected, tool
+        from ftre_agent_core.tool import Injected, Tool, ToolParameter, tool
         for item in [Tool, ToolParameter, Injected, tool]:
             assert item is not None
 

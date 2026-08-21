@@ -14,12 +14,14 @@ import base64
 import json
 import logging
 import uuid
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from ..types import ReplyFinishedReason
 from ._block import (
     Base64Source,
     ContentBlock,
@@ -32,7 +34,6 @@ from ._block import (
     ToolResultBlock,
     ToolResultState,
 )
-from ..types import ReplyFinishedReason
 
 # AgentStreamEvent 仅类型注解用（TYPE_CHECKING），运行时注解字符串化不求值，
 # 避免顶层 import event 导致循环（event 依赖 message 的 Block）
@@ -47,7 +48,7 @@ def _gen_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _to_blocks(content: str | list) -> list:
@@ -130,7 +131,7 @@ class Msg(BaseModel):
     _tool_call_input_buf: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_role_content(self) -> "Msg":
+    def _validate_role_content(self) -> Msg:
         """角色约束（对齐 AgentScope）。"""
         for block in self.content:
             if self.role == "user" and block.type not in ("text", "data"):
@@ -175,7 +176,7 @@ class Msg(BaseModel):
 
     # ── 核心：append_event 重建引擎 ──
 
-    def append_event(self, event: AgentStreamEvent) -> "Msg":
+    def append_event(self, event: AgentStreamEvent) -> Msg:
         """把一个流式事件增量应用到 Msg（对齐 AgentScope append_event）。
 
         映射规则见 Obsidian「Msg与append_event设计.md」。

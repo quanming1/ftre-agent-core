@@ -1,8 +1,9 @@
 """CancellationToken - 线程安全的取消信号"""
+
 from __future__ import annotations
 
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 
 class ToolCancelledError(Exception):
@@ -29,7 +30,7 @@ class CancellationToken:
         for callback in callbacks:
             try:
                 callback(reason)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - cancellation callbacks are isolated
                 continue
 
     def is_cancelled(self) -> bool:

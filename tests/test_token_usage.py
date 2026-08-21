@@ -13,10 +13,19 @@ Covers the 9 required scenarios from the redesign doc:
 9. No production code references input_tokens/output_tokens
 """
 import json
+
 import pytest
-from ftre_agent_core.message import Msg, TokenUsage, MsgToken, MsgName, AssistantMsg, UserMsg
+
+from ftre_agent_core.agent.runner._state import RunState
 from ftre_agent_core.event import ModelCallEndEvent
-from ftre_agent_core.agent.runner._state import RunState, RunStatus
+from ftre_agent_core.message import (
+    AssistantMsg,
+    Msg,
+    MsgName,
+    MsgToken,
+    TokenUsage,
+    UserMsg,
+)
 
 
 class TestSingleModelCallEnd:
@@ -84,6 +93,7 @@ class TestRoleValidation:
 
     def test_system_msg_with_token_raises(self):
         from pydantic import ValidationError
+
         from ftre_agent_core.message import TextBlock
         token = MsgToken(
             usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),

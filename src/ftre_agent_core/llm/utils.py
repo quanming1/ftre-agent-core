@@ -3,7 +3,7 @@ LLM 模块工具函数
 """
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +15,7 @@ _logger = logging.getLogger("ftre_agent_core.llm_raw")
 
 def _ensure_log_dir() -> Path:
     """确保日志目录存在，返回当天目录"""
-    now = datetime.now()
+    now = datetime.now(UTC)
     day_dir = _LOG_DIR / now.strftime("%Y%m%d")
     day_dir.mkdir(parents=True, exist_ok=True)
     return day_dir
@@ -37,7 +37,7 @@ class LLMLogger:
         self.model = model
         self._lines: list[str] = []
         self._id = uuid4().hex[:8]
-        self._start_time = datetime.now()
+        self._start_time = datetime.now(UTC)
 
     def log_input(self, messages: list[dict], tools: list[dict] | None) -> None:
         """记录请求输入"""
@@ -62,7 +62,7 @@ class LLMLogger:
                 self._lines.append(json.dumps(data, ensure_ascii=False, default=str))
             else:
                 self._lines.append(str(data))
-        except Exception:
+        except Exception:  # noqa: BLE001 - logging must not affect streaming
             self._lines.append(f"[LOG_ERROR] {type(chunk)}")
 
     def flush(self) -> None:
@@ -77,5 +77,5 @@ class LLMLogger:
             filename = f"{self._start_time.strftime('%H%M%S_%f')}_{self._id}.log"
             filepath = day_dir / filename
             filepath.write_text(content, encoding="utf-8")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logging must not affect streaming
             _logger.debug(f"写入 LLM 日志失败: {e}")

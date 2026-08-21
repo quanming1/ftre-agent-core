@@ -1,7 +1,10 @@
 """
 测试 Tool 基类
 """
+from typing import ClassVar
+
 import pytest
+
 from ftre_agent_core.tool import Tool, ToolParameter
 
 
@@ -32,7 +35,7 @@ class TestToolBase:
         class CalculatorTool(Tool):
             name = "calculator"
             description = "简单计算器"
-            parameters = [
+            parameters: ClassVar[list[ToolParameter]] = [
                 ToolParameter(name="expression", type="string", description="数学表达式")
             ]
             
@@ -40,7 +43,7 @@ class TestToolBase:
                 try:
                     result = eval(expression)
                     return str(result)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - test tool reports its error
                     return f"Error: {e}"
         
         calc = CalculatorTool()

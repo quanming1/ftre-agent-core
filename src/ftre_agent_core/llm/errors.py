@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import openai
 
@@ -20,7 +20,7 @@ class LLMError(Exception):
     code: str
 
     # 异常类型 → 错误码映射
-    _TYPE_MAP = {
+    _TYPE_MAP: ClassVar[dict] = {
         openai.RateLimitError: "rate_limit",
         openai.APITimeoutError: "timeout",
         openai.APIConnectionError: "network",
@@ -32,7 +32,7 @@ class LLMError(Exception):
     }
 
     # exc.code 优先级覆盖（OpenAI SDK 的 APIError 可能带更精确 code）
-    _CODE_OVERRIDES = {
+    _CODE_OVERRIDES: ClassVar[dict[str, str]] = {
         "invalid_request_error": "bad_request",
         "bad_request": "bad_request",
         "rate_limit_exceeded": "rate_limit",
@@ -43,10 +43,10 @@ class LLMError(Exception):
     }
 
     # 不可重试的错误码
-    UNRETRYABLE_CODES = {"auth_error", "bad_request", "content_filter"}
+    UNRETRYABLE_CODES: ClassVar[set[str]] = {"auth_error", "bad_request", "content_filter"}
 
     @staticmethod
-    def classify(exc: Exception) -> "LLMError":
+    def classify(exc: Exception) -> LLMError:
         # 优先用 SDK 的 exc.code（更精确）
         if isinstance(exc, openai.APIError) and hasattr(exc, "code") and exc.code:
             code = LLMError._CODE_OVERRIDES.get(exc.code)

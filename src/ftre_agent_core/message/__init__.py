@@ -4,62 +4,62 @@
 层次 B: Msg 实体 + append_event 重建引擎 + 工厂函数
 """
 from ._block import (
-    # 状态机
-    ToolCallState,
-    ToolResultState,
     # 数据源
     Base64Source,
-    URLSource,
-    # 6 种内容块
-    TextBlock,
-    ThinkingBlock,
-    DataBlock,
-    HintBlock,
-    ToolCallBlock,
-    ToolResultBlock,
     # 类型别名
     ContentBlock,
     ContentBlockTypes,
+    DataBlock,
+    HintBlock,
+    # 6 种内容块
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    # 状态机
+    ToolCallState,
+    ToolResultBlock,
+    ToolResultState,
+    URLSource,
 )
 from ._convert import (
-    from_openai_part,
-    to_openai_part,
     from_openai_message,
+    from_openai_part,
     to_openai_message,
+    to_openai_part,
 )
 from ._msg import (
-    TokenUsage,
-    MsgToken,
-    MsgName,
-    Msg,
-    UserMsg,
     AssistantMsg,
+    Msg,
+    MsgName,
+    MsgToken,
     SystemMsg,
+    TokenUsage,
+    UserMsg,
 )
 
 __all__ = [
-    "ToolCallState",
-    "ToolResultState",
+    "AssistantMsg",
     "Base64Source",
-    "URLSource",
-    "TextBlock",
-    "ThinkingBlock",
-    "DataBlock",
-    "HintBlock",
-    "ToolCallBlock",
-    "ToolResultBlock",
     "ContentBlock",
     "ContentBlockTypes",
-    "from_openai_part",
-    "to_openai_part",
-    "from_openai_message",
-    "to_openai_message",
+    "DataBlock",
+    "HintBlock",
+    "Msg",
+    "MsgName",
+    "MsgToken",
+    "SystemMsg",
+    "TextBlock",
+    "ThinkingBlock",
     # 层次 B
     "TokenUsage",
-    "MsgToken",
-    "MsgName",
-    "Msg",
+    "ToolCallBlock",
+    "ToolCallState",
+    "ToolResultBlock",
+    "ToolResultState",
+    "URLSource",
     "UserMsg",
-    "AssistantMsg",
-    "SystemMsg",
+    "from_openai_message",
+    "from_openai_part",
+    "to_openai_message",
+    "to_openai_part",
 ]

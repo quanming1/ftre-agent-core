@@ -1,13 +1,10 @@
 # tests/test_state.py
 """RunState / RunStatus / CancelledError 单元测试。"""
-import asyncio
-import pytest
 from ftre_agent_core.agent import ReActAgent
-from ftre_agent_core.agent.runner._state import RunState, RunStatus, CancelledError
+from ftre_agent_core.agent.runner._state import CancelledError, RunState, RunStatus
 from ftre_agent_core.message import UserMsg
 from ftre_agent_core.permission import PermissionBehavior, PermissionContext
 from ftre_agent_core.state import AgentState
-from ftre_agent_core.types import ReplyFinishedReason
 
 
 def test_run_status_values():

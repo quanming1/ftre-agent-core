@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 """权限系统接线的集成测试：Acting 分流、挂起、恢复、拒绝、挂起期间拒绝新消息。"""
 import pytest
+from fake_llm import ToolCall, seq
 
 from ftre_agent_core.agent.react import ReActAgent
 from ftre_agent_core.agent.runner._execute_acting import ActingExecutor
@@ -10,11 +10,10 @@ from ftre_agent_core.event import (
     RequireUserConfirmEvent,
     UserConfirmResultEvent,
 )
-from fake_llm import seq, ToolCall
 from ftre_agent_core.message import ToolCallBlock, ToolCallState, ToolResultState
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.permission import PermissionBehavior, PermissionRule
-from ftre_agent_core.tool import tool, ToolRegistry
+from ftre_agent_core.tool import ToolRegistry, tool
 
 
 # ── 构造带 echo 工具的 agent，permission_context 由参数注入 ──
@@ -352,7 +351,8 @@ async def test_resume_execute_rebuilds_from_context_only():
 @pytest.mark.asyncio
 async def test_resume_across_fresh_instance_via_persisted_context():
     """跨新实例恢复：agent A 挂起 → 持久化 context 往返 → 全新 agent B 恢复。"""
-    from fake_llm import seq, TextDelta, StepFinish
+    from fake_llm import StepFinish, TextDelta
+
     from ftre_agent_core.llm import ToolCall as LLMToolCall
     from ftre_agent_core.permission import PermissionContext
     from ftre_agent_core.state import AgentState

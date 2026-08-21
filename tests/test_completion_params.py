@@ -75,7 +75,7 @@ async def test_responses_adapter_uses_auto_tool_choice(monkeypatch):
         SimpleNamespace(create=create),
     )
 
-    chunks = [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
+    [c async for c in handler.stream([{"role": "user", "content": "hi"}])]
 
     assert captured["tool_choice"] == "auto"
 
