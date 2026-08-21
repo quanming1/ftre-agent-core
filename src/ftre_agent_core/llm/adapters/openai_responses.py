@@ -239,7 +239,7 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 ))
             emitted_finish = True
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - normalize provider failures
             err = LLMError.classify(exc)
             logger.warning("[adapter] responses stream failed: %s (%s)", err.message[:200], err.code)
             if not emitted_finish:
@@ -258,8 +258,8 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 if inspect.isawaitable(close_result):
                     try:
                         await close_result
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:
+                        logger.debug("failed to close responses response", exc_info=True)
             llm_log.flush()
         if not emitted_finish:
             if was_cancelled:
@@ -275,17 +275,21 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
 
 
 def _convert_user_content_to_responses(content: Any) -> Any:
-    """user content → Responses API 兼容形态。
+    """user content → Responses API 兼容形态（对齐 DSH pi-ai context.ts）。
+
+    DSH 语义：纯文本一律扁平化为字符串（`content.every(text) ? join('')`），
+    只有含图片才用数组。chat 词汇的 [{"type": "text"}] 数组会被严格实现
+    （Muse / OpenAI 规范）400 拒绝。
 
     ftre 的消息转换器（chat-completions 风格）可能产出：
     - 字符串（纯文本，Responses 原生支持，直接透传）
-    - [{"type": "text", "text": ...}] 数组——OpenAI 官方宽容接受，
-      但 Muse 等严格实现会 400（"did not match any supported type"），
-      必须映射为 [{"type": "input_text", "text": ...}]
-    - [{"type": "image_url", "image_url": {"url": ...}}] → input_image
+    - [{"type": "text", "text": ...}] → 纯文本，扁平化为字符串
+    - [{"type": "image_url", ...}] 混合 → input_text / input_image 数组
     """
     if not isinstance(content, list):
         return content
+    if all(isinstance(p, dict) and p.get("type") in ("text", "input_text") for p in content):
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict))
     converted: list[dict] = []
     for part in content:
         if not isinstance(part, dict):
@@ -301,6 +305,30 @@ def _convert_user_content_to_responses(content: Any) -> Any:
             # 未知 part（如插件扩展块）：按文本占位，保持 index 对齐
             converted.append({"type": "input_text", "text": ""})
     return converted
+
+
+def _convert_assistant_content_to_responses(content: Any) -> Any:
+    """assistant content → Responses API 兼容形态（对齐 DSH flattenText）。
+
+    Responses API 的 assistant content 只接受字符串或 output_text 数组；
+    chat 词汇的 [{"type": "text"}] 数组会被 400 拒绝（实测 Muse 与
+    gpt-5.6-terra 均如此——ReAct 第二轮带 assistant 历史即触发）。
+    ftre 的 to_openai_message 产出恰好是这种数组，必须扁平化。
+    """
+    if not isinstance(content, list):
+        return content
+    texts = [
+        p.get("text", "")
+        for p in content
+        if isinstance(p, dict) and p.get("type") in ("text", "output_text")
+    ]
+    if len(texts) == len(content):
+        return "".join(texts)
+    # 含不可映射 part：逐 part 降级为 output_text（保持顺序与数量）
+    return [
+        {"type": "output_text", "text": p.get("text", "") if isinstance(p, dict) else ""}
+        for p in content
+    ]
 
 
 def _convert_messages_to_responses_input(
@@ -343,6 +371,7 @@ def _convert_messages_to_responses_input(
 
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
+            content = _convert_assistant_content_to_responses(content)
             if tool_calls:
                 if content:
                     input_items.append({"role": "assistant", "content": content})

@@ -1,13 +1,13 @@
 # tests/test_execute_acting.py
 """ActingExecutor 单元测试。"""
 import pytest
-from ftre_agent_core.agent.runner._execute_acting import ActingExecutor, ExitExecutor
-from ftre_agent_core.agent.runner._state import Acting
-from ftre_agent_core.agent.runner._state import RunState
+
 from ftre_agent_core.agent.react import ReActAgent
-from ftre_agent_core.llm import ToolCall
-from ftre_agent_core.tool import tool, ToolRegistry
+from ftre_agent_core.agent.runner._execute_acting import ActingExecutor
+from ftre_agent_core.agent.runner._state import Acting, RunState
 from ftre_agent_core.event import EventType
+from ftre_agent_core.llm import ToolCall
+from ftre_agent_core.tool import ToolRegistry, tool
 
 
 def make_agent():

@@ -63,8 +63,7 @@ def httpx_stream(prompt: str, max_tokens: int) -> dict:
             write=60.0,
             pool=60.0,
         )
-        with httpx.Client(timeout=timeout, http2=False) as client:
-            with client.stream("POST", url, headers=headers, json=payload) as resp:
+        with httpx.Client(timeout=timeout, http2=False) as client, client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     result["error"] = f"HTTP {resp.status_code}"
                     return result
@@ -96,7 +95,7 @@ def httpx_stream(prompt: str, max_tokens: int) -> dict:
                                 result["ttft"] = now - start
                             result["text"] += content
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script reports failure
         result["error"] = f"{type(e).__name__}: {e}"
 
     result["total_time"] = time.perf_counter() - start
@@ -141,7 +140,7 @@ def litellm_stream(prompt: str, max_tokens: int) -> dict:
                     result["ttft"] = now - start
                 result["text"] += delta.content
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - diagnostic script reports failure
         result["error"] = f"{type(e).__name__}: {e}"
 
     result["total_time"] = time.perf_counter() - start
@@ -189,7 +188,7 @@ def run_comparison():
         diff_ttft = l_ttft - h_ttft
         diff_total = l_total - h_total
 
-        print(f"\n  📊 差异:")
+        print("\n  📊 差异:")
         print(f"     TTFT:   {diff_ttft:>+8.0f}ms")
         print(f"     总耗时: {diff_total:>+8.0f}ms")
 
@@ -207,7 +206,7 @@ def run_comparison():
     # 汇总
     if summary:
         print(f"\n\n{'═' * 60}")
-        print(f"  📊 汇总")
+        print("  📊 汇总")
         print(f"{'═' * 60}")
         print(f"  {'测试':<10} {'httpx':<18} {'litellm':<18} {'TTFT差异':<12}")
         print(f"  {'-' * 60}")
@@ -223,11 +222,11 @@ def run_comparison():
         print(f"  {'平均总耗时':<10} {'':<18} {'':<18} {avg_total:>+8.0f}ms")
 
         if avg_ttft < 50:
-            print(f"\n  ✅ 差异 < 50ms，可忽略")
+            print("\n  ✅ 差异 < 50ms，可忽略")
         elif avg_ttft < 500:
-            print(f"\n  ⚠️ 差异 50~500ms，轻微开销")
+            print("\n  ⚠️ 差异 50~500ms，轻微开销")
         else:
-            print(f"\n  ❌ 差异 > 500ms，litellm 开销明显")
+            print("\n  ❌ 差异 > 500ms，litellm 开销明显")
 
     print(f"\n{'═' * 60}\n")
 

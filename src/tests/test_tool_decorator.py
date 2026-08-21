@@ -1,8 +1,7 @@
 """
 测试 @tool 装饰器
 """
-import pytest
-from ftre_agent_core.tool import tool, Tool, ToolParameter
+from ftre_agent_core.tool import Tool, tool
 
 
 class TestToolDecorator:

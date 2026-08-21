@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """类型化权限上下文（AgentState.permission_context 的持久化数据模型）。
 
 规则与默认行为的唯一事实源是 ``AgentState.permission_context``，本模型

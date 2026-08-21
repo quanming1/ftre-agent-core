@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Unit tests for the pure PermissionEngine decision model."""
 import pytest
 from pydantic import ValidationError

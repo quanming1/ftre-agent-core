@@ -27,17 +27,26 @@ import json
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
 from ...event import (
     AgentStreamEvent,
-    ModelCallStartEvent, ModelCallEndEvent,
-    TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent,
-    ThinkingBlockStartEvent, ThinkingBlockDeltaEvent, ThinkingBlockEndEvent,
-    ToolCallStartEvent, ToolCallDeltaEvent, ToolCallEndEvent,
     HintBlockEvent,
+    ModelCallEndEvent,
+    ModelCallStartEvent,
     RetryEvent,
+    TextBlockDeltaEvent,
+    TextBlockEndEvent,
+    TextBlockStartEvent,
+    ThinkingBlockDeltaEvent,
+    ThinkingBlockEndEvent,
+    ThinkingBlockStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
 )
+from ...hooks import LLM_STREAM_SPEC, HookDispatcher, LLMStreamPayload
 from ...llm import (
     BlockAssembler,
     BlockEnd,
@@ -45,7 +54,6 @@ from ...llm import (
     LLMAdapter,
     LLMError,
     ReasoningDeltaChunk,
-    StreamChunk,
     TextDeltaChunk,
     ToolCall,
     ToolCallDeltaChunk,
@@ -53,11 +61,11 @@ from ...llm import (
 )
 from ...message import HintBlock, TextBlock, ThinkingBlock, ToolCallBlock
 from ...message_context import MessageContext
-from ...tracing import RunType, RunStatus as TraceRunStatus
+from ...tracing import RunStatus as TraceRunStatus
+from ...tracing import RunType
 from ._state import Reasoning, TurnResult
 
 if TYPE_CHECKING:
-    from ...hooks import FtreCoreHookManager
     from ._state import RunState
 
 logger = logging.getLogger(__name__)
@@ -78,9 +86,10 @@ class ReasoningExecutor:
     def __init__(
         self,
         agent,
-        state: "RunState",
+        state: RunState,
         llm: LLMAdapter,
-        hook_manager: "FtreCoreHookManager",
+        hooks: HookDispatcher | None = None,
+        hook_context: object | None = None,
     ):
         """初始化执行器。
 
@@ -91,7 +100,8 @@ class ReasoningExecutor:
                 trace_span（可选的追踪 span）、token_usage（跨轮累计的 token 用量）等。
             llm: LLM 适配器实例（B2：LLMAdapter 契约），提供 ``stream(messages, tools)``
                 异步迭代接口，产出 StreamChunk（七种 chunk，BlockAssembler 组装）。
-            hook_manager: 钩子管理器（当前实现中保留以供扩展使用）。
+            hooks: 宿主注入的 Hook Dispatcher。
+            hook_context: 宿主 scope carrier，Core 不解释其具体类型。
 
         属性：
             self.result: 本轮推理的最终结果（TurnResult | None）。在 ``stream()``
@@ -101,8 +111,35 @@ class ReasoningExecutor:
         self.agent = agent
         self.state = state
         self.llm = llm
-        self.hook_manager = hook_manager
+        self.hooks = hooks
+        self.hook_context = hook_context
         self.result: TurnResult | None = None
+
+    async def _stream(self, messages, tools):
+        cancellation = self.state.runtime_context.get("cancellation")
+        if not isinstance(cancellation, asyncio.Event):
+            cancellation = asyncio.Event()
+        if self.hooks is None:
+            async for chunk in self.llm.stream(messages, tools):
+                yield chunk
+            return
+        payload = LLMStreamPayload(
+            agent_id=str(self.state.runtime_context.get("agent_id", "")),
+            session_id=str(self.state.runtime_context.get("session_id", "")),
+            turn_id=self.state.turn_id,
+            model=getattr(self.llm, "model", ""),
+            messages=tuple(messages),
+            tools=tuple(tools or ()),
+            cancellation=cancellation,
+            invoke=lambda: self.llm.stream(messages, tools),
+        )
+        stream = await self.hooks.dispatch(
+            LLM_STREAM_SPEC,
+            payload,
+            context=self.hook_context,
+        )
+        async for chunk in stream:
+            yield chunk
 
     async def stream(self, action: Reasoning) -> AsyncGenerator[AgentStreamEvent, None]:
         """执行一次 LLM 调用，流式 yield 事件，结束后设置 ``self.result``。
@@ -228,7 +265,7 @@ class ReasoningExecutor:
                 assembler = BlockAssembler()
 
                 # ── 阶段 4：流式消费 StreamChunk ───────────────────────────────
-                async for chunk in self.llm.stream(messages, tools):
+                async for chunk in self._stream(messages, tools):
                     # 首个 chunk 到达时记录 TTFT（仅本轮一次）
                     if not first_token_logged:
                         first_token_logged = True
@@ -354,9 +391,25 @@ class ReasoningExecutor:
                             )
 
                 # ── 阶段 5：成功完成 ───────────────────────────────────────────
+                # 流末契约校验：所有 block-start 均已配对 block-end、finish 已收到。
+                # 适配器已把 provider 异常收敛为 error/aborted finish 并在循环内
+                # raise，走到这里的只有正常 kinds。
+                assembler.validate()
+
                 # 拼接本轮完整文本与推理
                 full_text = "".join(text_parts)
                 full_reasoning = "".join(reasoning_parts)
+
+                # max-tokens 截断：tool-call 的 arguments 是不完整 JSON，无法安全
+                # 执行，整体丢弃（对齐 DSH assembled() 的 max-tokens 过滤）；
+                # text / reasoning 保留。
+                if finish_reason == "max-tokens" and tool_calls:
+                    logger.warning(
+                        "[react] max-tokens 截断，丢弃 %d 个不完整工具调用: %s",
+                        len(tool_calls),
+                        [tc.name for tc in tool_calls],
+                    )
+                    tool_calls = []
                 # 关闭 LLM span，输出关键字段供追踪系统记录
                 if llm_span and not llm_span.ended:
                     llm_span.end(outputs={
@@ -432,7 +485,7 @@ class ReasoningExecutor:
 
             # ── 阶段 6b：其他异常路径 ─────────────────────────────────────────
             # 统一收尾后，按错误是否可重试分流：可重试且未耗尽 → 重试；否则返回 error。
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - normalize provider failures
                 # 以 error 关闭 span
                 if llm_span and not llm_span.ended:
                     llm_span.end(error=exc)

@@ -2,6 +2,7 @@
 import json
 
 import pytest
+
 from ftre_agent_core.message import (
     AssistantMsg,
     Msg,
@@ -102,5 +103,5 @@ class TestBackwardCompatStringInput:
         assert msg.name == MsgName.COMPACT
 
     def test_arbitrary_string_rejected(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             Msg(name="agent_id", content=[TextBlock(text="x")], role="user")

@@ -35,7 +35,7 @@ _BLOCK_TYPES = {"text", "reasoning", "tool-call"}
 class _OpenBlock:
     """一个已 start、未 end 的 block 的累积态。"""
 
-    __slots__ = ("index", "block_type", "text", "call_id", "name", "arguments")
+    __slots__ = ("arguments", "block_type", "call_id", "index", "name", "text")
 
     def __init__(self, index: int, block_type: str):
         self.index = index
@@ -82,8 +82,15 @@ class BlockAssembler:
 
     def blocks(self) -> list[dict]:
         """finish 后的完整 block 序列（按 index 升序——与开块顺序一致，
-        不受 block-end 到达顺序影响）。"""
-        return [self._blocks[idx] for idx in sorted(self._blocks)]
+        不受 block-end 到达顺序影响）。
+
+        max-tokens 截断时丢弃 tool-call 块：截断的 arguments 是不完整
+        JSON，无法安全执行（对齐 DSH assembled() 的 max-tokens 过滤）。
+        """
+        result = [self._blocks[idx] for idx in sorted(self._blocks)]
+        if self._finish is not None and self._finish.reason.kind == "max-tokens":
+            result = [b for b in result if b.get("type") != "tool-call"]
+        return result
 
     def usage(self) -> dict | None:
         """usage chunk 携带的用量（未收到时为 None）。"""

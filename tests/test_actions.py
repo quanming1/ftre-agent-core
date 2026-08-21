@@ -1,8 +1,11 @@
 # tests/test_actions.py
 """动作模型与数据载体单元测试。"""
-import pytest
 from ftre_agent_core.agent.runner._state import (
-    Reasoning, Acting, Exit, TurnResult, ExitOutcome,
+    Acting,
+    Exit,
+    ExitOutcome,
+    Reasoning,
+    TurnResult,
 )
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.types import ReplyFinishedReason

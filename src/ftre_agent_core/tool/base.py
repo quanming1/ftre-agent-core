@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, get_type_hints
+from typing import Any, ClassVar, get_type_hints
 
 
 # 依赖注入标记
@@ -44,14 +45,14 @@ class Tool:
 
     name: str = ""
     description: str = ""
-    parameters: list[ToolParameter] = []
+    parameters: ClassVar[list[ToolParameter]] = []
 
     def __init__(
         self,
-        name: str = None,
-        description: str = None,
-        parameters: list[ToolParameter] = None,
-        func: Callable[..., Any] = None,
+        name: str | None = None,
+        description: str | None = None,
+        parameters: list[ToolParameter] | None = None,
+        func: Callable[..., Any] | None = None,
     ):
         if name is not None:
             self.name = name
@@ -119,7 +120,7 @@ class Tool:
 
 
 # @tool() 装饰器
-def tool(name: str = None, description: str = None, parameters: list[ToolParameter] = None):
+def tool(name: str | None = None, description: str | None = None, parameters: list[ToolParameter] | None = None):
     """把普通函数转换成 Tool 对象。"""
     def decorator(func: Callable) -> Tool:
         tool_name = name or func.__name__
@@ -135,7 +136,7 @@ def _infer_parameters(func: Callable) -> list[ToolParameter]:
     sig = inspect.signature(func)
     try:
         hints = get_type_hints(func)
-    except Exception:
+    except Exception:  # noqa: BLE001 - annotation inference is best effort
         hints = {}
 
     for param_name, param in sig.parameters.items():

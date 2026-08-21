@@ -1,6 +1,6 @@
 """ReAct Agent - 异步推理与行动循环。"""
 import logging
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from ftre_agent_core.message_context import MessageContext
 from ftre_agent_core.permission import PermissionEngine
@@ -9,7 +9,7 @@ from ftre_agent_core.tool import ToolRegistry
 from ftre_agent_core.tracing import Tracer
 
 from ..event import AgentStreamEvent
-from ..hooks import FtreCoreHookManager
+from ..hooks import HookDispatcher
 from .runner import ReActRunner
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,8 @@ class ReActAgent:
         max_retries: int = 5,
         retry_delay: float = 3.0,
         tracer: Tracer | None = None,
-        hook_manager: FtreCoreHookManager | None = None,
+        hooks: HookDispatcher | None = None,
+        hook_context: object | None = None,
     ):
         self.model = model
         self.api_key = api_key
@@ -44,7 +45,8 @@ class ReActAgent:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.tracer = tracer or Tracer()
-        self.hook_manager = hook_manager or FtreCoreHookManager()
+        self.hooks = hooks
+        self.hook_context = hook_context
         self._state = state if state is not None else AgentState()
         # 权限引擎始终由 Agent 内部创建：规则的唯一事实源是
         # AgentState.permission_context，调用方无需也不应注入引擎实例。

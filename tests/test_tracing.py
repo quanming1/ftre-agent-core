@@ -1,10 +1,10 @@
 import json
 
 import pytest
+from fake_llm import StepFinish, TextDelta, ToolCall, seq
 
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.event import ReplyFinishedReason
-from fake_llm import seq, StepFinish, TextDelta, ToolCall
 from ftre_agent_core.tool import tool
 from ftre_agent_core.tracing import (
     InMemoryTraceExporter,
@@ -48,7 +48,7 @@ async def test_agent_trace_records_llm_and_tool_run_tree():
                 yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
 
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
     root = next(run for run in exporter.runs.values() if run.run_type == RunType.AGENT)
@@ -85,7 +85,7 @@ async def test_process_text_with_stop_is_observable_as_legal_completion():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
 
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
     llm_run = next(run for run in exporter.runs.values() if run.run_type == RunType.LLM)
@@ -131,5 +131,5 @@ async def test_exporter_failure_does_not_break_agent_run():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED

@@ -1,7 +1,7 @@
 """ReActRunner — ReAct Agent 的核心执行引擎（状态机重构版）。
 
 整体设计借鉴 AgentScope 的 _next_action() 纯决策函数模式，同时保留
-原有的 LLM 重试、空响应恢复、ON_STOP Hook、Tracing、工具并发执行、
+原有的 LLM 重试、空响应恢复、turn-stopping Hook、Tracing、工具并发执行、
 成组写入 Memory 等生产能力。
 
 架构分三层：
@@ -9,7 +9,7 @@
   decide()               纯决策函数，只读状态，返回动作类型
   ReasoningExecutor      执行 Reasoning 动作：调 LLM + 流式 + 重试
   ActingExecutor         执行 Acting 动作：工具并发 + 成组写入 Memory
-  ExitExecutor           执行 Exit 动作：ON_STOP Hook + 产出 ReplyEnd
+  ExitExecutor           执行 Exit 动作：turn-stopping Hook + 产出 ReplyEnd
 
 主循环 _loop() 只做 match 分发：
 
@@ -34,20 +34,33 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
 from ...event import (
-    AgentStreamEvent, ReplyStartEvent, ReplyEndEvent,
-    RequireUserConfirmEvent, UserConfirmResultEvent,
+    AgentStreamEvent,
+    ReplyEndEvent,
+    ReplyStartEvent,
+    RequireUserConfirmEvent,
+    UserConfirmResultEvent,
 )
-from ...tracing import RunStatus as TraceRunStatus, RunType
-from ...types import ReplyFinishedReason
-from ...llm import LLMAdapter, ToolCall, create_llm_handler
+from ...llm import LLMAdapter, create_llm_handler
 from ...message import ToolCallBlock, ToolCallState
 from ...message_context import MessageContext
-from ._state import Reasoning, Acting, Exit, TurnResult, RunState, RunStatus, CancelledError
+from ...tracing import RunStatus as TraceRunStatus
+from ...tracing import RunType
+from ...types import ReplyFinishedReason
 from ._execute_acting import ActingExecutor, ExitExecutor
 from ._execute_reasoning import ReasoningExecutor
+from ._state import (
+    Acting,
+    CancelledError,
+    Exit,
+    Reasoning,
+    RunState,
+    RunStatus,
+    TurnResult,
+)
 from .tool_handler import ToolHandler
 
 if TYPE_CHECKING:
@@ -124,8 +137,6 @@ def decide(state: RunState, prev: TurnResult | None) -> Reasoning | Acting | Exi
 
     # 4-6. 空响应处理（prev 非空但文本为空）
     if prev is not None and not prev.text.strip():
-        has_reasoning = bool(prev.reasoning and prev.reasoning.strip())
-        has_tools = bool(prev.tool_calls)
         logger.warning(
             "[react] 空响应: text=%r reasoning=%d chars tools=%d finish_reason=%s "
             "empty_retries=%d/%d in_finalization=%s iteration=%d",
@@ -191,8 +202,8 @@ class ReActRunner:
       - 统一终态写入（_finalize）
     """
 
-    def __init__(self, agent: "ReActAgent"):
-        # 关联的 ReActAgent 实例（提供 model / memory / hook_manager / tracer 等依赖）
+    def __init__(self, agent: ReActAgent):
+        # 关联的 ReActAgent 实例（提供 model / memory / hooks / tracer 等依赖）
         self.agent = agent
         # 本次 run() 的可变运行状态（iteration / empty_retries / trace_span 等）
         self.state = RunState()
@@ -208,7 +219,11 @@ class ReActRunner:
             reasoning_effort=agent.reasoning_effort,
         )
         # 工具并发调度、取消传播和结果归并
-        self._tool_handler = ToolHandler(agent.tool_registry, agent.hook_manager)
+        self._tool_handler = ToolHandler(
+            agent.tool_registry,
+            agent.hooks,
+            agent.hook_context,
+        )
         # 权限决策引擎（由 Agent 内部创建，始终可用；规则来自 AgentState.permission_context）
         self._permission_engine = agent.permission_engine
 
@@ -412,7 +427,6 @@ class ReActRunner:
         待恢复清单完全由 context 推导，本方法只负责更新目标 tool_call 的状态。
         """
         context = self.agent.state.context
-        asking = MessageContext.tool_calls_in_state(context, ToolCallState.ASKING)
         target = next(
             (
                 block
@@ -489,7 +503,7 @@ class ReActRunner:
           2. 根据动作类型分发到对应执行器
           3. Reasoning → 递增 iteration，调 LLM，更新 prev
           4. Acting    → 执行工具，清除 prev（下一轮重新推理）
-          5. Exit      → 产出结束事件，触发 on_turn_end，return
+          5. Exit      → 通过 turn-stopping 决策后产出结束事件，return
 
         iteration 计数规则：
           只在 Reasoning 时递增。一次"迭代"= 一次 LLM 调用，
@@ -497,22 +511,20 @@ class ReActRunner:
           这样 max_iterations=N 表示最多调用 N 次 LLM。
 
         Exit + should_continue 的特殊路径：
-          on_stop hook 返回 block 时，ExitExecutor 产出 HintBlockEvent
+          turn-stopping 返回 ContinueTurn 时，ExitExecutor 产出 HintBlockEvent
           但不产 ReplyEndEvent，返回 ExitOutcome(should_continue=True)。
           主循环注入续写提示到 Memory，清除 prev，继续循环。
         """
         prev: TurnResult | None = None
-        max_iters = self.agent.max_iterations
-
         # 创建三个执行器实例（循环内复用）
         reasoning_executor = ReasoningExecutor(
-            self.agent, self.state, self._llm, self.agent.hook_manager,
+            self.agent, self.state, self._llm, self.agent.hooks, self.agent.hook_context,
         )
         acting_executor = ActingExecutor(
             self.agent, self.state, self._tool_handler, self._permission_engine,
         )
         exit_executor = ExitExecutor(
-            self.agent, self.state, self.agent.hook_manager,
+            self.agent, self.state, self.agent.hooks, self.agent.hook_context,
         )
 
         try:
@@ -523,8 +535,6 @@ class ReActRunner:
                 if isinstance(action, Reasoning):
                     # ── Reasoning：调 LLM ──
                     self.state.iteration += 1
-                    # on_turn_start hook（可注入消息到 Memory）
-                    await self._trigger_on_turn_start()
                     # 执行 LLM 调用 + 流式消费 + 重试
                     async for event in reasoning_executor.stream(action):
                         yield event
@@ -555,13 +565,11 @@ class ReActRunner:
                     # ── Exit：结束（或暂停）当前回复 ──
                     async for event in exit_executor.stream(action):
                         yield event
-                    # ON_STOP hook 返回 block 时不退出
+                    # ContinueTurn 返回时不退出
                     if exit_executor.outcome.should_continue:
                         # 注入续写提示已在 ExitExecutor 中完成
                         prev = None
                         continue
-                    # 正常退出 → 触发 on_turn_end hook，结束循环
-                    await self._trigger_on_turn_end()
                     return
 
         except CancelledError:
@@ -584,48 +592,3 @@ class ReActRunner:
         """
         self.state.done_reason = reason
         self.state.status = _REASON_TO_STATUS.get(reason, RunStatus.ERROR)
-
-    async def _trigger_on_turn_start(self) -> None:
-        """触发 on_turn_start hook。
-
-        在每次 Reasoning（LLM 调用）之前触发。
-        hook 可以注入 system/user 消息（如每日提醒、上下文补充），
-        注入的消息会追加到 Memory，Agent 在本轮迭代中可见。
-        """
-        from ...hooks import ON_TURN_START, TurnStartInput, TurnStartOutput
-
-        ts_output = await self.agent.hook_manager.trigger(
-            ON_TURN_START,
-            lambda: TurnStartInput(
-                session_id=self.state.runtime_context.get("session_id", ""),
-                turn_id=self.state.turn_id,
-                iteration=self.state.iteration,
-                messages=MessageContext.get_messages(
-                    self.agent.state.context, self.agent.system_prompt
-                ),
-                runtime_context=self.state.runtime_context,
-            ),
-        )
-        if ts_output is not None and isinstance(ts_output, TurnStartOutput):
-            for msg in ts_output.inject_messages:
-                MessageContext.add_raw(self.agent.state.context, msg)
-
-    async def _trigger_on_turn_end(self) -> None:
-        """触发 on_turn_end hook（只读观察）。
-
-        在 Agent 正常退出（Exit + ON_STOP allow）时触发。
-        hook 不能阻止退出，decision 字段被忽略。
-        用于遥测、日志、UI 通知。
-        """
-        from ...hooks import ON_TURN_END, TurnEndInput
-
-        await self.agent.hook_manager.trigger(
-            ON_TURN_END,
-            lambda: TurnEndInput(
-                session_id=self.state.runtime_context.get("session_id", ""),
-                turn_id=self.state.turn_id,
-                iteration=self.state.iteration,
-                done_reason=str(self.state.done_reason or ReplyFinishedReason.COMPLETED),
-                runtime_context=self.state.runtime_context,
-            ),
-        )

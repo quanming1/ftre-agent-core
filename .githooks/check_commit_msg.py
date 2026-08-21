@@ -95,7 +95,7 @@ def _require_phase_ids() -> set[str]:
 def git(args: list[str]) -> str:
     """执行 git 命令并返回 stdout（去尾换行）。"""
     return subprocess.run(
-        ["git", *args], capture_output=True, text=True, encoding="utf-8"
+        ["git", *args], capture_output=True, text=True, encoding="utf-8", check=False
     ).stdout.strip()
 
 
@@ -215,11 +215,10 @@ def main() -> int:
             return 1
 
     # 5b. 非阶段标识的 type：模块 scope 白名单
-    if typ not in PHASE_SCOPED_TYPES and typ != "perf":
-        if scope not in MODULE_SCOPES:
-            print(f"[拒绝] scope '{scope}' 不在白名单中", file=sys.stderr)
-            print(f"       可用 scope: {' / '.join(sorted(MODULE_SCOPES))}", file=sys.stderr)
-            return 1
+    if typ not in PHASE_SCOPED_TYPES and typ != "perf" and scope not in MODULE_SCOPES:
+        print(f"[拒绝] scope '{scope}' 不在白名单中", file=sys.stderr)
+        print(f"       可用 scope: {' / '.join(sorted(MODULE_SCOPES))}", file=sys.stderr)
+        return 1
 
     # 6. prd / todos 专用约束：分支 + 文件
     if typ in DOC_BRANCH:

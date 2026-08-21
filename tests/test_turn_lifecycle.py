@@ -3,11 +3,11 @@ Turn Lifecycle Ownership 测试 — 验证 agent-core 不再产出 Step 事件�
 turn_id 从 runtime_context 读取，done_reason/error_code 通过 RunState 暴露。
 """
 import pytest
+from fake_llm import StepFinish, TextDelta, ToolCall, seq
 
 from ftre_agent_core.agent import ReActAgent
-from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.agent.runner import RunStatus
-from fake_llm import seq, TextDelta, StepFinish, ToolCall
+from ftre_agent_core.event import ReplyFinishedReason
 from ftre_agent_core.llm import LLMError
 from ftre_agent_core.tool import tool
 
@@ -37,7 +37,7 @@ async def test_turn_id_from_runtime_context():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("hi", runtime_context={"turn_id": "turn_test123"})]
+    [e async for e in agent.run("hi", runtime_context={"turn_id": "turn_test123"})]
 
     assert agent.run_state.turn_id == "turn_test123"
 
@@ -57,7 +57,7 @@ async def test_turn_id_auto_generated():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("hi")]
+    [e async for e in agent.run("hi")]
 
     assert agent.run_state.turn_id.startswith("turn_")
     assert len(agent.run_state.turn_id) > 5
@@ -78,7 +78,7 @@ async def test_done_reason_completed():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("start")]
+    [e async for e in agent.run("start")]
 
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
     assert agent.run_state.status == RunStatus.COMPLETED
@@ -104,7 +104,7 @@ async def test_done_reason_max_iterations():
             yield chunk
 
     agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("start")]
+    [e async for e in agent.run("start")]
 
     assert agent.run_state.done_reason == ReplyFinishedReason.EXCEED_MAX_ITERS
     assert agent.run_state.status == RunStatus.COMPLETED
@@ -122,7 +122,7 @@ async def test_done_reason_error():
         yield  # pragma: no cover — makes this an async generator
 
     agent.runner.llm.stream = fake_stream
-    events = [e async for e in agent.run("start")]
+    [e async for e in agent.run("start")]
 
     assert agent.run_state.done_reason == ReplyFinishedReason.ERROR
     assert agent.run_state.status == RunStatus.ERROR

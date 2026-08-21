@@ -6,15 +6,11 @@ ReActAgent 取消测试
 2. 取消后状态正确
 3. 取消后能正常开始新对话
 """
-import time
-import threading
-import pytest
-from ftre_agent_core.agent import ReActAgent, EventType
-from ftre_agent_core.agent.runner import RunStatus
-from ftre_agent_core.tool import tool
 
 import json
+import threading
 
+from ftre_agent_core.agent import ReActAgent
 
 API_KEY = "sk-REDACTED"
 API_BASE = "https://llm-gateway.REDACTED.example.com/v1"
@@ -34,8 +30,6 @@ class TestCancelLatency:
             tools=[],
         )
 
-        events = []
-        
         def consume():
             for event in agent.run("详细介绍一下量子计算的原理和应用"):
                 print(json.dumps(event, ensure_ascii=False, default=str))
@@ -43,6 +37,7 @@ class TestCancelLatency:
         thread = threading.Thread(target=consume)
         thread.start()
         thread.join()
+
 
 testCancelLatency = TestCancelLatency()
 

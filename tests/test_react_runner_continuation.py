@@ -1,16 +1,16 @@
 """
 ReActRunner continuation / retry 逻辑测试（状态机重构版）。
 
-length 截断续写已删除。空响应重试和 on_stop hook 由新状态机处理。
+length 截断续写已删除。空响应重试和 turn-stopping continuation 由新状态机处理。
 """
 import logging
 
 import pytest
+from fake_llm import ReasoningDelta, StepFinish, TextDelta, ToolCall, seq
 
 from ftre_agent_core.agent import EventType, ReActAgent
 from ftre_agent_core.event import ReplyFinishedReason
-from fake_llm import seq, ReasoningDelta, StepFinish, TextDelta, ToolCall
-from ftre_agent_core.tool import tool, ToolRegistry
+from ftre_agent_core.tool import ToolRegistry, tool
 
 
 def make_agent(tools=None, max_iterations=3):
@@ -65,7 +65,7 @@ async def test_reasoning_only_turn_is_treated_as_empty_response_retry():
 
     agent.runner.llm.stream = fake_stream
 
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
 
     assert calls == 2
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
@@ -115,7 +115,7 @@ async def test_empty_response_retries_then_requests_finalization_without_tools()
 
     agent.runner.llm.stream = fake_stream
 
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
 
     assert calls == 4
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
@@ -139,7 +139,7 @@ async def test_unknown_finish_with_text_completes(caplog):
     agent.runner.llm.stream = fake_stream
 
     with caplog.at_level(logging.INFO):
-        events = [event async for event in agent.run("start")]
+        [event async for event in agent.run("start")]
 
     assert calls == 1
     assert agent.run_state.done_reason == ReplyFinishedReason.COMPLETED
@@ -169,7 +169,7 @@ async def test_unknown_finish_with_empty_response_continues_without_finalization
 
     agent.runner.llm.stream = fake_stream
 
-    events = [event async for event in agent.run("start")]
+    [event async for event in agent.run("start")]
 
     assert calls == 2
 

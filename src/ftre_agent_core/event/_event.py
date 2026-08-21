@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """扁平 Pydantic AgentStreamEvent 定义。
 
 所有事件继承 EventBase，使用 ``model_dump(mode="json")`` 扁平序列化。
@@ -6,21 +5,19 @@ RetryEvent 是 ftre 的扩展事件。
 """
 from __future__ import annotations
 
-from datetime import datetime
-from enum import StrEnum
-from typing import Any, Literal, List, TypeAlias, Union
 import uuid
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..types import ReplyFinishedReason
 from ..message import (
     DataBlock,
     TextBlock,
-    ToolCallBlock,
-    ToolResultBlock,
     ToolResultState,
 )
+from ..types import ReplyFinishedReason
 
 
 def _gen_id() -> str:
@@ -28,7 +25,7 @@ def _gen_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class EventType(StrEnum):
@@ -176,7 +173,7 @@ class HintBlockEvent(EventBase):
     reply_id: str
     block_id: str
     source: str | None = None
-    hint: str | List[TextBlock | DataBlock]
+    hint: str | list[TextBlock | DataBlock]
 
 
 # ── 工具调用流式 ──
@@ -293,16 +290,4 @@ class UserMessageEvent(EventBase):
 
 
 # ── 联合类型 ──
-AgentStreamEvent: TypeAlias = Union[
-    ReplyStartEvent, ReplyEndEvent, ExceedMaxItersEvent,
-    ModelCallStartEvent, ModelCallEndEvent,
-    TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent,
-    DataBlockStartEvent, DataBlockDeltaEvent, DataBlockEndEvent,
-    ThinkingBlockStartEvent, ThinkingBlockDeltaEvent, ThinkingBlockEndEvent,
-    HintBlockEvent,
-    ToolCallStartEvent, ToolCallDeltaEvent, ToolCallEndEvent,
-    ToolResultStartEvent, ToolResultTextDeltaEvent,
-    ToolResultDataDeltaEvent, ToolResultEndEvent,
-    RequireUserConfirmEvent,
-    RetryEvent, CustomEvent, UserMessageEvent,
-]
+type AgentStreamEvent = ReplyStartEvent | ReplyEndEvent | ExceedMaxItersEvent | ModelCallStartEvent | ModelCallEndEvent | TextBlockStartEvent | TextBlockDeltaEvent | TextBlockEndEvent | DataBlockStartEvent | DataBlockDeltaEvent | DataBlockEndEvent | ThinkingBlockStartEvent | ThinkingBlockDeltaEvent | ThinkingBlockEndEvent | HintBlockEvent | ToolCallStartEvent | ToolCallDeltaEvent | ToolCallEndEvent | ToolResultStartEvent | ToolResultTextDeltaEvent | ToolResultDataDeltaEvent | ToolResultEndEvent | RequireUserConfirmEvent | RetryEvent | CustomEvent | UserMessageEvent

@@ -8,7 +8,7 @@ ActingExecutor：
   以及取消信号的传播。真正的“如何执行单个工具”由 ToolHandler 负责。
 
 ExitExecutor：
-  负责 Exit 动作的执行——在 Agent 准备结束回复时，先过一遍 ON_STOP Hook，
+  负责 Exit 动作的执行——在 Agent 准备结束回复时，先过一遍 turn-stopping Hook，
   根据返回值决定是真的退出还是注入续写提示继续下一轮；真正退出时设置终态并
   产出 ReplyEndEvent。
 """
@@ -16,11 +16,24 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
 from ...event import (
-    AgentStreamEvent, ReplyEndEvent, HintBlockEvent, RequireUserConfirmEvent,
-    ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent,
+    AgentStreamEvent,
+    HintBlockEvent,
+    ReplyEndEvent,
+    RequireUserConfirmEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
+)
+from ...hooks import (
+    AGENT_TURN_STOPPING_SPEC,
+    ContinueTurn,
+    HookDispatcher,
+    StopTurn,
+    TurnStoppingPayload,
 )
 from ...llm import ToolCall
 from ...message import (
@@ -33,11 +46,10 @@ from ...message import (
 from ...message_context import MessageContext
 from ...permission import PermissionBehavior, PermissionRequest, PermissionRule
 from ...types import ReplyFinishedReason
-from ._state import Acting, Exit, ExitOutcome, RunStatus, CancelledError
+from ._state import Acting, CancelledError, Exit, ExitOutcome, RunStatus
 from .tool_handler import ToolHandler
 
 if TYPE_CHECKING:
-    from ...hooks import FtreCoreHookManager
     from ...permission import PermissionEngine
     from ._state import RunState
 
@@ -53,17 +65,17 @@ class ActingExecutor:
       - 本类是“编排层”：拿到 Reasoning 已写入 context 的 tool_calls 后，负责
         权限分流、调度工具并把 tool(result) 追加到同一个 reply Msg，向上层
         yield 工具结果与 hint 事件，并在取消时抛出 CancelledError。
-      - ToolHandler 是“执行层”：负责单个工具的真正派发、on_pre_tool/on_post_tool
-        hook 集成、异常归一化、tracing span 管理；它不关心 memory 写入与事件产出。
+      - ToolHandler 是“执行层”：负责单个工具的真正派发、Tool Hook 管线、异常归一化、
+        tracing span 管理；它不关心 memory 写入与事件产出。
       本类不直接 await 单个工具，而是通过 ToolHandler.spawn / gather_results 间接驱动。
     """
 
     def __init__(
         self,
         agent,
-        state: "RunState",
+        state: RunState,
         tool_handler: ToolHandler,
-        permission_engine: "PermissionEngine",
+        permission_engine: PermissionEngine,
     ):
         """初始化 Acting 执行器。
 
@@ -193,7 +205,7 @@ class ActingExecutor:
                 state=ToolResultState.DENIED, metadata={},
             )
 
-    def _classify(self, tool_calls: list["ToolCall"]) -> dict[str, PermissionBehavior]:
+    def _classify(self, tool_calls: list[ToolCall]) -> dict[str, PermissionBehavior]:
         """对整批 tool_call 逐个求权限决策，返回 id -> behavior。
 
         规则与默认行为来自 AgentState.permission_context；空规则 + ALLOW 即
@@ -254,7 +266,7 @@ class ActingExecutor:
         return pending
 
     async def _execute_calls(
-        self, tool_calls: list["ToolCall"]
+        self, tool_calls: list[ToolCall]
     ) -> AsyncGenerator[AgentStreamEvent, None]:
         """并发执行一批 tool_call 并成组写入结果、产出事件（原 stream 的执行逻辑）。
 
@@ -379,66 +391,91 @@ class ActingExecutor:
 # ═══════════════════════════════════════════════════════════════
 
 class ExitExecutor:
-    """执行 Exit 动作：ON_STOP Hook 检查 + 产出 ReplyEnd + 设置终态。
+    """执行 Exit 动作：turn-stopping 检查 + 产出 ReplyEnd + 设置终态。
 
-    ON_STOP Hook 的两种路径：
+    turn-stopping Hook 的两种路径：
       - block：Hook 决定不让 Agent 停下。此时不产出 ReplyEndEvent、不设终态，
         而是把 Hook 的 reason 作为续写提示注入 memory、yield 一个 HintBlockEvent，
         并把 outcome 置为 should_continue=True，让 react_runner._loop 进入下一轮迭代。
       - allow（或无 Hook / 非 COMPLETED 退出）：正常退出路径——_finalize 设置终态，
         yield ReplyEndEvent，outcome 保持 should_continue=False，主循环收到后 return。
 
-    仅当 finished_reason == COMPLETED 时才触发 ON_STOP：ERROR / EXCEED_MAX_ITERS 属于
+    仅当 finished_reason == COMPLETED 时才触发 turn-stopping：ERROR / EXCEED_MAX_ITERS 属于
     异常 / 超限退出，没有“要不要让 Agent 继续”的语义，不需要问 Hook，直接走正常退出。
     """
 
-    def __init__(self, agent, state: "RunState", hook_manager: "FtreCoreHookManager"):
+    def __init__(
+        self,
+        agent,
+        state: RunState,
+        hooks: HookDispatcher | None = None,
+        hook_context: object | None = None,
+    ):
         """初始化 Exit 执行器。
 
         参数：
           - agent: 宿主 Agent 实例，提供 memory（注入续写提示）等。
           - state: 当前 run() 的运行状态（RunState），退出时由 _finalize 写入终态。
-          - hook_manager: Hook 管理器，用于触发 ON_STOP 挂点；无注册 Hook 时
-            trigger 返回 None，等价于 allow。
+          - hooks: 宿主注入的 Dispatcher；None 时使用 StopTurn 默认行为。
+          - hook_context: 宿主 scope carrier。
 
         实例属性：
           - outcome: 本次 Exit 的结果载体（ExitOutcome），初始 should_continue=False。
-            ON_STOP block 时被置为 should_continue=True，供 react_runner._loop 判断
+            ContinueTurn 时被置为 should_continue=True，供 react_runner._loop 判断
             是否继续下一轮迭代。
         """
         self.agent = agent
         self.state = state
-        self.hook_manager = hook_manager
+        self.hooks = hooks
+        self.hook_context = hook_context
         self.outcome: ExitOutcome = ExitOutcome()
 
-    async def stream(self, action: Exit) -> AsyncGenerator[AgentStreamEvent, None]:
-        """执行退出逻辑：先过 ON_STOP Hook，再决定续写还是真正退出。
+    async def _dispatch_stop(self) -> StopTurn | ContinueTurn:
+        cancellation = self.state.runtime_context.get("cancellation")
+        if not isinstance(cancellation, asyncio.Event):
+            cancellation = asyncio.Event()
+        payload = TurnStoppingPayload(
+            agent=self.state.runtime_context.get("agent_subject", self.agent),
+            session_id=str(self.state.runtime_context.get("session_id", "")),
+            turn_id=self.state.turn_id,
+            status="completed",
+            request_id=str(self.state.runtime_context.get("request_id", "")),
+            cancellation=cancellation,
+            last_assistant_text=str(self.state.runtime_context.get("last_assistant_text", "")),
+            finish_reason=str(self.state.runtime_context.get("finish_reason", "")),
+            iteration=self.state.iteration,
+            continuation_count=max(0, int(self.state.runtime_context.get("continuation_count", 0))),
+            max_continuations=max(0, int(self.state.runtime_context.get("max_continuations", 3))),
+        )
+        if self.hooks is None:
+            return StopTurn()
+        result = await self.hooks.dispatch(
+            AGENT_TURN_STOPPING_SPEC,
+            payload,
+            context=self.hook_context,
+        )
+        if not isinstance(result, (StopTurn, ContinueTurn)):
+            raise TypeError("agent/turn-stopping must return StopTurn or ContinueTurn")
+        return result
 
-        - finished_reason == COMPLETED：触发 ON_STOP，Hook 可 block（续写）或 allow（退出）。
+    async def stream(self, action: Exit) -> AsyncGenerator[AgentStreamEvent, None]:
+        """执行退出逻辑：先过 turn-stopping Hook，再决定续写还是真正退出。
+
+        - finished_reason == COMPLETED：触发 turn-stopping，Hook 可 Continue（续写）或 Stop（退出）。
         - 其它 reason（ERROR / EXCEED_MAX_ITERS / INTERRUPTED）：跳过 Hook，直接退出。
         """
         session_id = self.state.runtime_context.get("session_id", "")
         reply_id = self.state.reply_id
 
-        # ── 仅 COMPLETED 触发 ON_STOP ──
+        # ── 仅 COMPLETED 触发 turn-stopping ──
         # ERROR（LLM 调用失败 / 空响应耗尽重试）和 EXCEED_MAX_ITERS（超过最大迭代数）
         # 都是“被迫退出”，没有“让 Hook 决定是否继续”的语义——Hook 没法把一个失败的
         # LLM 调用变成成功，也无法突破迭代上限。故只在 Agent 主动完成（COMPLETED）时，
         # 给 Hook 一次“拦下并要求继续干活”的机会。
         if action.finished_reason == ReplyFinishedReason.COMPLETED:
-            from ...hooks import ON_STOP, StopInput
+            stop_output = await self._dispatch_stop()
 
-            stop_output = await self.hook_manager.trigger(
-                ON_STOP,
-                lambda: StopInput(
-                    session_id=session_id,
-                    turn_id=self.state.turn_id,
-                    iteration=self.state.iteration,
-                    runtime_context=self.state.runtime_context,
-                ),
-            )
-
-            # ── ON_STOP block：不退出，注入续写提示 ──
+            # ── ContinueTurn：不退出，注入续写提示 ──
             # Hook 返回 decision="block" 表示“别停，接着干”。行为：
             #   1) 把 Hook 的 reason（或默认“继续工作。”）作为当前 reply 的 HintBlock
             #      写入 memory；Provider 边界会把它切成 user 消息供下一轮读取；
@@ -446,30 +483,37 @@ class ExitExecutor:
             #      传达“本次停止被 Hook 拦截”，但标记为内部隐藏事件，不直接展示给用户；
             #   3) 置 outcome.should_continue=True，react_runner._loop 据此不 return 而是
             #      continue 进入下一轮迭代；本方法提前 return，不产出 ReplyEndEvent、不设终态。
-            if stop_output is not None and stop_output.decision == "block":
-                hint = stop_output.reason or "继续工作。"
-                hint_block = HintBlock(
-                    id=uuid.uuid4().hex[:16],
-                    source="system",
-                    hint=hint,
-                )
-                MessageContext.append_reply_blocks(
-                    self.agent.state.context,
-                    reply_id,
-                    [hint_block],
-                )
-                yield HintBlockEvent(
-                    reply_id=reply_id,
-                    block_id=hint_block.id,
-                    source="system",
-                    hint=hint,
-                    metadata={"hide": True, "internal": True, "reason": "stop_hook_block"},
-                )
-                self.outcome = ExitOutcome(should_continue=True, continue_hint=hint)
-                return
+            if isinstance(stop_output, ContinueTurn):
+                cancellation = self.state.runtime_context.get("cancellation")
+                continuation_count = int(self.state.runtime_context.get("continuation_count", 0))
+                max_continuations = int(self.state.runtime_context.get("max_continuations", 3))
+                if not (
+                    isinstance(cancellation, asyncio.Event) and cancellation.is_set()
+                ) and continuation_count < max_continuations:
+                    hint = stop_output.prompt
+                    self.state.runtime_context["continuation_count"] = continuation_count + 1
+                    hint_block = HintBlock(
+                        id=uuid.uuid4().hex[:16],
+                        source="system",
+                        hint=hint,
+                    )
+                    MessageContext.append_reply_blocks(
+                        self.agent.state.context,
+                        reply_id,
+                        [hint_block],
+                    )
+                    yield HintBlockEvent(
+                        reply_id=reply_id,
+                        block_id=hint_block.id,
+                        source="system",
+                        hint=hint,
+                        metadata={"hide": True, "internal": True, "reason": "turn_stopping_continue"},
+                    )
+                    self.outcome = ExitOutcome(should_continue=True, continue_hint=hint)
+                    return
 
         # ── 正常退出路径 ──
-        # 走到这里说明：非 COMPLETED 退出，或 COMPLETED 但 ON_STOP allow / 无 Hook。
+        # 走到这里说明：非 COMPLETED 退出，或 COMPLETED 但 StopTurn / 无 Hook。
         # 1) _finalize 把 reason / error / error_code 写入 RunState，并把 status 映射成
         #    COMPLETED / ERROR / CANCELLED 终态；
         # 2) yield ReplyEndEvent 通知上层本轮回复正式结束；

@@ -22,7 +22,7 @@
 - **目标**：建立 LLM 协议适配层——`LLMAdapter` 契约 + 协议注册表 + **DSH StreamChunk 流协议**（协议选择是数据（`api_type` 字符串）而非代码分支；新协议接入 = 新增一个适配器文件 + 注册表一行，消费方（react_runner / compact_manager / title_gen）零协议感知）。
 - **非目标**：
   - 不搬 DSH 的 LlmRuntime 运行时路由表（ftre 的 provider 路由由 config.json 承担）
-  - 不搬事件瀑布（FtreCoreHookManager 已有等价挂点）
+  - 不在 B2 搬运宿主事件瀑布（当前 Hook 统一由 C1 的 HookDispatcher 提供）
   - 不留 LLMEvent→StreamChunk 翻译骑墙层——一步到位搬彻底，旧事件家族随本阶段移除
   - 不引入新依赖
 
@@ -40,7 +40,7 @@
 - [ ] FR1：`LLMAdapter` 契约（`src/ftre_agent_core/llm/base.py`）——抽象基类，`stream(messages, tools) -> AsyncGenerator[StreamChunk]` + `cancel()` 两个抽象方法；`OpenAIAdapterBase` 提供共享骨架（AsyncOpenAI 客户端构造、cancel 机制、LLM 日志生命周期、异常统一 `LLMError.classify` 包裹并转终止性 error/aborted finish chunk）。
 - [ ] FR2：协议注册表（`src/ftre_agent_core/llm/registry.py`）——`PROTOCOLS: dict[str, type[LLMAdapter]]` 映射 `api_type` 字符串到适配器类；`create_llm_handler(api_type, **kwargs) -> LLMAdapter` 工厂函数；`supported_protocols() -> list[str]`；未知 `api_type` 抛 `LLMError(code="INVALID_API_TYPE")` 并在消息中列出全部支持协议。
 - [ ] FR3：completions 适配器（`adapters/openai_completions.py`）——迁移现有 `_stream_completions` 路径的 provider 调用与 wire 解析逻辑，输出改写为 StreamChunk：params 组装（`reasoning_effort` 透传 + deepseek thinking 特判）、工具调用增量聚合转 `tool-call-delta` 序列 + `block-end`、finish_reason 映射到 DSH 词汇（stop / tool-calls / max-tokens / error）、usage 口径映射（`usage` chunk 在 `finish` 前）。
-- [ ] FR4：responses 适配器（`adapters/openai_responses.py`）——迁移现有 `_stream_responses` 路径：消息/工具 schema 转换（`_convert_messages_to_responses_input` / `_convert_tools_to_responses`）、流事件解析（TextDelta/ReasoningDelta/FunctionCallArgumentsDelta/OutputItemAdded/Done/Completed）转 StreamChunk、`reasoning: {effort}` 透传。
+- [ ] FR4：responses 适配器（`adapters/openai_responses.py`）——迁移现有 `_stream_responses` 路径：消息/工具 schema 转换（`_convert_messages_to_responses_input` / `_convert_tools_to_responses`）、流事件解析（TextDelta/ReasoningDelta/FunctionCallArgumentsDelta/OutputItemAdded/Done/Completed）转 StreamChunk、`reasoning: {effort}` 透传；Responses 标准用量字段 `input_tokens` / `output_tokens` 映射为消费方统一的 `prompt_tokens` / `completion_tokens`。
 - [ ] FR5：StreamChunk 协议定义 + 组装器——`events.py` 定义七种 chunk（block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish，dataclass 形态；finish 携带 FinishReason：stop / tool-calls / max-tokens / error / aborted，error/aborted 带 failure {message, code}）；`block_assembler.py` 实现 BlockAssembler——按 index 组装交错 delta 为完整 block，校验配对完整（block-start 必有 block-end、index 单调、finish 收尾后无内容）。
 - [ ] FR6：目录结构落位——`llm/` 拆分为 `events.py`（StreamChunk 定义）、`block_assembler.py`（组装器）、`errors.py`（LLMError）、`base.py`（契约）、`registry.py`（注册表）、`adapters/`（一协议一文件）、`wire/normalize.py`（协议共用的消息归一化 + usage 映射）；`completion.py` 删除，**LLMEvent 家族（TextDelta/ReasoningDelta/ToolInputDelta/ToolCall/StepFinish）随之移除**，不留兼容别名或 re-export 尾巴。
 - [ ] FR7：消费方迁移（一步到位，无骑墙层）——
@@ -165,7 +165,7 @@ class BlockAssembler:
 - [x] AC1：StreamChunk 协议契约测试通过——合法序列（配对完整、usage→finish 顺序、index 单调）被 BlockAssembler 正确组装；畸形序列（缺 block-end、finish 后有余 chunk、index 跳跃）被 validate() 拒绝。
 - [x] AC2：ftre 全仓测试套通过（消费方迁移后无回归——react_runner / compact_manager / title_gen 的测试断言更新为新协议语义）。
 - [x] AC3：`create_llm_handler("banana")` 抛 LLMError，code 为 INVALID_API_TYPE，message 列出 `['completions', 'responses']`。
-- [x] AC4：适配器单元测试——fake openai 流事件分别喂两个适配器，断言产出的 chunk 序列符合 3.3 契约且 block 内容正确（文本聚合、reasoning 聚合、tool-call arguments 聚合 + call_id/name 传递）。
+- [x] AC4：适配器单元测试——fake openai 流事件分别喂两个适配器，断言产出的 chunk 序列符合 3.3 契约且 block 内容正确（文本聚合、reasoning 聚合、tool-call arguments 聚合 + call_id/name 传递）；Responses 标准 usage 的 `input_tokens` / `output_tokens` 映射为下游统一字段。
 - [x] AC5：completion.py 与 LLMEvent 家族不存在；全仓 grep `TextDelta|ReasoningDelta|ToolInputDelta|StepFinish|LLMHandler` 无代码引用（历史文档 docs/litellm-migration.md、docs/response-to-ai-base.md 及 src/tests/ 历史存档目录除外）。
 - [x] AC6：真实对话回归——completions 路径（deepseek-v4-flash，带工具调用）与 responses 路径（gpt-5.6-luna，完整对话 + usage 含 reasoning_tokens + finish 映射）各跑一轮真实调用成功；`finish_reason: null` 类畸形响应映射为 error finish（无产出时）或宽容 stop（有产出时）且不崩溃。（备注：muse-spark-1.2 在验收时被 OpenCode 网关整体下线——两协议均 401 Model not supported，与代码无关；responses 协议由 Luna 完成验证。）
 
@@ -183,6 +183,7 @@ class BlockAssembler:
 
 | 日期 | 变更内容 | 理由 |
 |---|---|---|
+| 2026-08-19 | 补齐 Responses 标准 usage 字段映射：`input_tokens` / `output_tokens` → `prompt_tokens` / `completion_tokens`；AC4 已重跑验证 | Muse Spark 真实调用返回 Responses 字段，未映射导致 Runner 丢弃本轮精确 token 用量 |
 | 2026-08-19 | 评审前修订：适配器输出协议由「保留 LLMEvent」改为「DSH StreamChunk」（七种 chunk + BlockAssembler + error/aborted finish 通道）；FR5/FR6/FR7/FR8 与 AC1/AC2/AC4/AC5 相应重写；目录结构新增 block_assembler.py；非目标删除「不改 LLMEvent」、新增「不留骑墙层」 | 用户评审决策：采用 DSH 协议（与 Msg ContentBlock 同构、desktop 块渲染就绪、error finish 通道、对齐 DSH 适配器生态） |
 | 2026-08-19 | 状态 草稿 → approved（定稿） | 用户评审通过 |
 | 2026-08-19 | FR 勾选 + AC 全部验收通过（AC1-AC6）；状态 → 已验收。AC6 备注：muse-spark-1.2 验收时被网关下线（401 Model not supported，与代码无关），responses 协议由 gpt-5.6-luna 完成真实回归；completions 协议由 deepseek-v4-flash 完成（工具调用 + usage 全通） | 开发完成，验收记录留痕 |

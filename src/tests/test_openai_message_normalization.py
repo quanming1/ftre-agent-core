@@ -1,4 +1,4 @@
-from ftre_agent_core.llm.completion import _normalize_chat_messages
+from ftre_agent_core.llm.wire.normalize import _normalize_chat_messages
 
 
 def _assistant_call(*ids: str, content: str | None = None) -> dict:
@@ -18,7 +18,8 @@ def _result(call_id: str) -> dict:
 
 def test_normalization_keeps_complete_adjacent_tool_call_group():
     messages = [_assistant_call("call-a", "call-b"), _result("call-a"), _result("call-b")]
-    assert _normalize_chat_messages(messages) == messages
+    expected = [dict(messages[0], content=""), *messages[1:]]
+    assert _normalize_chat_messages(messages) == expected
 
 
 def test_normalization_drops_orphan_tool_result():

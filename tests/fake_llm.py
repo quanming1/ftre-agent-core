@@ -22,6 +22,7 @@ B2：产 StreamChunk 协议（七种 chunk + 配对契约），供 runner 测试
 """
 import json
 import time
+from typing import ClassVar
 
 import openai
 
@@ -39,7 +40,6 @@ from ftre_agent_core.llm import (
     ToolCallDeltaChunk,
     UsageChunk,
 )
-
 
 # ============================================================
 # 工具函数
@@ -163,7 +163,7 @@ def _make_error(code: str) -> Exception:
     # RateLimitError / AuthenticationError 需要 response 构造参数
     class _FakeResponse:
         status_code = 429 if cls is openai.RateLimitError else 401
-        headers = {}
+        headers: ClassVar[dict] = {}
         def json(self):
             return {}
         def text(self):
@@ -180,7 +180,10 @@ def _make_error(code: str) -> Exception:
 #   for chunk in seq(TextDelta(text="hi"), StepFinish(finish_reason="stop")): yield chunk
 
 
-from dataclasses import dataclass, field as _dc_field
+from dataclasses import dataclass
+from dataclasses import field as _dc_field
+
+__all__ = ["StepFinish", "TextDelta", "ToolCall", "seq"]
 
 
 @dataclass

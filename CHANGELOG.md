@@ -2,6 +2,15 @@
 
 ## [未发布]
 
+## [0.1.1] - 2026-08-22
+
+### C1 Agent Core 直接 Hook 协议
+
+- 删除 Core 自持有的 `FtreCoreHookManager`、旧 `ON_*` 输入输出和注册入口。
+- 新增无状态 `HookDispatcher`、共享 `HookSpec`，以及 Tool、LLM stream、turn-stopping typed contracts。
+- ReAct Core 直接在 ToolHandler、ReasoningExecutor 和 ExitExecutor 注入宿主 Dispatcher；支持有界 `ContinueTurn`。
+- Core 独立回归：234 项 pytest、ruff 全量通过；ftre 侧由 Cordis HookRuntime 作为唯一调度实现。
+
 ### B2 LLM 协议适配层（DSH StreamChunk 协议）
 
 **重构**：`llm/completion.py`（764 行单类双 if 分支）拆分为协议适配层：

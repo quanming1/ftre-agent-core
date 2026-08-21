@@ -22,30 +22,30 @@ from .events import (
     ToolCallDeltaChunk,
     UsageChunk,
 )
-from .registry import create_llm_handler, supported_protocols, PROTOCOLS
+from .registry import PROTOCOLS, create_llm_handler, supported_protocols
 
 __all__ = [
+    "PROTOCOLS",
+    # 组装器与错误
+    "BlockAssembler",
+    "BlockEnd",
+    "BlockStart",
+    "FinishChunk",
+    "FinishReason",
     # 契约与工厂
     "LLMAdapter",
+    "LLMError",
+    "LlmFailure",
     "OpenAIAdapterBase",
     "OpenAICompletionsAdapter",
     "OpenAIResponsesAdapter",
-    "create_llm_handler",
-    "supported_protocols",
-    "PROTOCOLS",
+    "ReasoningDeltaChunk",
     # StreamChunk 家族
     "StreamChunk",
-    "BlockStart",
     "TextDeltaChunk",
-    "ReasoningDeltaChunk",
-    "ToolCallDeltaChunk",
-    "BlockEnd",
-    "UsageChunk",
-    "FinishChunk",
-    "FinishReason",
-    "LlmFailure",
     "ToolCall",
-    # 组装器与错误
-    "BlockAssembler",
-    "LLMError",
+    "ToolCallDeltaChunk",
+    "UsageChunk",
+    "create_llm_handler",
+    "supported_protocols",
 ]

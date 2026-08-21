@@ -1,13 +1,15 @@
 # tests/test_react_runner_new.py
 """ReActRunner 主循环集成测试。"""
 import asyncio
+
 import pytest
+from fake_llm import ReasoningDelta, StepFinish, TextDelta, ToolCall, seq
+
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.event import EventType
-from fake_llm import seq, ReasoningDelta, TextDelta, StepFinish, ToolCall
 from ftre_agent_core.message import Msg
 from ftre_agent_core.message_context import MessageContext
-from ftre_agent_core.tool import tool, ToolRegistry
+from ftre_agent_core.tool import ToolRegistry, tool
 from ftre_agent_core.types import ReplyFinishedReason
 
 
