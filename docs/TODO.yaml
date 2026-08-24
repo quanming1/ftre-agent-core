@@ -100,3 +100,18 @@ stages:
           - src/ftre_agent_core/agent/runner/（Tool、LLM、停止决策注入点）
           - tests/（Core Hook 合同与状态机回归）
         acceptance: Core 不再持有 Hook 注册表；ftre 可直接注入 Cordis HookRuntime；Tool、LLM stream、turn-stopping 管线全量测试通过
+
+      - id: C2
+        title: Agent before-reasoning Hook 与宿主上下文注入
+        status: done
+        date: 2026-08-23
+        prd: docs/prd/PRD-C2-agent-before-reasoning-hook.md
+        prd_status: 已验收
+        depends_on:
+          - C1
+        modules:
+          - src/ftre_agent_core/hooks.py（before-reasoning 契约）
+          - src/ftre_agent_core/agent/runner/react_runner.py（每次 Reasoning 前调用）
+          - tests/test_react_runner_step_hook.py（Step 边界回归）
+        external_consumer: E:\ftre（ftre-inbox 监听并贡献 next-step）
+        acceptance: Core 每次 LLM Reasoning 前触发 agent/before-reasoning；宿主可追加通用 messages；Core 不依赖 ftre/Inbox；Core 与 ftre 全量质量门禁和 active-steer 集成 smoke 通过

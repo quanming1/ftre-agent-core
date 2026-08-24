@@ -15,6 +15,13 @@ from typing import Any, Literal, Protocol
 
 
 class HookMode(StrEnum):
+    """Core 只声明调度语义，具体监听器由宿主 HookDispatcher 管理。
+
+    ``WATERFALL`` 是 Agent/Plugin 修改输入或结果的主模式：每个监听器必须
+    显式调用 ``next_`` 才会继续默认实现。其余模式分别表达观察、并行聚合、
+    串行观察和首个非空结果短路，Core 不保存这些监听器的生命周期。
+    """
+
     EMIT = "emit"
     PARALLEL = "parallel"
     SERIAL = "serial"
@@ -23,18 +30,27 @@ class HookMode(StrEnum):
 
 
 class HookFailurePolicy(StrEnum):
+    """声明监听器异常是阻断当前动作，还是只记录后继续。"""
+
     OBSERVE = "observe"
     PROPAGATE = "propagate"
 
 
 class HookScope(StrEnum):
+    """Hook 的作用域提示；作用域 Context 的创建和隔离由宿主负责。"""
+
     GLOBAL = "global"
     AGENT = "agent"
 
 
 @dataclass(frozen=True, slots=True)
 class HookSpec:
-    """一个公开 Hook 的静态契约，不持有运行时监听器。"""
+    """一个公开 Hook 的静态契约，不持有运行时监听器。
+
+    ``payload_type``/``result_type`` 把 Core 与宿主之间的边界固定成可校验的
+    类型，而 ``default`` 使 waterfall 在没有 Plugin 参与时仍然拥有确定行为。
+    这也是为什么 Spec 放在无状态 Core 中，而不是放进 ftre 的运行时注册表。
+    """
 
     name: str
     domain: str
@@ -62,6 +78,8 @@ class HookSpec:
             raise ValueError("waterfall HookSpec requires an explicit default")
 
     def validate_payload(self, payload: Any) -> None:
+        """在进入算法前拒绝错误 payload，避免 Hook 错误延迟到深层才暴露。"""
+
         if self.payload_type is not None and not isinstance(payload, self.payload_type):
             raise TypeError(
                 f"{self.name} payload must be {self.payload_type!r}, "
@@ -69,6 +87,8 @@ class HookSpec:
             )
 
     def validate_result(self, result: Any) -> None:
+        """在把 Hook 结果交回算法前校验协议，保证 Core 不消费任意对象。"""
+
         if self.result_type is not None and not isinstance(result, self.result_type):
             raise TypeError(
                 f"{self.name} result must be {self.result_type!r}, "
@@ -77,7 +97,12 @@ class HookSpec:
 
 
 class HookDispatcher(Protocol):
-    """宿主提供的异步调度端口。``context`` 是 opaque scope carrier。"""
+    """宿主提供的异步调度端口。
+
+    Core 只依赖这一项最小协议：不创建 Dispatcher、不注册监听器，也不解释
+    ``context`` 的具体类型。ftre 可以把它映射到 Cordis；其它宿主可以提供
+    自己的实现而不需要让 Core 反向依赖 WebSocket、Session 或 Plugin。
+    """
 
     async def dispatch(
         self,
@@ -89,6 +114,8 @@ class HookDispatcher(Protocol):
 
 
 def _readonly_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    # Hook payload 是“本次调用的快照”。复制并冻结映射，防止监听器在异步
+    # waterfall 期间修改调用方仍在使用的 arguments/metadata。
     return MappingProxyType(dict(value or {}))
 
 
@@ -102,6 +129,8 @@ TOOLS_RESULT = "tools/result"
 
 @dataclass(frozen=True, slots=True)
 class ToolCallIdentity:
+    """一次 Tool 调用的稳定坐标，供 Hook、日志和 tracing 关联使用。"""
+
     call_id: str
     name: str
     session_id: str = ""
@@ -112,6 +141,12 @@ class ToolCallIdentity:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
+    """Tool Hook 之间传递的统一结果。
+
+    ``value`` 保留 Core 原始对象（例如 EventBase），``output``/``metadata``
+    是宿主和 UI 可安全消费的归一化视图；这样 Hook 不必识别每种 Tool 返回值。
+    """
+
     output: str = ""
     status: Literal["completed", "failed", "cancelled"] = "completed"
     error: str | None = None
@@ -126,6 +161,8 @@ class ToolExecutionResult:
 
 @dataclass(frozen=True, slots=True)
 class ToolPreExecutePayload:
+    """执行前的可修改边界：允许、拒绝或替换参数。"""
+
     call: ToolCallIdentity
     arguments: Mapping[str, Any]
     cancellation: asyncio.Event
@@ -136,16 +173,20 @@ class ToolPreExecutePayload:
 
 @dataclass(frozen=True, slots=True)
 class ToolAllow:
-    pass
+    """明确允许当前 Tool 调用继续执行的标记结果。"""
 
 
 @dataclass(frozen=True, slots=True)
 class ToolDeny:
+    """阻止当前 Tool 调用；``reason`` 会作为结构化失败原因向上返回。"""
+
     reason: str
 
 
 @dataclass(frozen=True, slots=True)
 class ToolArguments:
+    """执行前替换后的参数；原始调用对象保持不可变。"""
+
     arguments: Mapping[str, Any]
 
     def __post_init__(self) -> None:
@@ -154,6 +195,8 @@ class ToolArguments:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutePayload:
+    """around Hook 的输入；``invoke`` 是唯一真正执行原始 Tool 的 continuation。"""
+
     call: ToolCallIdentity
     arguments: Mapping[str, Any]
     cancellation: asyncio.Event
@@ -165,6 +208,8 @@ class ToolExecutePayload:
 
 @dataclass(frozen=True, slots=True)
 class ToolPostExecutePayload:
+    """Tool 已执行后的可替换结果边界。"""
+
     call: ToolCallIdentity
     arguments: Mapping[str, Any]
     result: ToolExecutionResult
@@ -176,6 +221,8 @@ class ToolPostExecutePayload:
 
 @dataclass(frozen=True, slots=True)
 class ToolResultPayload:
+    """最终 Tool 结果的只读观察事件；观察者不再影响执行结果。"""
+
     call: ToolCallIdentity
     arguments: Mapping[str, Any]
     result: ToolExecutionResult
@@ -185,18 +232,22 @@ class ToolResultPayload:
 
 
 async def _allow(_payload: ToolPreExecutePayload) -> ToolAllow:
+    # 没有 Plugin 时，Tool 默认放行；安全策略由宿主通过监听器显式收紧。
     return ToolAllow()
 
 
 async def _execute(payload: ToolExecutePayload) -> ToolExecutionResult:
+    # around Hook 的默认 continuation，保持 Core 的原始 Tool 行为。
     return await payload.invoke()
 
 
 async def _accept(payload: ToolPostExecutePayload) -> ToolExecutionResult:
+    # post Hook 不修改结果时沿用执行器刚刚产生的快照。
     return payload.result
 
 
 def _observe(_payload: ToolResultPayload) -> None:
+    # result 是观察型 Hook；默认实现刻意不产生值。
     return None
 
 
@@ -250,6 +301,13 @@ def _readonly_sequence(value) -> tuple[Mapping[str, Any], ...]:
 
 @dataclass(frozen=True, slots=True)
 class LLMStreamPayload:
+    """一次 Reasoning 的 LLM 调用快照和 continuation。
+
+    ``messages``/``tools`` 只描述本次调用，不是 AgentState 的可变引用；Plugin
+    可以通过 waterfall 包装 ``invoke`` 或构造新 payload 改写本次调用，但不能
+    直接篡改 Core 的持久 Memory。
+    """
+
     agent_id: str
     session_id: str
     turn_id: str
@@ -265,6 +323,7 @@ class LLMStreamPayload:
 
 
 async def _stream(payload: LLMStreamPayload) -> AsyncIterator[Any]:
+    # 默认直接调用底层适配器；LLM Hook 没有监听器时不增加额外协议层。
     return payload.invoke()
 
 
@@ -279,6 +338,58 @@ LLM_STREAM_SPEC = HookSpec(
 )
 
 
+# ── Agent before-reasoning contract ────────────────────────────────────
+
+AGENT_BEFORE_REASONING = "agent/before-reasoning"
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeReasoningPayload:
+    """一次真实 LLM Reasoning 开始前的最小运行坐标。
+
+    Core 不知道消息来自 Inbox、Channel 还是其它宿主。宿主只需要根据
+    ``session_id``/``turn_id``/``iteration`` 决定是否贡献上下文即可；
+    ``agent`` 保留为不透明对象，避免 Core 反向依赖宿主 Agent 类型。
+    """
+
+    agent: object
+    session_id: str
+    turn_id: str
+    iteration: int
+    cancellation: asyncio.Event
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeReasoningResult:
+    """Hook 可追加到本次 LLM snapshot 前的结构化消息。
+
+    这里使用 Provider 无关的 mapping，而不是 Inbox/Session 模型；Core 只负责
+    按顺序写入自己的 AgentState，消息来源和幂等/claim 语义由宿主 Plugin 负责。
+    """
+
+    messages: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "messages", _readonly_sequence(self.messages))
+
+
+async def _before_reasoning(_payload: BeforeReasoningPayload) -> BeforeReasoningResult:
+    """没有宿主监听器时保持原行为：不追加任何上下文。"""
+
+    return BeforeReasoningResult()
+
+
+AGENT_BEFORE_REASONING_SPEC = HookSpec(
+    AGENT_BEFORE_REASONING,
+    "agent",
+    HookMode.WATERFALL,
+    payload_type=BeforeReasoningPayload,
+    result_type=BeforeReasoningResult,
+    default=_before_reasoning,
+    scope=HookScope.AGENT,
+)
+
+
 # ── Agent turn-stopping contract ───────────────────────────────────────
 
 AGENT_TURN_STOPPING = "agent/turn-stopping"
@@ -286,6 +397,12 @@ AGENT_TURN_STOPPING = "agent/turn-stopping"
 
 @dataclass(frozen=True, slots=True)
 class TurnStoppingPayload:
+    """Agent 准备正常停止时的决策快照。
+
+    只有 ``COMPLETED`` 这类自然停止才进入该 Hook；错误、取消和迭代上限等
+    被迫退出不应被 Plugin 伪装成“继续工作”。
+    """
+
     agent: object
     session_id: str
     turn_id: str
@@ -301,11 +418,15 @@ class TurnStoppingPayload:
 
 @dataclass(frozen=True, slots=True)
 class StopTurn:
+    """允许当前 Agent Turn 结束的默认结果。"""
+
     reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class ContinueTurn:
+    """阻止本次停止并要求 Core 继续下一轮 Reasoning。"""
+
     prompt: str
     reason: str = ""
     source: str = ""
@@ -316,6 +437,7 @@ class ContinueTurn:
 
 
 async def _stop_turn(_payload: TurnStoppingPayload) -> StopTurn:
+    # 无宿主策略时保持最小、可预测的自然结束语义。
     return StopTurn()
 
 
@@ -331,6 +453,8 @@ AGENT_TURN_STOPPING_SPEC = HookSpec(
 
 
 __all__ = [
+    "AGENT_BEFORE_REASONING",
+    "AGENT_BEFORE_REASONING_SPEC",
     "AGENT_TURN_STOPPING",
     "AGENT_TURN_STOPPING_SPEC",
     "LLM_STREAM",
@@ -339,6 +463,8 @@ __all__ = [
     "TOOLS_POST_EXECUTE_SPEC",
     "TOOLS_PRE_EXECUTE_SPEC",
     "TOOLS_RESULT_SPEC",
+    "BeforeReasoningPayload",
+    "BeforeReasoningResult",
     "ContinueTurn",
     "HookDispatcher",
     "HookFailurePolicy",

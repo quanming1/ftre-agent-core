@@ -1,11 +1,14 @@
 # Core Agent System - 异步 ReAct Agent
 from .hooks import (
+    AGENT_BEFORE_REASONING_SPEC,
     AGENT_TURN_STOPPING_SPEC,
     LLM_STREAM_SPEC,
     TOOLS_EXECUTE_SPEC,
     TOOLS_POST_EXECUTE_SPEC,
     TOOLS_PRE_EXECUTE_SPEC,
     TOOLS_RESULT_SPEC,
+    BeforeReasoningPayload,
+    BeforeReasoningResult,
     ContinueTurn,
     HookDispatcher,
     HookFailurePolicy,
@@ -39,6 +42,7 @@ from .tracing import (
 )
 
 __all__ = [
+    "AGENT_BEFORE_REASONING_SPEC",
     "AGENT_TURN_STOPPING_SPEC",
     "LLM_STREAM_SPEC",
     "TOOLS_EXECUTE_SPEC",
@@ -46,6 +50,8 @@ __all__ = [
     "TOOLS_PRE_EXECUTE_SPEC",
     "TOOLS_RESULT_SPEC",
     "AgentState",
+    "BeforeReasoningPayload",
+    "BeforeReasoningResult",
     "ContinueTurn",
     "HookDispatcher",
     "HookFailurePolicy",
