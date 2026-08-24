@@ -1,7 +1,7 @@
 """
 ReActRunner continuation / retry 逻辑测试（状态机重构版）。
 
-length 截断续写已删除。空响应重试和 turn-stopping continuation 由新状态机处理。
+length 截断续写已删除。空响应重试和 stop-decision continuation 由新状态机处理。
 """
 import logging
 

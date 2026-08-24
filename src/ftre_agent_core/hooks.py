@@ -7,7 +7,7 @@ Spec、payload 和结果类型。
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -121,10 +121,10 @@ def _readonly_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 # ── Tool Hook contracts ────────────────────────────────────────────────
 
-TOOLS_PRE_EXECUTE = "tools/pre-execute"
-TOOLS_EXECUTE = "tools/execute"
-TOOLS_POST_EXECUTE = "tools/post-execute"
-TOOLS_RESULT = "tools/result"
+# Tool 面只保留“进入前”和“完成后”两个真正有业务语义的边界。真实 Tool
+# 执行属于 Core 私有算法，不作为可被 Plugin 包裹的第三个协议暴露。
+TOOL_BEFORE = "tool/before"
+TOOL_AFTER = "tool/after"
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +160,7 @@ class ToolExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolPreExecutePayload:
+class ToolBeforePayload:
     """执行前的可修改边界：允许、拒绝或替换参数。"""
 
     call: ToolCallIdentity
@@ -194,20 +194,7 @@ class ToolArguments:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolExecutePayload:
-    """around Hook 的输入；``invoke`` 是唯一真正执行原始 Tool 的 continuation。"""
-
-    call: ToolCallIdentity
-    arguments: Mapping[str, Any]
-    cancellation: asyncio.Event
-    invoke: Callable[[], Awaitable[ToolExecutionResult]]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "arguments", _readonly_mapping(self.arguments))
-
-
-@dataclass(frozen=True, slots=True)
-class ToolPostExecutePayload:
+class ToolAfterPayload:
     """Tool 已执行后的可替换结果边界。"""
 
     call: ToolCallIdentity
@@ -219,73 +206,32 @@ class ToolPostExecutePayload:
         object.__setattr__(self, "arguments", _readonly_mapping(self.arguments))
 
 
-@dataclass(frozen=True, slots=True)
-class ToolResultPayload:
-    """最终 Tool 结果的只读观察事件；观察者不再影响执行结果。"""
-
-    call: ToolCallIdentity
-    arguments: Mapping[str, Any]
-    result: ToolExecutionResult
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "arguments", _readonly_mapping(self.arguments))
-
-
-async def _allow(_payload: ToolPreExecutePayload) -> ToolAllow:
+async def _allow(_payload: ToolBeforePayload) -> ToolAllow:
     # 没有 Plugin 时，Tool 默认放行；安全策略由宿主通过监听器显式收紧。
     return ToolAllow()
 
 
-async def _execute(payload: ToolExecutePayload) -> ToolExecutionResult:
-    # around Hook 的默认 continuation，保持 Core 的原始 Tool 行为。
-    return await payload.invoke()
-
-
-async def _accept(payload: ToolPostExecutePayload) -> ToolExecutionResult:
-    # post Hook 不修改结果时沿用执行器刚刚产生的快照。
+async def _accept(payload: ToolAfterPayload) -> ToolExecutionResult:
+    # after Hook 不修改结果时沿用执行器刚刚产生的快照。
     return payload.result
 
 
-def _observe(_payload: ToolResultPayload) -> None:
-    # result 是观察型 Hook；默认实现刻意不产生值。
-    return None
-
-
-TOOLS_PRE_EXECUTE_SPEC = HookSpec(
-    TOOLS_PRE_EXECUTE,
-    "tools",
+TOOL_BEFORE_SPEC = HookSpec(
+    TOOL_BEFORE,
+    "tool",
     HookMode.WATERFALL,
-    payload_type=ToolPreExecutePayload,
+    payload_type=ToolBeforePayload,
     result_type=(ToolAllow, ToolDeny, ToolArguments),
     default=_allow,
     scope=HookScope.AGENT,
 )
-TOOLS_EXECUTE_SPEC = HookSpec(
-    TOOLS_EXECUTE,
-    "tools",
+TOOL_AFTER_SPEC = HookSpec(
+    TOOL_AFTER,
+    "tool",
     HookMode.WATERFALL,
-    payload_type=ToolExecutePayload,
-    result_type=ToolExecutionResult,
-    default=_execute,
-    scope=HookScope.AGENT,
-)
-TOOLS_POST_EXECUTE_SPEC = HookSpec(
-    TOOLS_POST_EXECUTE,
-    "tools",
-    HookMode.WATERFALL,
-    payload_type=ToolPostExecutePayload,
+    payload_type=ToolAfterPayload,
     result_type=ToolExecutionResult,
     default=_accept,
-    scope=HookScope.AGENT,
-)
-TOOLS_RESULT_SPEC = HookSpec(
-    TOOLS_RESULT,
-    "tools",
-    HookMode.EMIT,
-    failure_policy=HookFailurePolicy.OBSERVE,
-    payload_type=ToolResultPayload,
-    result_type=type(None),
-    default=_observe,
     scope=HookScope.AGENT,
 )
 
@@ -390,13 +336,13 @@ AGENT_BEFORE_REASONING_SPEC = HookSpec(
 )
 
 
-# ── Agent turn-stopping contract ───────────────────────────────────────
+# ── Agent stop-decision contract ───────────────────────────────────────
 
-AGENT_TURN_STOPPING = "agent/turn-stopping"
+AGENT_STOP_DECISION = "agent/stop-decision"
 
 
 @dataclass(frozen=True, slots=True)
-class TurnStoppingPayload:
+class StopDecisionPayload:
     """Agent 准备正常停止时的决策快照。
 
     只有 ``COMPLETED`` 这类自然停止才进入该 Hook；错误、取消和迭代上限等
@@ -436,16 +382,16 @@ class ContinueTurn:
             raise ValueError("ContinueTurn.prompt must be non-empty")
 
 
-async def _stop_turn(_payload: TurnStoppingPayload) -> StopTurn:
+async def _stop_turn(_payload: StopDecisionPayload) -> StopTurn:
     # 无宿主策略时保持最小、可预测的自然结束语义。
     return StopTurn()
 
 
-AGENT_TURN_STOPPING_SPEC = HookSpec(
-    AGENT_TURN_STOPPING,
+AGENT_STOP_DECISION_SPEC = HookSpec(
+    AGENT_STOP_DECISION,
     "agent",
     HookMode.WATERFALL,
-    payload_type=TurnStoppingPayload,
+    payload_type=StopDecisionPayload,
     result_type=(StopTurn, ContinueTurn),
     default=_stop_turn,
     scope=HookScope.AGENT,
@@ -455,14 +401,14 @@ AGENT_TURN_STOPPING_SPEC = HookSpec(
 __all__ = [
     "AGENT_BEFORE_REASONING",
     "AGENT_BEFORE_REASONING_SPEC",
-    "AGENT_TURN_STOPPING",
-    "AGENT_TURN_STOPPING_SPEC",
+    "AGENT_STOP_DECISION",
+    "AGENT_STOP_DECISION_SPEC",
     "LLM_STREAM",
     "LLM_STREAM_SPEC",
-    "TOOLS_EXECUTE_SPEC",
-    "TOOLS_POST_EXECUTE_SPEC",
-    "TOOLS_PRE_EXECUTE_SPEC",
-    "TOOLS_RESULT_SPEC",
+    "TOOL_AFTER",
+    "TOOL_AFTER_SPEC",
+    "TOOL_BEFORE",
+    "TOOL_BEFORE_SPEC",
     "BeforeReasoningPayload",
     "BeforeReasoningResult",
     "ContinueTurn",
@@ -472,15 +418,13 @@ __all__ = [
     "HookScope",
     "HookSpec",
     "LLMStreamPayload",
+    "StopDecisionPayload",
     "StopTurn",
+    "ToolAfterPayload",
     "ToolAllow",
     "ToolArguments",
+    "ToolBeforePayload",
     "ToolCallIdentity",
     "ToolDeny",
-    "ToolExecutePayload",
     "ToolExecutionResult",
-    "ToolPostExecutePayload",
-    "ToolPreExecutePayload",
-    "ToolResultPayload",
-    "TurnStoppingPayload",
 ]

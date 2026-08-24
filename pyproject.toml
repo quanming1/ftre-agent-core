@@ -1,6 +1,6 @@
 [project]
 name = "ftre-agent-core"
-version = "0.1.2"
+version = "0.2.0"
 description = "Agent framework core - ReAct Agent, Tool System, LLM Adapters"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,3 +28,4 @@ ftre_agent_core = ["prompt/templates/*.md", "prompt/templates/*.txt"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["ftre_agent_core*"]

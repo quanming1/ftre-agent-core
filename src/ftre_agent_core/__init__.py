@@ -1,12 +1,10 @@
 # Core Agent System - 异步 ReAct Agent
 from .hooks import (
     AGENT_BEFORE_REASONING_SPEC,
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     LLM_STREAM_SPEC,
-    TOOLS_EXECUTE_SPEC,
-    TOOLS_POST_EXECUTE_SPEC,
-    TOOLS_PRE_EXECUTE_SPEC,
-    TOOLS_RESULT_SPEC,
+    TOOL_AFTER_SPEC,
+    TOOL_BEFORE_SPEC,
     BeforeReasoningPayload,
     BeforeReasoningResult,
     ContinueTurn,
@@ -15,7 +13,10 @@ from .hooks import (
     HookMode,
     HookScope,
     HookSpec,
+    StopDecisionPayload,
     StopTurn,
+    ToolAfterPayload,
+    ToolBeforePayload,
 )
 from .message_context import MessageContext
 from .permission import (
@@ -43,12 +44,10 @@ from .tracing import (
 
 __all__ = [
     "AGENT_BEFORE_REASONING_SPEC",
-    "AGENT_TURN_STOPPING_SPEC",
+    "AGENT_STOP_DECISION_SPEC",
     "LLM_STREAM_SPEC",
-    "TOOLS_EXECUTE_SPEC",
-    "TOOLS_POST_EXECUTE_SPEC",
-    "TOOLS_PRE_EXECUTE_SPEC",
-    "TOOLS_RESULT_SPEC",
+    "TOOL_AFTER_SPEC",
+    "TOOL_BEFORE_SPEC",
     "AgentState",
     "BeforeReasoningPayload",
     "BeforeReasoningResult",
@@ -68,7 +67,10 @@ __all__ = [
     "PermissionRequest",
     "PermissionRule",
     "RunType",
+    "StopDecisionPayload",
     "StopTurn",
+    "ToolAfterPayload",
+    "ToolBeforePayload",
     "TraceEvent",
     "TraceExporter",
     "TraceRun",

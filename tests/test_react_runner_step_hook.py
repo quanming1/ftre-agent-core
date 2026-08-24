@@ -9,7 +9,7 @@ from fake_llm import StepFinish, TextDelta, ToolCall, seq
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.hooks import (
     AGENT_BEFORE_REASONING_SPEC,
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     BeforeReasoningResult,
     ContinueTurn,
     StopTurn,
@@ -46,7 +46,7 @@ class BeforeReasoningDispatcher:
                 "role": "user",
                 "content": f"steer-{payload.iteration}",
             },))
-        if spec is AGENT_TURN_STOPPING_SPEC:
+        if spec is AGENT_STOP_DECISION_SPEC:
             if self.continue_once and not self._continued:
                 self._continued = True
                 return ContinueTurn("继续推理", source="test")

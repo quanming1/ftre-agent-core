@@ -1,7 +1,7 @@
 """ReActRunner — ReAct Agent 的核心执行引擎（状态机重构版）。
 
 整体设计借鉴 AgentScope 的 _next_action() 纯决策函数模式，同时保留
-原有的 LLM 重试、空响应恢复、turn-stopping Hook、Tracing、工具并发执行、
+原有的 LLM 重试、空响应恢复、stop-decision Hook、Tracing、工具并发执行、
 成组写入 Memory 等生产能力。
 
 架构分三层：
@@ -9,7 +9,7 @@
   decide()               纯决策函数，只读状态，返回动作类型
   ReasoningExecutor      执行 Reasoning 动作：调 LLM + 流式 + 重试
   ActingExecutor         执行 Acting 动作：工具并发 + 成组写入 Memory
-  ExitExecutor           执行 Exit 动作：turn-stopping Hook + 产出 ReplyEnd
+  ExitExecutor           执行 Exit 动作：stop-decision Hook + 产出 ReplyEnd
 
 主循环 _loop() 只做 match 分发：
 
@@ -541,7 +541,7 @@ class ReActRunner:
           2. 根据动作类型分发到对应执行器
           3. Reasoning → 递增 iteration，调 LLM，更新 prev
           4. Acting    → 执行工具，清除 prev（下一轮重新推理）
-          5. Exit      → 通过 turn-stopping 决策后产出结束事件，return
+          5. Exit      → 通过 stop-decision 决策后产出结束事件，return
 
         iteration 计数规则：
           只在 Reasoning 时递增。一次"迭代"= 一次 LLM 调用，
@@ -549,7 +549,7 @@ class ReActRunner:
           这样 max_iterations=N 表示最多调用 N 次 LLM。
 
         Exit + should_continue 的特殊路径：
-          turn-stopping 返回 ContinueTurn 时，ExitExecutor 产出 HintBlockEvent
+          stop-decision 返回 ContinueTurn 时，ExitExecutor 产出 HintBlockEvent
           但不产 ReplyEndEvent，返回 ExitOutcome(should_continue=True)。
           主循环注入续写提示到 Memory，清除 prev，继续循环。
         """

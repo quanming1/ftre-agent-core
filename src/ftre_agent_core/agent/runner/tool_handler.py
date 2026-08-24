@@ -8,19 +8,15 @@ from typing import TYPE_CHECKING
 
 from ftre_agent_core.event import AgentStreamEvent, EventBase
 from ftre_agent_core.hooks import (
-    TOOLS_EXECUTE_SPEC,
-    TOOLS_POST_EXECUTE_SPEC,
-    TOOLS_PRE_EXECUTE_SPEC,
-    TOOLS_RESULT_SPEC,
+    TOOL_AFTER_SPEC,
+    TOOL_BEFORE_SPEC,
     HookDispatcher,
+    ToolAfterPayload,
     ToolArguments,
+    ToolBeforePayload,
     ToolCallIdentity,
     ToolDeny,
-    ToolExecutePayload,
     ToolExecutionResult,
-    ToolPostExecutePayload,
-    ToolPreExecutePayload,
-    ToolResultPayload,
 )
 from ftre_agent_core.llm import ToolCall
 from ftre_agent_core.tool import ToolRegistry
@@ -54,10 +50,10 @@ class ToolHandler:
 
     一次调用的固定顺序是：
 
-    ``pre-execute → execute(around continuation) → post-execute → result``。
+    ``tool/before → Core 私有执行 → tool/after``。
 
-    前三个阶段可以改变决策/参数/结果；最后的 ``result`` 只有观察语义。
-    因此 Core 的工具归一化和取消行为不会被某个宿主的注册表实现绑死。
+    before 可以改变决策/参数，after 可以替换归一化结果；真实 Tool 执行不再
+    暴露为 around Hook，避免宿主拥有第二个执行器或重复执行 continuation。
     """
 
     def __init__(
@@ -121,8 +117,8 @@ class ToolHandler:
         # pre Hook 可以拒绝调用或返回替换参数；原始 arguments 不被原地修改，
         # 使同一批并发 Tool 调用之间不会共享可变参数。
         pre = await self._dispatch(
-            TOOLS_PRE_EXECUTE_SPEC,
-            ToolPreExecutePayload(call, arguments, cancellation),
+            TOOL_BEFORE_SPEC,
+            ToolBeforePayload(call, arguments, cancellation),
         )
         if isinstance(pre, ToolDeny):
             return ToolResult(call_id, name, pre.reason or "Tool denied", pre.reason or "Tool denied", "failed")
@@ -134,8 +130,8 @@ class ToolHandler:
         ctx.metadata["runtime_context"] = state.runtime_context
 
         async def invoke() -> ToolExecutionResult:
-            # 只有 execute Hook 的默认 continuation 会进入这里。异步工具直接
-            # await，同步工具放入线程池，避免阻塞 Core 的事件循环。
+            # 这是 Core 私有执行边界。异步工具直接 await，同步工具放入线程池，
+            # 避免阻塞事件循环；宿主只能通过 before/after 观察或改写边界。
             tool = self.registry.get(name)
             if tool is not None and tool.is_async():
                 resolved = self.registry._resolve_injections(
@@ -161,14 +157,9 @@ class ToolHandler:
             return ToolExecutionResult(output=str(raw), value=raw)
 
         try:
-            # execute 是 around Hook：宿主可以在 invoke 前后增加策略、重试或
-            # 观测，但必须返回统一 ToolExecutionResult 才能继续 Core 状态机。
-            execution = await self._dispatch(
-                TOOLS_EXECUTE_SPEC,
-                ToolExecutePayload(call, arguments, cancellation, invoke),
-            )
+            execution = await invoke()
             if not isinstance(execution, ToolExecutionResult):
-                raise TypeError("tools/execute must return ToolExecutionResult")
+                raise TypeError("Core Tool execution must return ToolExecutionResult")
             if execution.status == "cancelled":
                 raise asyncio.CancelledError
             if execution.status == "failed":
@@ -195,8 +186,8 @@ class ToolHandler:
             result = ToolResult(call_id, name, str(exc), error=str(exc), status="failed")
 
         post = await self._dispatch(
-            TOOLS_POST_EXECUTE_SPEC,
-            ToolPostExecutePayload(
+            TOOL_AFTER_SPEC,
+            ToolAfterPayload(
                 call,
                 arguments,
                 ToolExecutionResult(
@@ -210,26 +201,11 @@ class ToolHandler:
             ),
         )
         if isinstance(post, ToolExecutionResult):
-            # post Hook 只替换“最终展示/状态快照”，不重新执行 Tool。
+            # after Hook 只替换“最终展示/状态快照”，不重新执行 Tool。
             result.result = post.output
             result.error = post.error
             result.status = post.status
             result.metadata = dict(post.metadata)
-        await self._dispatch(
-            # result 是 EMIT 观察点；即使监听器失败，Hook 策略也不会改写本次结果。
-            TOOLS_RESULT_SPEC,
-            ToolResultPayload(
-                call,
-                arguments,
-                ToolExecutionResult(
-                    output=result.result,
-                    status=result.status,
-                    error=result.error,
-                    metadata=result.metadata,
-                    value=result.event,
-                ),
-            ),
-        )
         return result
 
     def spawn(

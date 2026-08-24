@@ -26,12 +26,10 @@ from ..event import (
 )
 from ..hooks import (
     AGENT_BEFORE_REASONING_SPEC,
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     LLM_STREAM_SPEC,
-    TOOLS_EXECUTE_SPEC,
-    TOOLS_POST_EXECUTE_SPEC,
-    TOOLS_PRE_EXECUTE_SPEC,
-    TOOLS_RESULT_SPEC,
+    TOOL_AFTER_SPEC,
+    TOOL_BEFORE_SPEC,
     BeforeReasoningPayload,
     BeforeReasoningResult,
     ContinueTurn,
@@ -40,7 +38,10 @@ from ..hooks import (
     HookMode,
     HookScope,
     HookSpec,
+    StopDecisionPayload,
     StopTurn,
+    ToolAfterPayload,
+    ToolBeforePayload,
 )
 from ..state import AgentState
 from .react import ReActAgent
@@ -59,12 +60,10 @@ from .runner import (
 
 __all__ = [
     "AGENT_BEFORE_REASONING_SPEC",
-    "AGENT_TURN_STOPPING_SPEC",
+    "AGENT_STOP_DECISION_SPEC",
     "LLM_STREAM_SPEC",
-    "TOOLS_EXECUTE_SPEC",
-    "TOOLS_POST_EXECUTE_SPEC",
-    "TOOLS_PRE_EXECUTE_SPEC",
-    "TOOLS_RESULT_SPEC",
+    "TOOL_AFTER_SPEC",
+    "TOOL_BEFORE_SPEC",
     "Acting",
     "AgentState",
     "AgentStreamEvent",
@@ -94,6 +93,7 @@ __all__ = [
     "RetryEvent",
     "RunState",
     "RunStatus",
+    "StopDecisionPayload",
     "StopTurn",
     "TextBlockDeltaEvent",
     "TextBlockEndEvent",
@@ -101,6 +101,8 @@ __all__ = [
     "ThinkingBlockDeltaEvent",
     "ThinkingBlockEndEvent",
     "ThinkingBlockStartEvent",
+    "ToolAfterPayload",
+    "ToolBeforePayload",
     "ToolCallDeltaEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",

@@ -1,4 +1,4 @@
-"""临时脚本：真实 API 验证 Core Hook 管线（Tool / LLM / turn-stopping）。"""
+"""临时脚本：真实 API 验证 Core Hook 管线（Tool / LLM / stop-decision）。"""
 from __future__ import annotations
 
 import asyncio
@@ -12,12 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.hooks import (
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     LLM_STREAM_SPEC,
-    TOOLS_EXECUTE_SPEC,
-    TOOLS_POST_EXECUTE_SPEC,
-    TOOLS_PRE_EXECUTE_SPEC,
-    TOOLS_RESULT_SPEC,
+    TOOL_AFTER_SPEC,
+    TOOL_BEFORE_SPEC,
     ContinueTurn,
     HookMode,
     StopTurn,
@@ -89,50 +87,36 @@ def build_dispatcher() -> DemoHookDispatcher:
 
         return observed_stream()
 
-    async def turn_stopping(payload, next_):
+    async def stop_decision(payload, next_):
         decision = await next_()
         if isinstance(decision, StopTurn):
             print(
-                f"[hook] {AGENT_TURN_STOPPING_SPEC.name}: stop 被拦截 → 继续 "
+                f"[hook] {AGENT_STOP_DECISION_SPEC.name}: stop 被拦截 → 继续 "
                 f"cont={payload.continuation_count}/{payload.max_continuations}"
             )
             return ContinueTurn(
                 prompt="继续工作，检查你刚才的回答是否完整、是否需要补充。",
                 reason="block-stop-for-demo",
             )
-        print(f"[hook] {AGENT_TURN_STOPPING_SPEC.name}: continue={decision.reason!r}")
+        print(f"[hook] {AGENT_STOP_DECISION_SPEC.name}: continue={decision.reason!r}")
         return decision
 
-    async def tool_pre(payload, next_):
+    async def tool_before(payload, next_):
         print(
-            f"[hook] {TOOLS_PRE_EXECUTE_SPEC.name}: "
+            f"[hook] {TOOL_BEFORE_SPEC.name}: "
             f"{payload.call.name} args={dict(payload.arguments)}"
         )
         return await next_()
 
-    async def tool_execute(payload, next_):
-        print(f"[hook] {TOOLS_EXECUTE_SPEC.name}: before {payload.call.name}")
+    async def tool_after(payload, next_):
         result = await next_()
-        print(f"[hook] {TOOLS_EXECUTE_SPEC.name}: output={result.output!r}")
+        print(f"[hook] {TOOL_AFTER_SPEC.name}: status={result.status}")
         return result
-
-    async def tool_post(payload, next_):
-        result = await next_()
-        print(f"[hook] {TOOLS_POST_EXECUTE_SPEC.name}: status={result.status}")
-        return result
-
-    async def tool_result(payload):
-        print(
-            f"[hook] {TOOLS_RESULT_SPEC.name}: "
-            f"{payload.call.name} -> {payload.result.status}"
-        )
 
     dispatcher.on(LLM_STREAM_SPEC, llm_stream)
-    dispatcher.on(AGENT_TURN_STOPPING_SPEC, turn_stopping)
-    dispatcher.on(TOOLS_PRE_EXECUTE_SPEC, tool_pre)
-    dispatcher.on(TOOLS_EXECUTE_SPEC, tool_execute)
-    dispatcher.on(TOOLS_POST_EXECUTE_SPEC, tool_post)
-    dispatcher.on(TOOLS_RESULT_SPEC, tool_result)
+    dispatcher.on(AGENT_STOP_DECISION_SPEC, stop_decision)
+    dispatcher.on(TOOL_BEFORE_SPEC, tool_before)
+    dispatcher.on(TOOL_AFTER_SPEC, tool_after)
     return dispatcher
 
 
