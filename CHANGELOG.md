@@ -1,6 +1,14 @@
 # 版本变更公告
 
-## [未发布]
+## [0.2.0] - 2026-08-24
+
+### C3 Hook 面终局收敛
+
+- Tool Hook 从 `tools/pre-execute`、`tools/execute`、`tools/post-execute`、`tools/result` 收敛为
+  `tool/before` 与 `tool/after`；真实 Tool 执行回归 Core 私有执行边界，避免宿主拥有第二个 continuation。
+- `agent/turn-stopping` 改名为 `agent/stop-decision`，`StopTurn`/`ContinueTurn` 和 continuation 预算语义保持不变。
+- 删除旧 Hook 常量、Spec、DTO、公共导出和测试引用；这是需要 Host 同步升级的破坏性协议变更。
+- 版本提升至 `0.2.0`。
 
 ### C2 Agent before-reasoning Hook
 

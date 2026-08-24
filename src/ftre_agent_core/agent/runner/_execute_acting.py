@@ -8,7 +8,7 @@ ActingExecutor：
   以及取消信号的传播。真正的“如何执行单个工具”由 ToolHandler 负责。
 
 ExitExecutor：
-  负责 Exit 动作的执行——在 Agent 准备结束回复时，先过一遍 turn-stopping Hook，
+  负责 Exit 动作的执行——在 Agent 准备结束回复时，先过一遍 stop-decision Hook，
   根据返回值决定是真的退出还是注入续写提示继续下一轮；真正退出时设置终态并
   产出 ReplyEndEvent。
 """
@@ -29,11 +29,11 @@ from ...event import (
     ToolResultTextDeltaEvent,
 )
 from ...hooks import (
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     ContinueTurn,
     HookDispatcher,
+    StopDecisionPayload,
     StopTurn,
-    TurnStoppingPayload,
 )
 from ...llm import ToolCall
 from ...message import (
@@ -391,16 +391,16 @@ class ActingExecutor:
 # ═══════════════════════════════════════════════════════════════
 
 class ExitExecutor:
-    """执行 Exit 动作：turn-stopping 检查 + 产出 ReplyEnd + 设置终态。
+    """执行 Exit 动作：stop-decision 检查 + 产出 ReplyEnd + 设置终态。
 
-    turn-stopping Hook 的两种路径：
+    stop-decision Hook 的两种路径：
       - block：Hook 决定不让 Agent 停下。此时不产出 ReplyEndEvent、不设终态，
         而是把 Hook 的 reason 作为续写提示注入 memory、yield 一个 HintBlockEvent，
         并把 outcome 置为 should_continue=True，让 react_runner._loop 进入下一轮迭代。
       - allow（或无 Hook / 非 COMPLETED 退出）：正常退出路径——_finalize 设置终态，
         yield ReplyEndEvent，outcome 保持 should_continue=False，主循环收到后 return。
 
-    仅当 finished_reason == COMPLETED 时才触发 turn-stopping：ERROR / EXCEED_MAX_ITERS 属于
+    仅当 finished_reason == COMPLETED 时才触发 stop-decision：ERROR / EXCEED_MAX_ITERS 属于
     异常 / 超限退出，没有“要不要让 Agent 继续”的语义，不需要问 Hook，直接走正常退出。
     """
 
@@ -434,7 +434,7 @@ class ExitExecutor:
         cancellation = self.state.runtime_context.get("cancellation")
         if not isinstance(cancellation, asyncio.Event):
             cancellation = asyncio.Event()
-        payload = TurnStoppingPayload(
+        payload = StopDecisionPayload(
             agent=self.state.runtime_context.get("agent_subject", self.agent),
             session_id=str(self.state.runtime_context.get("session_id", "")),
             turn_id=self.state.turn_id,
@@ -450,24 +450,24 @@ class ExitExecutor:
         if self.hooks is None:
             return StopTurn()
         result = await self.hooks.dispatch(
-            AGENT_TURN_STOPPING_SPEC,
+            AGENT_STOP_DECISION_SPEC,
             payload,
             context=self.hook_context,
         )
         if not isinstance(result, (StopTurn, ContinueTurn)):
-            raise TypeError("agent/turn-stopping must return StopTurn or ContinueTurn")
+            raise TypeError("agent/stop-decision must return StopTurn or ContinueTurn")
         return result
 
     async def stream(self, action: Exit) -> AsyncGenerator[AgentStreamEvent, None]:
-        """执行退出逻辑：先过 turn-stopping Hook，再决定续写还是真正退出。
+        """执行退出逻辑：先过 stop-decision Hook，再决定续写还是真正退出。
 
-        - finished_reason == COMPLETED：触发 turn-stopping，Hook 可 Continue（续写）或 Stop（退出）。
+        - finished_reason == COMPLETED：触发 stop-decision，Hook 可 Continue（续写）或 Stop（退出）。
         - 其它 reason（ERROR / EXCEED_MAX_ITERS / INTERRUPTED）：跳过 Hook，直接退出。
         """
         session_id = self.state.runtime_context.get("session_id", "")
         reply_id = self.state.reply_id
 
-        # ── 仅 COMPLETED 触发 turn-stopping ──
+        # ── 仅 COMPLETED 触发 stop-decision ──
         # ERROR（LLM 调用失败 / 空响应耗尽重试）和 EXCEED_MAX_ITERS（超过最大迭代数）
         # 都是“被迫退出”，没有“让 Hook 决定是否继续”的语义——Hook 没法把一个失败的
         # LLM 调用变成成功，也无法突破迭代上限。故只在 Agent 主动完成（COMPLETED）时，

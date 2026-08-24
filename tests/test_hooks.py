@@ -9,13 +9,13 @@ from ftre_agent_core.agent import ReActAgent
 from ftre_agent_core.agent.runner._execute_acting import ExitExecutor
 from ftre_agent_core.agent.runner._state import Exit, RunState
 from ftre_agent_core.hooks import (
-    AGENT_TURN_STOPPING_SPEC,
+    AGENT_STOP_DECISION_SPEC,
     ContinueTurn,
     HookMode,
+    StopDecisionPayload,
     StopTurn,
+    ToolBeforePayload,
     ToolCallIdentity,
-    ToolPreExecutePayload,
-    TurnStoppingPayload,
 )
 from ftre_agent_core.types import ReplyFinishedReason
 
@@ -27,7 +27,7 @@ class RecordingDispatcher:
 
     async def dispatch(self, spec, payload, *, context=None):
         self.calls.append((spec, payload, context))
-        if spec is AGENT_TURN_STOPPING_SPEC:
+        if spec is AGENT_STOP_DECISION_SPEC:
             return self.result or StopTurn()
         return spec.default(payload) if spec.default else None
 
@@ -47,10 +47,10 @@ def make_state():
 
 
 def test_specs_are_typed_and_waterfall():
-    assert AGENT_TURN_STOPPING_SPEC.mode is HookMode.WATERFALL
+    assert AGENT_STOP_DECISION_SPEC.mode is HookMode.WATERFALL
     assert isinstance(
-        ToolPreExecutePayload(ToolCallIdentity("c1", "echo"), {}, asyncio.Event()),
-        ToolPreExecutePayload,
+        ToolBeforePayload(ToolCallIdentity("c1", "echo"), {}, asyncio.Event()),
+        ToolBeforePayload,
     )
 
 
@@ -78,7 +78,7 @@ async def test_turn_stopping_continue_injects_hint_before_finalize():
     assert executor.outcome.continue_hint == "继续检查结果"
     assert state.done_reason is None
     assert any("继续检查结果" in str(message.get("content", "")) for message in agent.messages)
-    assert isinstance(dispatcher.calls[0][1], TurnStoppingPayload)
+    assert isinstance(dispatcher.calls[0][1], StopDecisionPayload)
 
 
 @pytest.mark.asyncio

@@ -63,7 +63,7 @@ master（仅发布，永不直接提交）← develop（默认基底，只接受
 - agent/：ReActAgent（react.py，ReAct 循环）+ runner/
 - llm/：LLM 调用（LLMAdapter、StreamChunk、协议适配器与 registry 工厂）
 - tool/：工具体系（base.py Tool/ToolParameter/Injected / registry.py ToolRegistry / cancellation.py）
-- hooks.py：宿主注入的 HookDispatcher、HookSpec 与 Tool/LLM/turn-stopping typed contracts
+- hooks.py：宿主注入的 HookDispatcher、HookSpec 与 Tool/LLM/stop-decision typed contracts
 - message/：Msg/MsgName + ContentBlock（text/toolCall/toolResult/image/think）
 - event/：EventBase/CustomEvent（被 Tracer 捕获）
 - permission/：权限引擎（allow/deny/ask，_engine.py/_types.py/_context.py）

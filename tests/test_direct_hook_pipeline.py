@@ -11,10 +11,8 @@ from ftre_agent_core.agent.runner._state import Reasoning, RunState
 from ftre_agent_core.agent.runner.tool_handler import ToolHandler
 from ftre_agent_core.hooks import (
     LLM_STREAM_SPEC,
-    TOOLS_EXECUTE_SPEC,
-    TOOLS_POST_EXECUTE_SPEC,
-    TOOLS_PRE_EXECUTE_SPEC,
-    TOOLS_RESULT_SPEC,
+    TOOL_AFTER_SPEC,
+    TOOL_BEFORE_SPEC,
     ToolArguments,
     ToolExecutionResult,
 )
@@ -35,15 +33,10 @@ class PipelineDispatcher:
 
     async def dispatch(self, spec, payload, *, context=None):
         self.names.append(spec.name)
-        if spec is TOOLS_PRE_EXECUTE_SPEC:
+        if spec is TOOL_BEFORE_SPEC:
             return ToolArguments({"value": "changed"})
-        if spec is TOOLS_EXECUTE_SPEC:
-            raw = await payload.invoke()
-            return ToolExecutionResult(output=raw.output.upper(), value=raw.value)
-        if spec is TOOLS_POST_EXECUTE_SPEC:
-            return ToolExecutionResult(output=payload.result.output + "!")
-        if spec is TOOLS_RESULT_SPEC:
-            return None
+        if spec is TOOL_AFTER_SPEC:
+            return ToolExecutionResult(output=payload.result.output.upper() + "!")
         if spec is LLM_STREAM_SPEC:
             stream = payload.invoke()
 
@@ -68,19 +61,24 @@ def make_state() -> RunState:
 
 
 @pytest.mark.asyncio
-async def test_tool_handler_dispatches_all_four_core_hooks():
+async def test_tool_handler_dispatches_before_and_after_hooks_once():
     dispatcher = PipelineDispatcher()
     registry = ToolRegistry()
-    registry.register(Tool(name="echo", func=lambda value: value))
+    calls = []
+
+    def echo(value):
+        calls.append(value)
+        return value
+
+    registry.register(Tool(name="echo", func=echo))
     result = await ToolHandler(registry, dispatcher).run_one(
         "call-1", "echo", {"value": "original"}, make_state()
     )
     assert result.result == "CHANGED!"
+    assert calls == ["changed"]
     assert dispatcher.names == [
-        "tools/pre-execute",
-        "tools/execute",
-        "tools/post-execute",
-        "tools/result",
+        "tool/before",
+        "tool/after",
     ]
 
 
