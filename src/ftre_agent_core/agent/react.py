@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 class ReActAgent:
+    """一个可复用的 Agent 外壳，持有持久状态并委托一次性运行给 Runner。
+
+    这里故意不保存 Channel、Session 或 Plugin 注册表：宿主每次调用 ``run``
+    时通过 ``runtime_context`` 提供本轮坐标，Hook Dispatcher 则作为纯协议
+    注入。这样同一个 Core 包既能被 ftre 使用，也能在没有 Gateway 的测试中运行。
+    """
+
     def __init__(
         self,
         model: str,
@@ -34,6 +41,9 @@ class ReActAgent:
         hooks: HookDispatcher | None = None,
         hook_context: object | None = None,
     ):
+        # 下面这些字段是“静态 Agent 配置”；本次 run 的 iteration、reply_id、
+        # cancellation 等短生命周期状态统一放在 ReActRunner.state，避免多次
+        # 调用之间串用临时数据。
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
@@ -93,8 +103,15 @@ class ReActAgent:
     async def run(
         self, message, runtime_context: dict | None = None
     ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """启动一次异步 ReAct 流；真正执行发生在调用方开始迭代之后。
+
+        ``message`` 可以是新用户输入，也可以是权限确认事件。Core 只负责把
+        两者交给 Runner 的相应状态机路径；session_id、turn_id 等宿主坐标不
+        作为 Core 全局状态保存，而是随 ``runtime_context`` 进入本次 RunState。
+        """
         async for event in self._runner.run(message, runtime_context=runtime_context):
             yield event
 
     def cancel_nowait(self) -> None:
+        """请求取消当前 Task；取消结果通过正常的 ReplyEnd 流通知宿主。"""
         self._runner.cancel_nowait()

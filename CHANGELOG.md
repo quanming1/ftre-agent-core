@@ -2,6 +2,14 @@
 
 ## [未发布]
 
+### C2 Agent before-reasoning Hook
+
+- 新增 `agent/before-reasoning` typed contract，在每次 ReAct Reasoning（首次、Tool 后、
+  continuation 后）调用 LLM 前让宿主贡献普通 message。
+- Core 只消费 `BeforeReasoningPayload/Result`，不依赖 ftre、Inbox 或队列模型；ftre-inbox
+  可通过同一个 `HookSpec` 在 active Turn 中原子消费 `next-step`。
+- 版本提升至 `0.1.2`；Core 238 项测试与 ruff 全量通过。
+
 ## [0.1.1] - 2026-08-22
 
 ### C1 Agent Core 直接 Hook 协议

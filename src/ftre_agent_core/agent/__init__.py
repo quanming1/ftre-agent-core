@@ -25,12 +25,15 @@ from ..event import (
     UserConfirmResultEvent,
 )
 from ..hooks import (
+    AGENT_BEFORE_REASONING_SPEC,
     AGENT_TURN_STOPPING_SPEC,
     LLM_STREAM_SPEC,
     TOOLS_EXECUTE_SPEC,
     TOOLS_POST_EXECUTE_SPEC,
     TOOLS_PRE_EXECUTE_SPEC,
     TOOLS_RESULT_SPEC,
+    BeforeReasoningPayload,
+    BeforeReasoningResult,
     ContinueTurn,
     HookDispatcher,
     HookFailurePolicy,
@@ -55,6 +58,7 @@ from .runner import (
 )
 
 __all__ = [
+    "AGENT_BEFORE_REASONING_SPEC",
     "AGENT_TURN_STOPPING_SPEC",
     "LLM_STREAM_SPEC",
     "TOOLS_EXECUTE_SPEC",
@@ -64,6 +68,8 @@ __all__ = [
     "Acting",
     "AgentState",
     "AgentStreamEvent",
+    "BeforeReasoningPayload",
+    "BeforeReasoningResult",
     "CancelledError",
     "ContinueTurn",
     "EventBase",

@@ -50,7 +50,15 @@ class ToolResult:
 
 
 class ToolHandler:
-    """执行工具并在原始调用边界直接消费宿主 Hook Dispatcher。"""
+    """执行单个 Tool，并在原始调用边界直接消费宿主 Hook Dispatcher。
+
+    一次调用的固定顺序是：
+
+    ``pre-execute → execute(around continuation) → post-execute → result``。
+
+    前三个阶段可以改变决策/参数/结果；最后的 ``result`` 只有观察语义。
+    因此 Core 的工具归一化和取消行为不会被某个宿主的注册表实现绑死。
+    """
 
     def __init__(
         self,
@@ -79,6 +87,8 @@ class ToolHandler:
         )
 
     async def _dispatch(self, spec, payload):
+        # 没有宿主 Dispatcher 时直接走 Spec.default，保证 Core 可独立运行；
+        # 有 Dispatcher 时把作用域交给宿主，Core 不解释 hook_context。
         if self.hooks is None:
             result = spec.default(payload) if spec.default else None
             return await result if asyncio.iscoroutine(result) else result
@@ -92,6 +102,12 @@ class ToolHandler:
         state: RunState,
         parse_failed: bool = False,
     ) -> ToolResult:
+        """执行一个 Tool 调用并返回归一化结果。
+
+        ``parse_failed`` 在真正执行前短路，避免把非法 JSON 当成 Tool 参数；
+        其余异常被转换为失败 ToolResult，只有外部取消继续以 CancelledError
+        语义传播到并发收集器。
+        """
         if parse_failed:
             return ToolResult(
                 call_id, name,
@@ -102,6 +118,8 @@ class ToolHandler:
 
         cancellation = self._cancellation(state)
         call = self._identity(state, call_id, name)
+        # pre Hook 可以拒绝调用或返回替换参数；原始 arguments 不被原地修改，
+        # 使同一批并发 Tool 调用之间不会共享可变参数。
         pre = await self._dispatch(
             TOOLS_PRE_EXECUTE_SPEC,
             ToolPreExecutePayload(call, arguments, cancellation),
@@ -116,6 +134,8 @@ class ToolHandler:
         ctx.metadata["runtime_context"] = state.runtime_context
 
         async def invoke() -> ToolExecutionResult:
+            # 只有 execute Hook 的默认 continuation 会进入这里。异步工具直接
+            # await，同步工具放入线程池，避免阻塞 Core 的事件循环。
             tool = self.registry.get(name)
             if tool is not None and tool.is_async():
                 resolved = self.registry._resolve_injections(
@@ -141,6 +161,8 @@ class ToolHandler:
             return ToolExecutionResult(output=str(raw), value=raw)
 
         try:
+            # execute 是 around Hook：宿主可以在 invoke 前后增加策略、重试或
+            # 观测，但必须返回统一 ToolExecutionResult 才能继续 Core 状态机。
             execution = await self._dispatch(
                 TOOLS_EXECUTE_SPEC,
                 ToolExecutePayload(call, arguments, cancellation, invoke),
@@ -188,11 +210,13 @@ class ToolHandler:
             ),
         )
         if isinstance(post, ToolExecutionResult):
+            # post Hook 只替换“最终展示/状态快照”，不重新执行 Tool。
             result.result = post.output
             result.error = post.error
             result.status = post.status
             result.metadata = dict(post.metadata)
         await self._dispatch(
+            # result 是 EMIT 观察点；即使监听器失败，Hook 策略也不会改写本次结果。
             TOOLS_RESULT_SPEC,
             ToolResultPayload(
                 call,

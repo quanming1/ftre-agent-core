@@ -44,6 +44,11 @@ from ...event import (
     RequireUserConfirmEvent,
     UserConfirmResultEvent,
 )
+from ...hooks import (
+    AGENT_BEFORE_REASONING_SPEC,
+    BeforeReasoningPayload,
+    BeforeReasoningResult,
+)
 from ...llm import LLMAdapter, create_llm_handler
 from ...message import ToolCallBlock, ToolCallState
 from ...message_context import MessageContext
@@ -495,6 +500,39 @@ class ReActRunner:
         if self._run_task is not None and not self._run_task.done():
             self._run_task.cancel()
 
+    async def _dispatch_before_reasoning(self) -> BeforeReasoningResult:
+        """在每次真实 LLM Reasoning 前消费宿主贡献的上下文。
+
+        这是 Core 唯一需要知道的 active-step 边界：队列、claim 和消息来源
+        都留在宿主 Hook。取消一旦已经发出，不再让 Hook 注入新的消息。
+        """
+        cancellation = self.state.runtime_context.get("cancellation")
+        if not isinstance(cancellation, asyncio.Event):
+            cancellation = asyncio.Event()
+        if self.state.is_cancelled or cancellation.is_set():
+            raise asyncio.CancelledError
+
+        payload = BeforeReasoningPayload(
+            agent=self.state.runtime_context.get("agent_subject", self.agent),
+            session_id=str(self.state.runtime_context.get("session_id", "")),
+            turn_id=self.state.turn_id,
+            iteration=self.state.iteration,
+            cancellation=cancellation,
+        )
+        AGENT_BEFORE_REASONING_SPEC.validate_payload(payload)
+        if self.agent.hooks is None:
+            result = await AGENT_BEFORE_REASONING_SPEC.default(payload)
+        else:
+            result = await self.agent.hooks.dispatch(
+                AGENT_BEFORE_REASONING_SPEC,
+                payload,
+                context=self.agent.hook_context,
+            )
+        AGENT_BEFORE_REASONING_SPEC.validate_result(result)
+        if self.state.is_cancelled or cancellation.is_set():
+            raise asyncio.CancelledError
+        return result
+
     async def _loop(self) -> AsyncGenerator[AgentStreamEvent, None]:
         """ReAct 主循环：Reason → Act → Observe。
 
@@ -535,6 +573,15 @@ class ReActRunner:
                 if isinstance(action, Reasoning):
                     # ── Reasoning：调 LLM ──
                     self.state.iteration += 1
+                    before_reasoning = await self._dispatch_before_reasoning()
+                    # Hook 返回的是 Provider 无关的只读 mapping；转换为普通 dict
+                    # 后交给 MessageContext，确保 Core 不把宿主的 mapping 作为可变
+                    # Memory 对象长期持有。
+                    for message in before_reasoning.messages:
+                        MessageContext.add_raw(
+                            self.agent.state.context,
+                            dict(message),
+                        )
                     # 执行 LLM 调用 + 流式消费 + 重试
                     async for event in reasoning_executor.stream(action):
                         yield event
