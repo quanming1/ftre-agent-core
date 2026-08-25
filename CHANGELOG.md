@@ -1,5 +1,22 @@
 # 版本变更公告
 
+## [0.3.0] - 2026-08-25
+
+### C4 UserMessage 与 Assistant message_id 边界
+
+- `reply_id` 继续关联整次 Agent Reply，新增 `message_id` 关联具体 AssistantMsg；一次
+  run 可以自然形成 `Assistant A → UserMessage → Assistant B`。
+- `BeforeReasoningResult` 保持只有 `messages`；正式 `role=user` mapping 自动让下一次
+  Reasoning 旋转到新的 Assistant message_id，不增加边界布尔字段。
+- Reasoning、Acting、Tool/权限恢复、Msg.append_event 和流式事件统一使用 message_id；
+  Core 不持有 Inbox、Session 或队列状态。
+- C4 全量 240 tests、ruff、wheel 与临时 venv 洁净安装通过。
+
+### C4 发布说明
+
+- 这是一个需要宿主同步升级的协议版本：事件新增 `message_id`，用于区分同一 Reply
+  中的多条 Assistant 消息；旧版 Core 不提供该边界。
+
 ## [0.2.0] - 2026-08-24
 
 ### C3 Hook 面终局收敛
