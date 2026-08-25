@@ -1,6 +1,8 @@
 # 版本变更公告
 
-### 未发布修复
+## [0.2.2] - 2026-08-25
+
+### B2 / C5 / C6 修复与协议增强
 
 - 新增 `LLMStreamPayload.attempt/max_attempts` 元数据；每次真实 Core Retry 都重新发布
   `llm/stream` Payload，为 ftre 的最后一次 fallback 提供确定坐标。Core 不创建备用 Adapter。
