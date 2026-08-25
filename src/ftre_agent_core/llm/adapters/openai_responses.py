@@ -16,6 +16,7 @@ Responses API 的流事件有显式的 item 边界（OutputItemAdded / OutputIte
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -56,10 +57,19 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
         try:
             # Responses API 也从同一份 Chat 消息历史转换而来，先复用同一个工具调用
             # 协议边界，避免把孤立 function_call_output 传给 provider。
-            request_messages = _normalize_chat_messages(messages)
+            reasoning_enabled = bool(
+                self.reasoning_effort and self.reasoning_effort != "none"
+            )
+            request_messages = _normalize_chat_messages(
+                messages,
+                preserve_reasoning_only=reasoning_enabled,
+            )
             llm_log.log_input(request_messages, tools)
 
-            instructions, input_items = _convert_messages_to_responses_input(request_messages)
+            instructions, input_items = _convert_messages_to_responses_input(
+                request_messages,
+                include_reasoning=reasoning_enabled,
+            )
             resp_tools = _convert_tools_to_responses(tools) if tools else []
 
             params: dict[str, Any] = {
@@ -75,7 +85,7 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 params["max_output_tokens"] = max(1, int(self.max_tokens))
             if self.temperature is not None:
                 params["temperature"] = self.temperature
-            if self.reasoning_effort and self.reasoning_effort != "none":
+            if reasoning_enabled:
                 params["reasoning"] = {"effort": self.reasoning_effort}
             if resp_tools:
                 params["tools"] = resp_tools
@@ -116,7 +126,15 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                         yield TextDeltaChunk(index=entry["index"], text=delta)
 
                 # ── 推理增量（如果网关支持流式返回推理文本）──
-                elif event_type == "ResponseReasoningDeltaEvent":
+                # OpenAI SDK 的 Responses 事件实际分为 reasoning_text 和
+                # reasoning_summary 两种命名；部分旧 fake/网关仍使用
+                # ResponseReasoningDeltaEvent。三者都归一为同一个 reasoning 块，
+                # 否则真实的 ResponseReasoningTextDeltaEvent 会被静默忽略。
+                elif event_type in {
+                    "ResponseReasoningDeltaEvent",
+                    "ResponseReasoningTextDeltaEvent",
+                    "ResponseReasoningSummaryTextDeltaEvent",
+                }:
                     item_id = get_attr(event, "item_id", "")
                     delta = get_attr(event, "delta")
                     if delta:
@@ -333,6 +351,8 @@ def _convert_assistant_content_to_responses(content: Any) -> Any:
 
 def _convert_messages_to_responses_input(
     messages: list[dict],
+    *,
+    include_reasoning: bool = False,
 ) -> tuple[str | None, list[dict]]:
     """Chat Completions messages → Responses API (instructions, input)。
 
@@ -345,6 +365,7 @@ def _convert_messages_to_responses_input(
     """
     instructions: str | None = None
     input_items: list[dict] = []
+    reasoning_ordinal = 0
 
     for msg in messages:
         role = msg.get("role", "")
@@ -371,6 +392,29 @@ def _convert_messages_to_responses_input(
 
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
+            reasoning_text = msg.get("reasoning_content")
+            if (
+                include_reasoning
+                and isinstance(reasoning_text, str)
+                and reasoning_text
+            ):
+                # Responses thinking mode 要求上一轮 reasoning_text 原样回传。
+                # Core 的稳定事实是 ThinkingBlock 文本，不保存供应商私有 item；
+                # 因此按序号 + 内容生成稳定 id，并重建标准 reasoning input item。
+                digest = hashlib.sha256(
+                    f"{reasoning_ordinal}\0{reasoning_text}".encode()
+                ).hexdigest()[:24]
+                reasoning_ordinal += 1
+                input_items.append({
+                    "type": "reasoning",
+                    "id": f"rs_{digest}",
+                    "summary": [],
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": reasoning_text,
+                    }],
+                    "status": "completed",
+                })
             content = _convert_assistant_content_to_responses(content)
             if tool_calls:
                 if content:

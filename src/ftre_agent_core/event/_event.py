@@ -197,6 +197,10 @@ class ToolCallEndEvent(EventBase):
     type: Literal["TOOL_CALL_END"] = "TOOL_CALL_END"
     reply_id: str
     tool_call_id: str
+    # 完整的原始 JSON 参数。增量事件用于实时展示，结束事件是客户端恢复和
+    # 持久化对齐的最终事实；保留字符串可覆盖丢失/乱序的 delta，也不丢失
+    # Provider 返回的原始 JSON 形态。
+    arguments: str = ""
 
 
 # ── 工具结果流式 ──

@@ -312,7 +312,14 @@ class Msg(BaseModel):
         elif et == "TOOL_CALL_END":
             block = self._find_block("tool_call", event.tool_call_id)
             if block is not None:
-                raw = self._tool_call_input_buf.pop(event.tool_call_id, "")
+                # END 携带完整原始参数时，以它作为最终事实。delta 只是实时
+                # 展示用的增量；这样即使某些 delta 经 WebSocket 丢失，持久化
+                # Msg 仍能得到完整的工具入参。旧事件没有 arguments 时再回退
+                # 到本地缓冲，避免改变已有事件重建行为。
+                raw = event.arguments or self._tool_call_input_buf.get(
+                    event.tool_call_id, ""
+                )
+                self._tool_call_input_buf.pop(event.tool_call_id, None)
                 try:
                     block.arguments = json.loads(raw) if raw else {}
                 except (json.JSONDecodeError, TypeError):

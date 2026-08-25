@@ -78,13 +78,13 @@ stages:
 
       - id: B2
         title: LLM 协议适配层
-        status: done
+        status: in_progress
         date: 2026-08-19
         prd: docs/prd/PRD-B2-llm-adapter.md
-        prd_status: 已验收
+        prd_status: 开发中
         modules:
           - src/ftre_agent_core/llm/（契约层 + 协议注册表 + 适配器）
-        acceptance: LLMAdapter 契约 + create_llm_handler 工厂就位；completions/responses 两适配器行为与现状逐字节等价；消费方零协议感知；新协议接入只加文件 + 注册表一行
+        acceptance: LLMAdapter 契约 + create_llm_handler 工厂就位；completions/responses 两适配器行为与现状逐字节等价；消费方零协议感知；新协议接入只加文件 + 注册表一行；补充完成 Responses 原始 Output Item 重放、输出态字段隔离和 Vision input_image 契约
 
   - id: C
     name: 宿主 Hook 协议集成
@@ -183,4 +183,62 @@ stages:
             status: done
           - id: C4.4
             title: Core 全量门禁与跨仓发行候选
+            status: done
+
+      - id: C5
+        title: LLM Error Hook 与可插拔恢复决策
+        status: done
+        date: 2026-08-25
+        prd: docs/prd/PRD-C5-llm-error-hook.md
+        prd_status: 已验收
+        completed_date: 2026-08-25
+        depends_on:
+          - C4
+        paired_stage: E:\\ftre F28
+        implementation_boundary: 只修改 Agent Core 的 Hook 契约、ReasoningExecutor 失败决策调用、Core 测试与发行元数据；ftre F28 负责 Host 重导出和可选恢复 Plugin；不修改 Cordis、Desktop、Inbox 或 Session 协议
+        modules:
+          - src/ftre_agent_core/hooks.py（llm/error 契约）
+          - src/ftre_agent_core/agent/runner/_execute_reasoning.py（失败决策边界）
+          - tests/（Hook、重试、取消、错误归一化回归）
+          - pyproject.toml / CHANGELOG.md（版本与发行候选）
+        acceptance: 每次 LLM attempt 失败后可通过 llm/error 决定 retry/stop；Core 继续唯一拥有重试循环、RetryEvent、取消、消息重读和流式收尾；无监听器时行为与当前完全一致；Hook 失败 fail-open；pytest、ruff、wheel 和洁净安装通过
+        tasks:
+          - id: C5.1
+            title: 两仓失败路径与 Hook 消费者基线
+            status: done
+          - id: C5.2
+            title: llm/error Core 契约与默认策略接线
+            status: done
+          - id: C5.3
+            title: ftre Host 重导出与 llm-recovery Package
+            status: done
+          - id: C5.4
+            title: 跨仓生命周期、失败安全与发行验收
+            status: done
+
+      - id: C6
+        title: LLM Stream Fallback 尝试元数据
+        status: done
+        date: 2026-08-25
+        prd: docs/prd/PRD-C6-llm-stream-fallback.md
+        prd_status: 已验收
+        completed_date: 2026-08-25
+        depends_on:
+          - C5
+        paired_stage: E:\\ftre F29
+        implementation_boundary: 只修改 Agent Core 的 LLMStreamPayload、ReasoningExecutor 调用元数据、Core 测试与发行元数据；fallback 算法、模型解析和 Plugin 生命周期由 ftre F29 负责；不修改 Cordis、Inbox、Session 或客户端
+        modules:
+          - src/ftre_agent_core/hooks.py（LLMStreamPayload attempt/max_attempts）
+          - src/ftre_agent_core/agent/runner/_execute_reasoning.py（每次 attempt 绑定元数据）
+          - tests/（流 Hook 与 Retry 对齐回归）
+        acceptance: 每个 LLM attempt 的 llm/stream Payload 提供 1-based attempt/max_attempts；Core 不创建备用 Adapter；无 Hook 行为不变；C5 合同、pytest、ruff、wheel 和洁净安装通过
+        tasks:
+          - id: C6.1
+            title: LLMStreamPayload 元数据与版本基线
+            status: done
+          - id: C6.2
+            title: Reasoning attempt 对齐与流错误回归
+            status: done
+          - id: C6.3
+            title: Core 发行与跨仓合同验收
             status: done

@@ -1,5 +1,19 @@
 # 版本变更公告
 
+### 未发布修复
+
+- 新增 `LLMStreamPayload.attempt/max_attempts` 元数据；每次真实 Core Retry 都重新发布
+  `llm/stream` Payload，为 ftre 的最后一次 fallback 提供确定坐标。Core 不创建备用 Adapter。
+- 新增 `llm/error` Core Hook：宿主 Plugin 可在一次 LLM attempt 失败后返回 retry/stop
+  决策；Core 继续唯一拥有重试循环、次数上限、取消、RetryEvent 和流式收尾。
+- 修复 Responses API 适配器漏识别 `ResponseReasoningTextDeltaEvent`，DeepSeek V4 Flash
+  通过 OpenCode 直连返回的思考增量现在会正确转换为 Core `thinking` block；同时兼容
+  `ResponseReasoningSummaryTextDeltaEvent`。
+- 修复 Responses thinking 模式的多轮 Tool Loop：下一轮请求会把已持久化思考重建为
+  标准 reasoning input item，避免 DeepSeek V4 Flash 返回“reasoning_text must be passed back”。
+- Tool Call 结束事件现在携带完整原始 `arguments`，并修复 Completions 参数先到、call_id
+  后到时的首段丢失；客户端可用结束事件恢复实时入参。
+
 ## [0.2.1] - 2026-08-25
 
 ### C4 UserMessage 与 Assistant message_id 边界

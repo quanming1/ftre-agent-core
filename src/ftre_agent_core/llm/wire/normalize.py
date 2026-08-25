@@ -11,7 +11,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
+def _normalize_chat_messages(
+    messages: list[dict],
+    *,
+    preserve_reasoning_only: bool = False,
+) -> list[dict]:
     """复制并规范化 Chat Completions 消息，不污染调用方的 memory/history。
 
     遵循 OpenAI-compatible 工具调用语义：
@@ -32,9 +36,11 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
 
     def has_assistant_payload(message: dict) -> bool:
         # OpenAI-compatible providers require visible content or tool_calls.
-        # reasoning_content alone is provider-specific metadata, not a valid
-        # assistant payload.
-        return bool(message.get("content"))
+        # Responses thinking mode 是例外：上一轮 reasoning_text 必须作为
+        # reasoning item 回传，因此允许调用方保留 reasoning-only assistant。
+        return bool(message.get("content")) or (
+            preserve_reasoning_only and bool(message.get("reasoning_content"))
+        )
 
     # OpenAI-compatible provider 要求 assistant.tool_calls 后紧跟、且只紧跟
     # 每个 call 一条对应 tool result。持久化快照在中断或并发工具时可能不完整，

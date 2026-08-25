@@ -46,7 +46,14 @@ from ...event import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from ...hooks import LLM_STREAM_SPEC, HookDispatcher, LLMStreamPayload
+from ...hooks import (
+    LLM_ERROR_SPEC,
+    LLM_STREAM_SPEC,
+    HookDispatcher,
+    LLMErrorDecision,
+    LLMErrorPayload,
+    LLMStreamPayload,
+)
 from ...llm import (
     BlockAssembler,
     BlockEnd,
@@ -115,7 +122,7 @@ class ReasoningExecutor:
         self.hook_context = hook_context
         self.result: TurnResult | None = None
 
-    async def _stream(self, messages, tools):
+    async def _stream(self, messages, tools, *, attempt: int, max_attempts: int):
         cancellation = self.state.runtime_context.get("cancellation")
         if not isinstance(cancellation, asyncio.Event):
             cancellation = asyncio.Event()
@@ -132,6 +139,8 @@ class ReasoningExecutor:
             tools=tuple(tools or ()),
             cancellation=cancellation,
             invoke=lambda: self.llm.stream(messages, tools),
+            attempt=attempt,
+            max_attempts=max_attempts,
         )
         stream = await self.hooks.dispatch(
             LLM_STREAM_SPEC,
@@ -266,7 +275,12 @@ class ReasoningExecutor:
                 assembler = BlockAssembler()
 
                 # ── 阶段 4：流式消费 StreamChunk ───────────────────────────────
-                async for chunk in self._stream(messages, tools):
+                async for chunk in self._stream(
+                    messages,
+                    tools,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                ):
                     # 首个 chunk 到达时记录 TTFT（仅本轮一次）
                     if not first_token_logged:
                         first_token_logged = True
@@ -322,7 +336,11 @@ class ReasoningExecutor:
                             if call_id not in tool_call_started:
                                 tool_call_started.add(call_id)
                                 yield ToolCallStartEvent(reply_id=reply_id, tool_call_id=call_id, tool_call_name=name)
-                            yield ToolCallEndEvent(reply_id=reply_id, tool_call_id=call_id)
+                            yield ToolCallEndEvent(
+                                reply_id=reply_id,
+                                tool_call_id=call_id,
+                                arguments=arguments,
+                            )
                             tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
                         elif block_type == "text":
                             if text_block_id is not None:
@@ -517,13 +535,33 @@ class ReasoningExecutor:
                 # 是否已是最后一次尝试
                 is_last = attempt >= max_attempts - 1
 
+                # 在 Core 默认 retry/stop 分支之前发布一次失败决策 Hook。
+                # Hook 只改变“是否继续”的建议；attempt 上限、取消、RetryEvent、
+                # 消息重读和半截输出清理仍由本执行器拥有。
+                decision = await self._dispatch_llm_error(
+                    err,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+
                 logger.warning(
                     "LLM 调用失败 [%s] %s (第 %d/%d 次尝试)",
                     err.code, err.message[:200], attempt + 1, max_attempts,
                 )
 
+                # 没有策略 Plugin 时保持原有错误分类；Plugin 可以明确请求 stop，
+                # 但任何决定都不能突破最后一次 attempt 或取消屏障。
+                should_retry = (
+                    err.code not in LLMError.UNRETRYABLE_CODES
+                    and not is_last
+                )
+                if decision is not None:
+                    should_retry = decision.action == "retry"
+                if is_last or self.state.is_cancelled:
+                    should_retry = False
+
                 # 不可重试错误（如鉴权失败、请求非法）或次数耗尽 → 组装带 error 的 TurnResult 返回
-                if err.code in LLMError.UNRETRYABLE_CODES or is_last:
+                if not should_retry:
                     self.result = TurnResult(
                         text="",
                         reasoning="",
@@ -541,8 +579,15 @@ class ReasoningExecutor:
                     attempt=attempt + 1,
                     max_attempts=max_attempts - 1,
                 )
-                # 退避等待后进入下一轮
-                await asyncio.sleep(self.agent.retry_delay)
+                # 退避等待后进入下一轮。Plugin 提供 delay 时只影响本次等待；
+                # 未提供时沿用既有 Agent 配置，保持无监听器行为不变。
+                delay = self.agent.retry_delay
+                if decision is not None and decision.delay is not None:
+                    try:
+                        delay = max(0.0, float(decision.delay))
+                    except (TypeError, ValueError):
+                        delay = self.agent.retry_delay
+                await asyncio.sleep(delay)
                 # 重新读取 messages（memory 可能在等待期间被改动）
                 messages = MessageContext.get_messages(self.agent.state.context, self.agent.system_prompt)
                 # 重置收集器，避免上一轮的半截内容污染下一轮
@@ -552,3 +597,54 @@ class ReasoningExecutor:
                 finish_reason = "unknown"
                 usage = None
                 response_metadata = {}
+
+    async def _dispatch_llm_error(
+        self,
+        error: LLMError,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> LLMErrorDecision | None:
+        """发布一次 LLM 失败决策 Hook，并在可选 Plugin 故障时回到默认策略。"""
+
+        cancellation = self.state.runtime_context.get("cancellation")
+        if not isinstance(cancellation, asyncio.Event):
+            cancellation = asyncio.Event()
+        if self.state.is_cancelled or cancellation.is_set():
+            return None
+
+        payload = LLMErrorPayload(
+            session_id=str(self.state.runtime_context.get("session_id", "")),
+            turn_id=self.state.turn_id,
+            iteration=self.state.iteration,
+            model=getattr(self.llm, "model", ""),
+            error_code=error.code,
+            error_message=error.message,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            cancellation=cancellation,
+            agent_id=str(self.state.runtime_context.get("agent_id", "")),
+        )
+        try:
+            if self.hooks is None:
+                result = await LLM_ERROR_SPEC.default(payload)
+            else:
+                result = await self.hooks.dispatch(
+                    LLM_ERROR_SPEC,
+                    payload,
+                    context=self.hook_context,
+                )
+            LLM_ERROR_SPEC.validate_result(result)
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Retry Policy 是可选行为；监听器异常不能把原始 LLM 错误升级成
+            # 另一种 Agent 异常，Core 回到原有默认分类。
+            logger.exception(
+                "[llm/error] listener failed session=%s attempt=%s/%s",
+                payload.session_id,
+                payload.attempt,
+                payload.max_attempts,
+            )
+            return None
