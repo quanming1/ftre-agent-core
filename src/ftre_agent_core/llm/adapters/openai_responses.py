@@ -16,7 +16,6 @@ Responses API 的流事件有显式的 item 边界（OutputItemAdded / OutputIte
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 import logging
@@ -69,6 +68,9 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
             instructions, input_items = _convert_messages_to_responses_input(
                 request_messages,
                 include_reasoning=reasoning_enabled,
+                allow_legacy_reasoning_content=_legacy_reasoning_content_supported(
+                    self.model
+                ),
             )
             resp_tools = _convert_tools_to_responses(tools) if tools else []
 
@@ -323,22 +325,53 @@ def _serialize_response_item(item: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) and value.get("type") else {}
 
 
-def _sanitize_reasoning_item(item: Any) -> dict[str, Any] | None:
-    """把返回态 reasoning item 转成可写入下一次 input 的最小字段集。
+def _legacy_reasoning_content_supported(model: str) -> bool:
+    """判断是否启用旧式 reasoning_text 回传兼容。
 
-    Responses 返回对象可能带 ``status``、时间戳或供应商扩展字段；这些字段
-    只能留在 response_metadata，不能未经筛选复制到请求 input。``status``
-    因此在这里明确丢弃。
+    OpenCode 的 DeepSeek thinking 协议仍要求把 ``reasoning_text`` 放回下一轮；
+    GPT Responses 则要求 reasoning input 不带 ``content``。未知模型默认走更
+    严格的 input-safe 路径。
+    """
+    return "deepseek" in model.lower()
+
+
+def _sanitize_reasoning_item(
+    item: Any,
+    *,
+    allow_content: bool = False,
+) -> dict[str, Any] | None:
+    """把返回态 reasoning item 转成可重放的 Responses input item。
+
+    ``content`` 是模型返回的 reasoning 文本，不是跨 provider 稳定的 input
+    字段。Console Go 的 GPT Responses 对 reasoning input 明确要求 ``content``
+    为空；无状态多轮应优先使用供应商返回的 ``encrypted_content``，其次使用
+    reasoning ``summary``。仅对明确要求旧式 reasoning_text 的 DeepSeek 兼容路径
+    保留 content。完整返回对象仍由 ``_serialize_response_item`` 保存到 response
+    metadata，不能把持久化快照和请求协议混为一谈。
     """
     value = _serialize_response_item(item)
     if value.get("type") != "reasoning":
         return None
-    allowed = ("type", "id", "summary", "content", "encrypted_content")
+    allowed = ("type", "id", "summary", "encrypted_content")
+    if allow_content:
+        allowed += ("content",)
     result = {key: value[key] for key in allowed if key in value}
-    return result or None
+    # 只有 id/type 而没有 encrypted_content 或 summary 的 reasoning item
+    # 无法恢复模型状态；DeepSeek 兼容路径则允许使用返回的 content 恢复。
+    if (
+        not result.get("encrypted_content")
+        and not result.get("summary")
+        and not (allow_content and result.get("content"))
+    ):
+        return None
+    return result
 
 
-def _reasoning_replay_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+def _reasoning_replay_items(
+    message: dict[str, Any],
+    *,
+    allow_content: bool = False,
+) -> list[dict[str, Any]]:
     """读取 Host 写入 assistant 消息的原始 reasoning Output Item。"""
     candidates: Any = message.get("responses_output_items")
     if candidates is None:
@@ -353,7 +386,7 @@ def _reasoning_replay_items(message: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     result: list[dict[str, Any]] = []
     for item in candidates:
-        sanitized = _sanitize_reasoning_item(item)
+        sanitized = _sanitize_reasoning_item(item, allow_content=allow_content)
         if sanitized is not None:
             result.append(sanitized)
     return result
@@ -431,6 +464,7 @@ def _convert_messages_to_responses_input(
     messages: list[dict],
     *,
     include_reasoning: bool = False,
+    allow_legacy_reasoning_content: bool = False,
 ) -> tuple[str | None, list[dict]]:
     """Chat Completions messages → Responses API (instructions, input)。
 
@@ -443,8 +477,8 @@ def _convert_messages_to_responses_input(
     """
     instructions: str | None = None
     input_items: list[dict] = []
-    reasoning_ordinal = 0
     legacy_reasoning_count = 0
+    omitted_reasoning_count = 0
 
     for msg in messages:
         role = msg.get("role", "")
@@ -473,27 +507,31 @@ def _convert_messages_to_responses_input(
             tool_calls = msg.get("tool_calls")
             reasoning_text = msg.get("reasoning_content")
             if include_reasoning and isinstance(reasoning_text, str) and reasoning_text:
-                replay_items = _reasoning_replay_items(msg)
+                replay_items = _reasoning_replay_items(
+                    msg,
+                    allow_content=allow_legacy_reasoning_content,
+                )
                 if replay_items:
                     input_items.extend(replay_items)
-                else:
-                    # 旧会话没有保存 Output Item 时只能走降级路径。它保留
-                    # reasoning_text 语义，但绝不拼接 API 返回态 status 字段；
-                    # 新会话会优先走上面的原始 Item 重放分支。
-                    digest = hashlib.sha256(
-                        f"{reasoning_ordinal}\0{reasoning_text}".encode()
-                    ).hexdigest()[:24]
-                    reasoning_ordinal += 1
+                elif allow_legacy_reasoning_content:
+                    # OpenCode DeepSeek thinking 模式的窄兼容路径：旧会话没有
+                    # Output Item 时，必须把 reasoning_text 重建为 provider 要求的
+                    # reasoning_text content。GPT Responses 不走此分支。
                     legacy_reasoning_count += 1
                     input_items.append({
                         "type": "reasoning",
-                        "id": f"rs_{digest}",
+                        "id": f"rs_legacy_{legacy_reasoning_count}",
                         "summary": [],
                         "content": [{
                             "type": "reasoning_text",
                             "text": reasoning_text,
                         }],
                     })
+                else:
+                    # 旧会话只有 UI 用的 reasoning_content，没有 provider 返回的
+                    # encrypted_content/summary。不能把 reasoning_text 伪造成
+                    # Responses input 的 content 数组，否则 Console Go 会直接 400。
+                    omitted_reasoning_count += 1
             content = _convert_assistant_content_to_responses(content)
             if tool_calls:
                 if content:
@@ -528,11 +566,11 @@ def _convert_messages_to_responses_input(
                 "output": output,
             })
 
-    if legacy_reasoning_count:
+    if omitted_reasoning_count:
         logger.warning(
             "[responses] missing raw reasoning Output Item; "
-            "using status-free legacy replay count=%d",
-            legacy_reasoning_count,
+            "omitting non-replayable legacy reasoning count=%d",
+            omitted_reasoning_count,
         )
     return instructions, input_items
 

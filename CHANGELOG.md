@@ -11,6 +11,9 @@
   `ResponseReasoningSummaryTextDeltaEvent`。
 - 修复 Responses thinking 模式的多轮 Tool Loop：下一轮请求会把已持久化思考重建为
   标准 reasoning input item，避免 DeepSeek V4 Flash 返回“reasoning_text must be passed back”。
+- 修复 Responses 历史 reasoning 重放：完整 Output Item 仍保存到 metadata，但请求只发送
+  `id`、`summary`、`encrypted_content`；GPT/未知模型的旧会话无可重放字段时省略 reasoning，
+  避免 Console Go 因 `input[n].content` 数组触发 400；DeepSeek 保留显式旧 thinking 兼容路径。
 - Tool Call 结束事件现在携带完整原始 `arguments`，并修复 Completions 参数先到、call_id
   后到时的首段丢失；客户端可用结束事件恢复实时入参。
 

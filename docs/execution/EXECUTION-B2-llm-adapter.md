@@ -3,7 +3,7 @@
 ## 结果
 
 - 状态：已完成
-- 范围：Responses 原始 Output Item 捕获与重放、`status` 请求字段隔离、Vision
+- 范围：Responses 原始 Output Item 捕获与重放、`status`/`content` 请求字段隔离、Vision
   `input_image` 归一化、Core/Host metadata 传递。
 - 未修改：客户端、运行中的 Gateway、Session 文件数据和外部供应商配置。
 
@@ -12,8 +12,8 @@
 | 语义 | 代码位置 | 结果 |
 |---|---|---|
 | 原始 Output Item 捕获 | `src/ftre_agent_core/llm/adapters/openai_responses.py` | `ResponseOutputItemDoneEvent.item` 转为 JSON-safe `response_metadata.output_items` |
-| 返回态字段隔离 | `src/ftre_agent_core/llm/adapters/openai_responses.py` | 请求重放只允许 reasoning input 字段，明确移除 `status` |
-| 旧会话降级 | 同上 | 缺少原始 Item 时记录 warning，使用不含 `status` 的最小 reasoning item |
+| 返回态字段隔离 | `src/ftre_agent_core/llm/adapters/openai_responses.py` | 持久化保留完整快照；GPT/未知模型请求重放只允许 `id`/`summary`/`encrypted_content`，移除 `status`/`content` |
+| 旧会话降级 | 同上 | GPT/未知模型缺少可重放字段时记录 warning 并省略 reasoning；DeepSeek 保留明确的旧 thinking 兼容路径 |
 | Core 持久化桥 | `event/_event.py`、`message/_msg.py` | `ModelCallEndEvent.response_metadata` 写入 `responses_output_item_groups` |
 | 下一轮 Core 重放 | `message_context.py` | Msg metadata 转回 `responses_output_items`，不进入可见 content |
 | ftre Host 重放 | `E:\ftre\src\ftre\services\session\message\converter.py` | Session Msg metadata 在下一次 Agent 输入中保留原始 Item |
@@ -39,7 +39,8 @@ All checks passed
 
 - `input[n].status` 不再出现在手工构造的 Responses input；
 - 新会话 Output Item 经 Event → Msg metadata → Host provider message 往返；
-- 旧会话 status-free 降级；
+- 旧会话不可重放 reasoning 的省略诊断；
+- Responses reasoning input 不携带 `content` 数组；
 - `input_text` / `input_image`、Base64 data URL 和 `file_id` 形态；
 - Chat Completions 不接收 Responses 私有 metadata。
 

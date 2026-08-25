@@ -16,9 +16,8 @@ from ftre_agent_core.message import AssistantMsg, ThinkingBlock
 from ftre_agent_core.message_context import MessageContext
 
 
-@pytest.mark.parametrize("raw_status", ["completed", "in_progress"])
-def test_reasoning_input_never_invents_return_only_status(raw_status):
-    """请求 input 不能携带 API 返回态 status。"""
+def test_reasoning_input_drops_output_content_and_status():
+    """请求 input 不能把返回态 content/status 原样复制给 provider。"""
     _, input_items = _convert_messages_to_responses_input(
         [
             {
@@ -31,7 +30,8 @@ def test_reasoning_input_never_invents_return_only_status(raw_status):
                         "id": "rs-original",
                         "summary": [],
                         "content": [{"type": "reasoning_text", "text": "先检查配置。"}],
-                        "status": raw_status,
+                        "encrypted_content": "encrypted-reasoning",
+                        "status": "completed",
                     }
                 ],
             }
@@ -44,13 +44,40 @@ def test_reasoning_input_never_invents_return_only_status(raw_status):
             "type": "reasoning",
             "id": "rs-original",
             "summary": [],
-            "content": [{"type": "reasoning_text", "text": "先检查配置。"}],
+            "encrypted_content": "encrypted-reasoning",
         }
     ]
+    assert "content" not in input_items[0]
+    assert "status" not in input_items[0]
 
 
-def test_legacy_reasoning_replay_is_status_free():
-    """旧会话只有 reasoning_content 时，降级也不能拼接 status。"""
+def test_reasoning_replay_with_only_output_content_is_omitted():
+    """只有返回态 content、没有可重放字段时，不能发送空壳 reasoning item。"""
+    _, input_items = _convert_messages_to_responses_input(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "返回态思考",
+                "responses_output_items": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs-output-only",
+                        "summary": [],
+                        "content": [{"type": "reasoning_text", "text": "返回态思考"}],
+                        "status": "completed",
+                    }
+                ],
+            }
+        ],
+        include_reasoning=True,
+    )
+
+    assert input_items == []
+
+
+def test_legacy_reasoning_replay_is_omitted_without_raw_output_item():
+    """旧会话只有 reasoning_content 时，不能伪造 content 数组。"""
     _, input_items = _convert_messages_to_responses_input(
         [
             {
@@ -62,8 +89,7 @@ def test_legacy_reasoning_replay_is_status_free():
         include_reasoning=True,
     )
 
-    assert input_items[0]["type"] == "reasoning"
-    assert "status" not in input_items[0]
+    assert input_items == []
 
 
 def test_responses_image_input_supports_url_data_url_and_file_id():

@@ -663,3 +663,33 @@ class TestResponsesAdapter:
                 "output": "clean",
             },
         ]
+
+    @pytest.mark.asyncio
+    async def test_gpt_responses_omits_legacy_reasoning_content(self):
+        """GPT Responses 不发送旧会话的 reasoning content 数组。"""
+        captured = {}
+        adapter = OpenAIResponsesAdapter(
+            model="gpt-5.6-luna",
+            api_key="k",
+            reasoning_effort="max",
+        )
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "旧会话思考",
+            },
+        ]
+
+        [chunk async for chunk in adapter.stream(messages)]
+
+        assert captured["input"] == [{"role": "user", "content": "inspect"}]
