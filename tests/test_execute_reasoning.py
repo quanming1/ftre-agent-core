@@ -71,12 +71,14 @@ async def test_tool_call_turn():
     agent.runner.llm.stream = fake_stream
 
     executor = ReasoningExecutor(agent, state, agent.runner.llm, agent.hooks)
-    [e async for e in executor.stream(Reasoning())]
+    events = [e async for e in executor.stream(Reasoning())]
 
     assert executor.result.text == ""
     assert len(executor.result.tool_calls) == 1
     assert executor.result.tool_calls[0].id == "c1"
     assert executor.result.finish_reason == "tool-calls"
+    end = next(event for event in events if event.type == EventType.TOOL_CALL_END)
+    assert end.arguments == '{"text": "hi"}'
 
 
 @pytest.mark.asyncio

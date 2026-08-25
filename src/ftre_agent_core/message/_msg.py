@@ -221,6 +221,20 @@ class Msg(BaseModel):
                 self.token.usage.total_tokens += current.total_tokens
                 self.token.last_call_usage = current.model_copy(deep=True)
 
+            # Responses 的原始 Output Item 属于传输元数据，不属于可见内容块。
+            # 按模型调用顺序分组保存，MessageContext 在下一次请求时只把当前
+            # assistant 片段对应的组带回适配器。
+            response_metadata = getattr(event, "response_metadata", None)
+            output_items = (
+                response_metadata.get("output_items")
+                if isinstance(response_metadata, dict)
+                else None
+            )
+            if isinstance(output_items, list) and output_items:
+                groups = self.metadata.setdefault("responses_output_item_groups", [])
+                if isinstance(groups, list):
+                    groups.append([dict(item) for item in output_items if isinstance(item, dict)])
+
         # ── 文本块三段式 ──
         elif et == "TEXT_BLOCK_START":
             self.content.append(TextBlock(id=event.block_id, text=""))
@@ -312,7 +326,14 @@ class Msg(BaseModel):
         elif et == "TOOL_CALL_END":
             block = self._find_block("tool_call", event.tool_call_id)
             if block is not None:
-                raw = self._tool_call_input_buf.pop(event.tool_call_id, "")
+                # END 携带完整原始参数时，以它作为最终事实。delta 只是实时
+                # 展示用的增量；这样即使某些 delta 经 WebSocket 丢失，持久化
+                # Msg 仍能得到完整的工具入参。旧事件没有 arguments 时再回退
+                # 到本地缓冲，避免改变已有事件重建行为。
+                raw = event.arguments or self._tool_call_input_buf.get(
+                    event.tool_call_id, ""
+                )
+                self._tool_call_input_buf.pop(event.tool_call_id, None)
                 try:
                     block.arguments = json.loads(raw) if raw else {}
                 except (json.JSONDecodeError, TypeError):

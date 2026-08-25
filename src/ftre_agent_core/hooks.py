@@ -262,10 +262,20 @@ class LLMStreamPayload:
     tools: tuple[Mapping[str, Any], ...]
     cancellation: asyncio.Event
     invoke: Callable[[], AsyncIterator[Any]]
+    # Core RetryExecutor 的 1-based 尝试坐标。默认值保留旧宿主直接构造
+    # Payload 的行为；真实 Reasoning dispatch 会显式传入本次 attempt/上限。
+    attempt: int = 1
+    max_attempts: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", _readonly_sequence(self.messages))
         object.__setattr__(self, "tools", _readonly_sequence(self.tools))
+        if self.attempt < 1:
+            raise ValueError("LLMStreamPayload.attempt must be positive")
+        if self.max_attempts < 1:
+            raise ValueError("LLMStreamPayload.max_attempts must be positive")
+        if self.attempt > self.max_attempts:
+            raise ValueError("LLMStreamPayload.attempt cannot exceed max_attempts")
 
 
 async def _stream(payload: LLMStreamPayload) -> AsyncIterator[Any]:
@@ -280,6 +290,76 @@ LLM_STREAM_SPEC = HookSpec(
     payload_type=LLMStreamPayload,
     result_type=AsyncIterator,
     default=_stream,
+    scope=HookScope.AGENT,
+)
+
+
+# ── LLM error/retry decision contract ──────────────────────────────────
+
+LLM_ERROR = "llm/error"
+
+
+@dataclass(frozen=True, slots=True)
+class LLMErrorPayload:
+    """一次 LLM attempt 已归一化失败后的只读快照。
+
+    该 Hook 只发布失败事实和当前尝试坐标；Core 仍然拥有 RetryEvent、退避、
+    消息重读和流式收尾。Plugin 不会拿到 API Key、原始异常或可变 AgentState。
+    ``attempt`` 从 1 开始，``max_attempts`` 是本次 Reasoning 的硬上限。
+    """
+
+    session_id: str
+    turn_id: str
+    iteration: int
+    model: str
+    error_code: str
+    error_message: str
+    attempt: int
+    max_attempts: int
+    cancellation: asyncio.Event
+    agent_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.attempt < 1:
+            raise ValueError("LLMErrorPayload.attempt must be positive")
+        if self.max_attempts < 1:
+            raise ValueError("LLMErrorPayload.max_attempts must be positive")
+        if self.attempt > self.max_attempts:
+            raise ValueError("LLMErrorPayload.attempt cannot exceed max_attempts")
+
+
+@dataclass(frozen=True, slots=True)
+class LLMErrorDecision:
+    """失败策略 Plugin 对 Core 的最小决策。
+
+    ``None`` 表示不干预并使用 Core 默认分类；``retry``/``stop`` 只改变
+    下一步决策，实际重试仍由 Core 执行。``delay`` 是建议值，Core 会对它
+    做非负化；未提供时沿用 Agent 的现有 retry_delay。
+    """
+
+    action: Literal["retry", "stop"]
+    reason: str = ""
+    delay: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in {"retry", "stop"}:
+            raise ValueError("LLMErrorDecision.action must be retry or stop")
+
+
+async def _default_llm_error(_payload: LLMErrorPayload) -> LLMErrorDecision | None:
+    """没有策略 Plugin 时交回 Core 的原有错误分类。"""
+
+    return None
+
+
+LLM_ERROR_SPEC = HookSpec(
+    LLM_ERROR,
+    "llm",
+    HookMode.WATERFALL,
+    failure_policy=HookFailurePolicy.OBSERVE,
+    payload_type=LLMErrorPayload,
+    result_type=(LLMErrorDecision, type(None)),
+    default=_default_llm_error,
     scope=HookScope.AGENT,
 )
 
@@ -403,6 +483,8 @@ __all__ = [
     "AGENT_BEFORE_REASONING_SPEC",
     "AGENT_STOP_DECISION",
     "AGENT_STOP_DECISION_SPEC",
+    "LLM_ERROR",
+    "LLM_ERROR_SPEC",
     "LLM_STREAM",
     "LLM_STREAM_SPEC",
     "TOOL_AFTER",
@@ -417,6 +499,8 @@ __all__ = [
     "HookMode",
     "HookScope",
     "HookSpec",
+    "LLMErrorDecision",
+    "LLMErrorPayload",
     "LLMStreamPayload",
     "StopDecisionPayload",
     "StopTurn",

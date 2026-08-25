@@ -9,10 +9,10 @@
 |---|---|
 | 阶段 | B2 |
 | 名称 | LLM 协议适配层 |
-| 状态 | 已验收 |
+| 状态 | 已验收（原始 B2 + Responses 状态重放补充） |
 | 创建日期 | 2026-08-18 |
 | 定稿日期 | 2026-08-19 |
-| 验收日期 | 2026-08-19 |
+| 验收日期 | 原始验收：2026-08-19；补充验收：2026-08-25 |
 | 关联文档 | docs/TODO.yaml 阶段 B2；docs/litellm-migration.md（历史决策）；docs/response-to-ai-base.md（历史架构）；DSH 参考 deepseek-harness packages/llm/llm/src/types.ts（StreamChunk 协议参考来源）；AGENTS.md |
 
 ## 1. 背景与目标
@@ -37,18 +37,33 @@
 
 ### 2.1 功能需求
 
-- [ ] FR1：`LLMAdapter` 契约（`src/ftre_agent_core/llm/base.py`）——抽象基类，`stream(messages, tools) -> AsyncGenerator[StreamChunk]` + `cancel()` 两个抽象方法；`OpenAIAdapterBase` 提供共享骨架（AsyncOpenAI 客户端构造、cancel 机制、LLM 日志生命周期、异常统一 `LLMError.classify` 包裹并转终止性 error/aborted finish chunk）。
-- [ ] FR2：协议注册表（`src/ftre_agent_core/llm/registry.py`）——`PROTOCOLS: dict[str, type[LLMAdapter]]` 映射 `api_type` 字符串到适配器类；`create_llm_handler(api_type, **kwargs) -> LLMAdapter` 工厂函数；`supported_protocols() -> list[str]`；未知 `api_type` 抛 `LLMError(code="INVALID_API_TYPE")` 并在消息中列出全部支持协议。
-- [ ] FR3：completions 适配器（`adapters/openai_completions.py`）——迁移现有 `_stream_completions` 路径的 provider 调用与 wire 解析逻辑，输出改写为 StreamChunk：params 组装（`reasoning_effort` 透传 + deepseek thinking 特判）、工具调用增量聚合转 `tool-call-delta` 序列 + `block-end`、finish_reason 映射到 DSH 词汇（stop / tool-calls / max-tokens / error）、usage 口径映射（`usage` chunk 在 `finish` 前）。
-- [ ] FR4：responses 适配器（`adapters/openai_responses.py`）——迁移现有 `_stream_responses` 路径：消息/工具 schema 转换（`_convert_messages_to_responses_input` / `_convert_tools_to_responses`）、流事件解析（TextDelta/ReasoningDelta/FunctionCallArgumentsDelta/OutputItemAdded/Done/Completed）转 StreamChunk、`reasoning: {effort}` 透传；Responses 标准用量字段 `input_tokens` / `output_tokens` 映射为消费方统一的 `prompt_tokens` / `completion_tokens`。
-- [ ] FR5：StreamChunk 协议定义 + 组装器——`events.py` 定义七种 chunk（block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish，dataclass 形态；finish 携带 FinishReason：stop / tool-calls / max-tokens / error / aborted，error/aborted 带 failure {message, code}）；`block_assembler.py` 实现 BlockAssembler——按 index 组装交错 delta 为完整 block，校验配对完整（block-start 必有 block-end、index 单调、finish 收尾后无内容）。
-- [ ] FR6：目录结构落位——`llm/` 拆分为 `events.py`（StreamChunk 定义）、`block_assembler.py`（组装器）、`errors.py`（LLMError）、`base.py`（契约）、`registry.py`（注册表）、`adapters/`（一协议一文件）、`wire/normalize.py`（协议共用的消息归一化 + usage 映射）；`completion.py` 删除，**LLMEvent 家族（TextDelta/ReasoningDelta/ToolInputDelta/ToolCall/StepFinish）随之移除**，不留兼容别名或 re-export 尾巴。
-- [ ] FR7：消费方迁移（一步到位，无骑墙层）——
+- [x] FR1：`LLMAdapter` 契约（`src/ftre_agent_core/llm/base.py`）——抽象基类，`stream(messages, tools) -> AsyncGenerator[StreamChunk]` + `cancel()` 两个抽象方法；`OpenAIAdapterBase` 提供共享骨架（AsyncOpenAI 客户端构造、cancel 机制、LLM 日志生命周期、异常统一 `LLMError.classify` 包裹并转终止性 error/aborted finish chunk）。
+- [x] FR2：协议注册表（`src/ftre_agent_core/llm/registry.py`）——`PROTOCOLS: dict[str, type[LLMAdapter]]` 映射 `api_type` 字符串到适配器类；`create_llm_handler(api_type, **kwargs) -> LLMAdapter` 工厂函数；`supported_protocols() -> list[str]`；未知 `api_type` 抛 `LLMError(code="INVALID_API_TYPE")` 并在消息中列出全部支持协议。
+- [x] FR3：completions 适配器（`adapters/openai_completions.py`）——迁移现有 `_stream_completions` 路径的 provider 调用与 wire 解析逻辑，输出改写为 StreamChunk：params 组装（`reasoning_effort` 透传 + deepseek thinking 特判）、工具调用增量聚合转 `tool-call-delta` 序列 + `block-end`、finish_reason 映射到 DSH 词汇（stop / tool-calls / max-tokens / error）、usage 口径映射（`usage` chunk 在 `finish` 前）。
+- [x] FR4：responses 适配器（`adapters/openai_responses.py`）——迁移现有 `_stream_responses` 路径：消息/工具 schema 转换（`_convert_messages_to_responses_input` / `_convert_tools_to_responses`）、流事件解析（TextDelta/ReasoningDelta/FunctionCallArgumentsDelta/OutputItemAdded/Done/Completed）转 StreamChunk、`reasoning: {effort}` 透传；Responses 标准用量字段 `input_tokens` / `output_tokens` 映射为消费方统一的 `prompt_tokens` / `completion_tokens`。
+- [x] FR5：StreamChunk 协议定义 + 组装器——`events.py` 定义七种 chunk（block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish，dataclass 形态；finish 携带 FinishReason：stop / tool-calls / max-tokens / error / aborted，error/aborted 带 failure {message, code}）；`block_assembler.py` 实现 BlockAssembler——按 index 组装交错 delta 为完整 block，校验配对完整（block-start 必有 block-end、index 单调、finish 收尾后无内容）。
+- [x] FR6：目录结构落位——`llm/` 拆分为 `events.py`（StreamChunk 定义）、`block_assembler.py`（组装器）、`errors.py`（LLMError）、`base.py`（契约）、`registry.py`（注册表）、`adapters/`（一协议一文件）、`wire/normalize.py`（协议共用的消息归一化 + usage 映射）；`completion.py` 删除，**LLMEvent 家族（TextDelta/ReasoningDelta/ToolInputDelta/ToolCall/StepFinish）随之移除**，不留兼容别名或 re-export 尾巴。
+- [x] FR7：消费方迁移（一步到位，无骑墙层）——
   - `react_runner.py`：事件消费循环重写为 StreamChunk + BlockAssembler；block-end 的 ToolCallBlock 直接写入 Msg（消除手工拼接）；StepFinish 消费点改为 finish chunk（含 error/aborted 分支处理）。
   - `compact_manager.py`（ftre 仓库）：TextDelta 收集改 text-delta chunk。
   - `title_gen.py`（ftre 仓库）：同上。
   - `llm/__init__.py` 公共导出面更新为 StreamChunk 家族 + create_llm_handler + LLMError。
-- [ ] FR8：`fake_llm.py` 对齐——测试替身改产 StreamChunk 序列（含 block 配对），供 runner 测试与契约测试复用。
+- [x] FR8：`fake_llm.py` 对齐——测试替身改产 StreamChunk 序列（含 block 配对），供 runner 测试与契约测试复用。
+- [x] **FR9：Responses 历史 Output Item 边界**——新会话不得把持久化的
+  `reasoning_content` 重新伪造成完整的 provider Output Item，也不得在请求 input 中手工补充
+  仅由 API 返回时填充的 `status`。适配器必须在 `ResponseOutputItemDoneEvent` 到达时保留原始
+  Output Item 的传输字段（包括 `id`、`summary`、`content`、`encrypted_content` 等可用字段），
+  通过 `response_metadata` 暴露给宿主；宿主负责持久化。请求重放只能使用 input-safe 的
+  `id`、`summary`、`encrypted_content`，不得把返回态 `content` 数组复制到 reasoning input。
+  只有显式识别的 DeepSeek thinking 兼容路径允许回传 `reasoning_text`；GPT 和未知模型
+  一律不发送 `content`。旧会话缺少可重放字段时必须记录诊断并跳过 reasoning item，
+  不得伪造 content 或空壳 Item。
+  UI 展示用的 `ThinkingBlock` 与 Responses 传输 Item 必须是两个边界，不能互相替代。
+- [x] **FR10：Responses Vision 输入契约**——Responses 请求中的图片必须使用
+  `{"type": "input_image", "image_url": "<url-or-data-url>"}` 或 `file_id`；文本和图片
+  同处于 user content 数组时分别使用 `input_text` 与 `input_image`。Chat Completions 的
+  `{"type": "image_url", "image_url": {"url": "..."}}` 只能作为适配器入口形态，不能
+  原样发送到 Responses。`detail` 省略时使用供应商默认值，不得为了转换强行写入无关字段。
 
 ### 2.2 非功能需求
 
@@ -134,6 +149,82 @@ def create_llm_handler(api_type: str = "completions", **kwargs) -> LLMAdapter:
 
 无新依赖。沿用 openai SDK 的 AsyncOpenAI 客户端（completions 走 `client.chat.completions.create`，responses 走 `client.responses.create`）。
 
+### 3.6 Responses 多轮状态重放（补充协议）
+
+Responses 的历史消息不是普通的“把思考文本塞回 assistant content”。一次响应由多个
+Output Item 组成，尤其是 reasoning item、function call item 和 message item；下一轮需要
+重放的是供应商返回的 Item 边界和传输字段，而不是 UI 为了展示而生成的 `ThinkingBlock`。
+
+规范依据：OpenAI [Responses 迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+和 [Reasoning models](https://developers.openai.com/api/docs/guides/reasoning)；接入方必须以实际
+供应商接受的 input schema 为准，不把返回对象字段默认视为可写入请求的字段。
+
+当前错误链路已经复现：
+
+```text
+持久化 ThinkingBlock 文本
+    ↓
+转换成 reasoning_content
+    ↓
+Core 人工生成 reasoning input item
+    ↓
+手工补 status="completed"
+    ↓
+Console Go 拒绝：Unknown parameter: input[n].status
+```
+
+目标链路：
+
+```text
+ResponseOutputItemDoneEvent.item
+    ↓
+Responses 适配器保留原始 id/summary/content/encrypted_content 等字段
+    ↓
+response_metadata.output_items
+    ↓
+ftre Host/Session 持久化传输元数据
+    ↓
+下一轮 Responses 请求按 input-safe 字段筛选重放
+```
+
+约束：
+
+- `status` 可以出现在 API 返回的 Output Item 中，但它是返回态字段；Core 不得在手工构造
+  的 Responses input 中臆造 `status`，也不得把返回对象未经筛选地当成新的 input。
+- `content` 是 reasoning 输出文本。虽然它可以存在于持久化的原始 Output Item 中，
+  但请求侧不得发送该数组；跨 provider 的无状态重放优先使用 `encrypted_content`，其次使用
+  `summary`。这避免 Console Go 对 GPT `input[n].content` 的 `maxItems=0` 校验失败。
+  OpenCode DeepSeek 的旧 thinking 协议是明确例外，只有该兼容路径保留 content。
+- 已持久化的旧会话如果只有 `reasoning_content` 文本，没有原始 Output Item，必须走明确的
+  安全降级/诊断路径；当前策略是记录 warning 并省略该 reasoning item，不得伪造 content。
+- UI 的思考展示和 Responses 的传输 Item 分离：前者可以继续使用 ThinkingBlock，后者必须
+  使用可重放的 provider metadata。
+
+### 3.7 Responses 图片输入
+
+Responses 适配器对图片使用官方 Item/content 形状。文本和图片混合时，每个 content part
+必须带自己的类型：
+
+规范依据：OpenAI [Images and vision](https://developers.openai.com/api/docs/guides/images-vision)。
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "input_text", "text": "请描述图片"},
+    {
+      "type": "input_image",
+      "image_url": "data:image/png;base64,...",
+      "detail": "auto"
+    }
+  ]
+}
+```
+
+`image_url` 可以是公开 URL 或 data URL，也可以使用 `file_id`；`detail` 可省略并使用供应商
+默认值。Chat Completions 的 `{"type":"image_url","image_url":{"url":"..."}}`
+只是适配器入口形态，不能原样发送给 Responses。
+
 ## 4. 接口定义
 
 ```python
@@ -168,6 +259,11 @@ class BlockAssembler:
 - [x] AC4：适配器单元测试——fake openai 流事件分别喂两个适配器，断言产出的 chunk 序列符合 3.3 契约且 block 内容正确（文本聚合、reasoning 聚合、tool-call arguments 聚合 + call_id/name 传递）；Responses 标准 usage 的 `input_tokens` / `output_tokens` 映射为下游统一字段。
 - [x] AC5：completion.py 与 LLMEvent 家族不存在；全仓 grep `TextDelta|ReasoningDelta|ToolInputDelta|StepFinish|LLMHandler` 无代码引用（历史文档 docs/litellm-migration.md、docs/response-to-ai-base.md 及 src/tests/ 历史存档目录除外）。
 - [x] AC6：真实对话回归——completions 路径（deepseek-v4-flash，带工具调用）与 responses 路径（gpt-5.6-luna，完整对话 + usage 含 reasoning_tokens + finish 映射）各跑一轮真实调用成功；`finish_reason: null` 类畸形响应映射为 error finish（无产出时）或宽容 stop（有产出时）且不崩溃。（备注：muse-spark-1.2 在验收时被 OpenCode 网关整体下线——两协议均 401 Model not supported，与代码无关；responses 协议由 Luna 完成验证。）
+- [x] AC7：Responses 手工构造的历史 input 不包含 output-only 的 `status` 字段；多轮请求顺序保持不变，Console Go 不再报 `input[n].status` unknown parameter。
+- [x] AC8：Responses 适配器在 `ResponseOutputItemDoneEvent` 收到时捕获原始 Output Item 元数据，Host 可以持久化并在下一轮筛选后重放；ThinkingBlock 仍只承担 UI 展示，不冒充传输 Item。
+- [x] AC9：Vision 回归覆盖公开 URL、Base64 data URL、`file_id` 至少一种实际调用路径；断言 Responses 请求使用 `input_text`/`input_image`，而不是 Chat Completions 的嵌套 `image_url` 对象。
+- [x] AC10：缺少原始 reasoning Output Item 的旧会话记录明确诊断并省略不可重放 Item；请求
+  不合成 `content`/`status` 等供应商返回字段；图片输入不会触发 reasoning 输入错误。
 
 ## 6. 测试计划
 
@@ -175,6 +271,9 @@ class BlockAssembler:
   - `tests/test_stream_chunk_contract.py`（新增）：BlockAssembler 组装 + 畸形序列拒绝（AC1）
   - `tests/test_registry.py`（新增）：工厂分发 / INVALID_API_TYPE（AC3）
   - `tests/test_adapters_chunk.py`（新增）：两适配器的 fake 流 → chunk 序列断言（AC4）
+  - `tests/test_responses_input_contract.py`（新增）：历史 Output Item 重放不带手工 `status`/
+    `content`、仅保留 `encrypted_content`/`summary`，旧会话不可重放时省略、原始 response metadata
+    保存、`input_image` 的 URL/data URL/file_id 形态（AC7-AC10）
   - `tests/test_execute_reasoning.py` / `test_react_runner_*.py`：断言更新为 StreamChunk 语义（fake_llm 产新协议）
 - 手动验证：AC6 双协议真实对话
 - 回归基线：开发前先跑全量测试记录通过清单，迁移后逐文件比对（断言语义变化但覆盖点不减）
@@ -187,3 +286,10 @@ class BlockAssembler:
 | 2026-08-19 | 评审前修订：适配器输出协议由「保留 LLMEvent」改为「DSH StreamChunk」（七种 chunk + BlockAssembler + error/aborted finish 通道）；FR5/FR6/FR7/FR8 与 AC1/AC2/AC4/AC5 相应重写；目录结构新增 block_assembler.py；非目标删除「不改 LLMEvent」、新增「不留骑墙层」 | 用户评审决策：采用 DSH 协议（与 Msg ContentBlock 同构、desktop 块渲染就绪、error finish 通道、对齐 DSH 适配器生态） |
 | 2026-08-19 | 状态 草稿 → approved（定稿） | 用户评审通过 |
 | 2026-08-19 | FR 勾选 + AC 全部验收通过（AC1-AC6）；状态 → 已验收。AC6 备注：muse-spark-1.2 验收时被网关下线（401 Model not supported，与代码无关），responses 协议由 gpt-5.6-luna 完成真实回归；completions 协议由 deepseek-v4-flash 完成（工具调用 + usage 全通） | 开发完成，验收记录留痕 |
+| 2026-08-25 | 修复 Responses 适配器漏识别 OpenAI SDK 的 `ResponseReasoningTextDeltaEvent` / `ResponseReasoningSummaryTextDeltaEvent`；新增真实事件名回归测试 | OpenCode 直连 DeepSeek V4 Flash 已返回 `response.reasoning_text.delta`，旧判断只识别 `ResponseReasoningDeltaEvent`，导致思考增量被静默丢弃 |
+| 2026-08-25 | 修复 Thinking Tool Loop 的 reasoning 回传：Responses 转换器把持久化 `reasoning_content` 重建为标准 `type=reasoning/content=reasoning_text` input item，并保留 reasoning-only 历史 | DeepSeek V4 Flash 在 thinking 模式的 Tool Result 后要求上一轮 reasoning_text 原样回传，否则下一轮返回 400 |
+| 2026-08-25 | Tool Call 结束事件增加完整原始 `arguments`；Completions 适配器按 wire index 缓存并补发 call_id 晚到前的参数片段 | 客户端实时增量可能缺片，但结束快照必须能覆盖恢复；参数先于 call_id 到达时不能静默丢弃 |
+| 2026-08-25 | `Msg.append_event` 以 `TOOL_CALL_END.arguments` 重建持久化入参，只有旧事件缺字段时才回退 delta 缓冲；新增事件重建回归 | 结束事件是唯一完整快照，不能让持久化层继续只依赖可能丢失的实时增量 |
+| 2026-08-25 | 官方 Responses 协议复核：`status` 是 API 返回 Output Item 的状态字段，不得由 Core 人工拼进请求 input；修复方案改为保存/重放原始 Output Item，并补充 `input_image` Vision 契约（FR9/FR10、AC7-AC10） | `ws_sess_e2a68a947984` 重现 `input[2].status` 400；图片形态本身正确，根因是 reasoning 历史传输边界丢失 |
+| 2026-08-25 | 实现 Responses Output Item metadata 传递：`OutputItemDone` → `ModelCallEndEvent.response_metadata` → Msg metadata → 下一轮 `responses` input；请求侧过滤 `status`，旧会话走 status-free 最小降级；补齐 Vision `detail` / `file_id` | 让 Console Go 不再收到 `input[n].status`，同时保留新会话的原始 reasoning item 边界 |
+| 2026-08-25 | 收紧 reasoning 请求重放：持久化仍保留完整 Output Item，但请求只允许 `id`/`summary`/`encrypted_content`；旧会话无可重放字段时记录 warning 并省略，不再伪造 `content` 数组 | `ws_sess_e2a68a947984` 在切换 GPT Responses 后触发 Console Go `input[2].content array_above_max_length`；官方协议将 encrypted reasoning 作为无状态多轮重放字段 |

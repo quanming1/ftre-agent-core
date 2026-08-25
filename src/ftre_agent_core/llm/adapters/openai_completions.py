@@ -54,7 +54,7 @@ class _ToolCallAccumulator:
     """
 
     def __init__(self):
-        # wire index -> {id, name, arguments}
+        # wire index -> {id, name, arguments, emitted_length}
         self._items: dict[int, dict] = {}
 
     @property
@@ -69,7 +69,7 @@ class _ToolCallAccumulator:
 
         entry = self._items.setdefault(
             index,
-            {"id": "", "name": "", "arguments": ""},
+            {"id": "", "name": "", "arguments": "", "emitted_length": 0},
         )
 
         function = get_attr(tc_delta, "function")
@@ -84,14 +84,25 @@ class _ToolCallAccumulator:
         if args_fragment:
             entry["arguments"] += args_fragment
 
-        if args_fragment:
-            return (index, entry["id"], entry["name"], args_fragment)
+        # Provider 可能先发送 arguments、随后才发送 id/name。参数仍按 wire
+        # index 缓存；等 call_id 可用于上层事件时，一次补发尚未发出的前缀，
+        # 避免首个 JSON 分片被静默丢弃。
+        if entry["id"] and len(entry["arguments"]) > entry["emitted_length"]:
+            start = entry["emitted_length"]
+            fragment = entry["arguments"][start:]
+            entry["emitted_length"] = len(entry["arguments"])
+            return (index, entry["id"], entry["name"], fragment)
         return None
 
     def entries(self) -> list[dict]:
         """流结束后按 wire index 排序返回 {index, id, name, arguments}。"""
         return [
-            {"index": idx, **entry}
+            {
+                "index": idx,
+                "id": entry["id"],
+                "name": entry["name"],
+                "arguments": entry["arguments"],
+            }
             for idx, entry in sorted(self._items.items())
         ]
 
@@ -109,6 +120,11 @@ class OpenAICompletionsAdapter(OpenAIAdapterBase):
         emitted_finish = False
         try:
             request_messages = _normalize_chat_messages(messages)
+            # Responses 的原始 Output Item 只属于 responses 适配器；不能把
+            # Host 为下一轮 Responses 重放保留的扩展字段泄漏给 Chat API。
+            for message in request_messages:
+                message.pop("responses_output_items", None)
+                message.pop("response_metadata", None)
             llm_log.log_input(request_messages, tools)
 
             params: dict[str, Any] = {

@@ -49,3 +49,22 @@ def test_normalization_drops_empty_and_reasoning_only_assistant_messages():
     assert _normalize_chat_messages(messages) == [
         {"role": "user", "content": "continue"}
     ]
+
+
+def test_responses_normalization_preserves_reasoning_only_assistant():
+    messages = [
+        {"role": "assistant", "reasoning_content": "internal reasoning"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    assert _normalize_chat_messages(
+        messages,
+        preserve_reasoning_only=True,
+    ) == [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "internal reasoning",
+        },
+        {"role": "user", "content": "continue"},
+    ]

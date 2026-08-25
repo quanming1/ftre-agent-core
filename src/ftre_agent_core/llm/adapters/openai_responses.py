@@ -56,10 +56,22 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
         try:
             # Responses API 也从同一份 Chat 消息历史转换而来，先复用同一个工具调用
             # 协议边界，避免把孤立 function_call_output 传给 provider。
-            request_messages = _normalize_chat_messages(messages)
+            reasoning_enabled = bool(
+                self.reasoning_effort and self.reasoning_effort != "none"
+            )
+            request_messages = _normalize_chat_messages(
+                messages,
+                preserve_reasoning_only=reasoning_enabled,
+            )
             llm_log.log_input(request_messages, tools)
 
-            instructions, input_items = _convert_messages_to_responses_input(request_messages)
+            instructions, input_items = _convert_messages_to_responses_input(
+                request_messages,
+                include_reasoning=reasoning_enabled,
+                allow_legacy_reasoning_content=_legacy_reasoning_content_supported(
+                    self.model
+                ),
+            )
             resp_tools = _convert_tools_to_responses(tools) if tools else []
 
             params: dict[str, Any] = {
@@ -75,7 +87,7 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 params["max_output_tokens"] = max(1, int(self.max_tokens))
             if self.temperature is not None:
                 params["temperature"] = self.temperature
-            if self.reasoning_effort and self.reasoning_effort != "none":
+            if reasoning_enabled:
                 params["reasoning"] = {"effort": self.reasoning_effort}
             if resp_tools:
                 params["tools"] = resp_tools
@@ -116,7 +128,15 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                         yield TextDeltaChunk(index=entry["index"], text=delta)
 
                 # ── 推理增量（如果网关支持流式返回推理文本）──
-                elif event_type == "ResponseReasoningDeltaEvent":
+                # OpenAI SDK 的 Responses 事件实际分为 reasoning_text 和
+                # reasoning_summary 两种命名；部分旧 fake/网关仍使用
+                # ResponseReasoningDeltaEvent。三者都归一为同一个 reasoning 块，
+                # 否则真实的 ResponseReasoningTextDeltaEvent 会被静默忽略。
+                elif event_type in {
+                    "ResponseReasoningDeltaEvent",
+                    "ResponseReasoningTextDeltaEvent",
+                    "ResponseReasoningSummaryTextDeltaEvent",
+                }:
                     item_id = get_attr(event, "item_id", "")
                     delta = get_attr(event, "delta")
                     if delta:
@@ -164,6 +184,12 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                     item = get_attr(event, "item", {})
                     item_id = get_attr(item, "id", "")
                     item_type = get_attr(item, "type", "")
+                    # OutputItemDone 是 Responses 多轮重放的唯一完整快照。
+                    # 这里保存 JSON-safe 原始字段，不能只依赖 reasoning delta；
+                    # Host 会把它写入 Msg metadata，下一轮再由转换器筛选重放。
+                    raw_item = _serialize_response_item(item)
+                    if raw_item:
+                        response_metadata.setdefault("output_items", []).append(raw_item)
                     if item_type == "function_call":
                         entry = items.setdefault(item_id, {"kind": "tool-call", "index": None, "started": False})
                         if entry["index"] is None:
@@ -274,6 +300,98 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 ))
 
 
+def _json_safe(value: Any) -> Any:
+    """把 SDK Output Item 转成可持久化的 JSON 值。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe(model_dump(mode="json", exclude_none=True))
+        except TypeError:
+            return _json_safe(model_dump(exclude_none=True))
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
+
+
+def _serialize_response_item(item: Any) -> dict[str, Any]:
+    """提取 Responses Output Item 的完整 JSON-safe 快照。"""
+    value = _json_safe(item)
+    return value if isinstance(value, dict) and value.get("type") else {}
+
+
+def _legacy_reasoning_content_supported(model: str) -> bool:
+    """判断是否启用旧式 reasoning_text 回传兼容。
+
+    OpenCode 的 DeepSeek thinking 协议仍要求把 ``reasoning_text`` 放回下一轮；
+    GPT Responses 则要求 reasoning input 不带 ``content``。未知模型默认走更
+    严格的 input-safe 路径。
+    """
+    return "deepseek" in model.lower()
+
+
+def _sanitize_reasoning_item(
+    item: Any,
+    *,
+    allow_content: bool = False,
+) -> dict[str, Any] | None:
+    """把返回态 reasoning item 转成可重放的 Responses input item。
+
+    ``content`` 是模型返回的 reasoning 文本，不是跨 provider 稳定的 input
+    字段。Console Go 的 GPT Responses 对 reasoning input 明确要求 ``content``
+    为空；无状态多轮应优先使用供应商返回的 ``encrypted_content``，其次使用
+    reasoning ``summary``。仅对明确要求旧式 reasoning_text 的 DeepSeek 兼容路径
+    保留 content。完整返回对象仍由 ``_serialize_response_item`` 保存到 response
+    metadata，不能把持久化快照和请求协议混为一谈。
+    """
+    value = _serialize_response_item(item)
+    if value.get("type") != "reasoning":
+        return None
+    allowed = ("type", "id", "summary", "encrypted_content")
+    if allow_content:
+        allowed += ("content",)
+    result = {key: value[key] for key in allowed if key in value}
+    # 只有 id/type 而没有 encrypted_content 或 summary 的 reasoning item
+    # 无法恢复模型状态；DeepSeek 兼容路径则允许使用返回的 content 恢复。
+    if (
+        not result.get("encrypted_content")
+        and not result.get("summary")
+        and not (allow_content and result.get("content"))
+    ):
+        return None
+    return result
+
+
+def _reasoning_replay_items(
+    message: dict[str, Any],
+    *,
+    allow_content: bool = False,
+) -> list[dict[str, Any]]:
+    """读取 Host 写入 assistant 消息的原始 reasoning Output Item。"""
+    candidates: Any = message.get("responses_output_items")
+    if candidates is None:
+        metadata = message.get("response_metadata")
+        if isinstance(metadata, dict):
+            candidates = metadata.get("output_items")
+    if candidates is None:
+        groups = message.get("responses_output_item_groups")
+        if isinstance(groups, list) and groups:
+            candidates = groups[0]
+    if not isinstance(candidates, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in candidates:
+        sanitized = _sanitize_reasoning_item(item, allow_content=allow_content)
+        if sanitized is not None:
+            result.append(sanitized)
+    return result
+
+
 def _convert_user_content_to_responses(content: Any) -> Any:
     """user content → Responses API 兼容形态（对齐 DSH pi-ai context.ts）。
 
@@ -300,7 +418,18 @@ def _convert_user_content_to_responses(content: Any) -> Any:
         elif part_type in ("image_url", "input_image"):
             image = part.get("image_url")
             url = image.get("url", "") if isinstance(image, dict) else str(image or "")
-            converted.append({"type": "input_image", "image_url": url})
+            image_part: dict[str, Any] = {"type": "input_image"}
+            if url:
+                image_part["image_url"] = url
+            file_id = part.get("file_id") or part.get("image_file", {}).get("file_id")
+            if file_id:
+                image_part["file_id"] = str(file_id)
+            detail = part.get("detail")
+            if detail is None and isinstance(image, dict):
+                detail = image.get("detail")
+            if detail:
+                image_part["detail"] = detail
+            converted.append(image_part)
         else:
             # 未知 part（如插件扩展块）：按文本占位，保持 index 对齐
             converted.append({"type": "input_text", "text": ""})
@@ -333,6 +462,9 @@ def _convert_assistant_content_to_responses(content: Any) -> Any:
 
 def _convert_messages_to_responses_input(
     messages: list[dict],
+    *,
+    include_reasoning: bool = False,
+    allow_legacy_reasoning_content: bool = False,
 ) -> tuple[str | None, list[dict]]:
     """Chat Completions messages → Responses API (instructions, input)。
 
@@ -345,6 +477,8 @@ def _convert_messages_to_responses_input(
     """
     instructions: str | None = None
     input_items: list[dict] = []
+    legacy_reasoning_count = 0
+    omitted_reasoning_count = 0
 
     for msg in messages:
         role = msg.get("role", "")
@@ -371,6 +505,33 @@ def _convert_messages_to_responses_input(
 
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
+            reasoning_text = msg.get("reasoning_content")
+            if include_reasoning and isinstance(reasoning_text, str) and reasoning_text:
+                replay_items = _reasoning_replay_items(
+                    msg,
+                    allow_content=allow_legacy_reasoning_content,
+                )
+                if replay_items:
+                    input_items.extend(replay_items)
+                elif allow_legacy_reasoning_content:
+                    # OpenCode DeepSeek thinking 模式的窄兼容路径：旧会话没有
+                    # Output Item 时，必须把 reasoning_text 重建为 provider 要求的
+                    # reasoning_text content。GPT Responses 不走此分支。
+                    legacy_reasoning_count += 1
+                    input_items.append({
+                        "type": "reasoning",
+                        "id": f"rs_legacy_{legacy_reasoning_count}",
+                        "summary": [],
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": reasoning_text,
+                        }],
+                    })
+                else:
+                    # 旧会话只有 UI 用的 reasoning_content，没有 provider 返回的
+                    # encrypted_content/summary。不能把 reasoning_text 伪造成
+                    # Responses input 的 content 数组，否则 Console Go 会直接 400。
+                    omitted_reasoning_count += 1
             content = _convert_assistant_content_to_responses(content)
             if tool_calls:
                 if content:
@@ -384,7 +545,14 @@ def _convert_messages_to_responses_input(
                         "arguments": fn.get("arguments", ""),
                     })
             else:
-                input_items.append({"role": "assistant", "content": content})
+                # reasoning-only assistant 已经由上面的 reasoning item 表达，
+                # 不再额外发送一个空 assistant message。
+                if content or not (
+                    include_reasoning
+                    and isinstance(reasoning_text, str)
+                    and reasoning_text
+                ):
+                    input_items.append({"role": "assistant", "content": content})
 
         elif role == "tool":
             call_id = msg.get("tool_call_id", "")
@@ -398,6 +566,12 @@ def _convert_messages_to_responses_input(
                 "output": output,
             })
 
+    if omitted_reasoning_count:
+        logger.warning(
+            "[responses] missing raw reasoning Output Item; "
+            "omitting non-replayable legacy reasoning count=%d",
+            omitted_reasoning_count,
+        )
     return instructions, input_items
 
 

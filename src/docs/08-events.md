@@ -44,7 +44,11 @@
 
 - `TOOL_CALL_START(reply_id, tool_call_id, tool_call_name)`
 - `TOOL_CALL_DELTA(reply_id, tool_call_id, delta)`
-- `TOOL_CALL_END(reply_id, tool_call_id)`
+- `TOOL_CALL_END(reply_id, tool_call_id, arguments)`
+
+`arguments` 是完整的原始 JSON 字符串，是工具入参的最终事实；`TOOL_CALL_DELTA`
+只用于实时展示和渐进式聚合。旧事件没有该字段时，消费者可以使用已收到的 delta
+缓冲完成重建。
 - `TOOL_RESULT_START(reply_id, tool_call_id, tool_call_name)`
 - `TOOL_RESULT_TEXT_DELTA(reply_id, tool_call_id, delta)`
 - `TOOL_RESULT_DATA_DELTA(reply_id, tool_call_id, block_id, media_type, data, url)`

@@ -173,6 +173,31 @@ class TestCompletionsAdapter:
         assert stream.closed
 
     @pytest.mark.asyncio
+    async def test_tool_arguments_buffer_until_call_id_arrives(self):
+        """参数先于 call_id 到达时，首段 JSON 也必须被补发。"""
+        chunks = [
+            _FakeChunk(choices=[_FakeChoice(delta=_FakeDelta(tool_calls=[
+                _FakeToolCallDelta(index=0, function=_FakeFunction(arguments='{"command":')),
+            ]))]),
+            _FakeChunk(choices=[_FakeChoice(delta=_FakeDelta(tool_calls=[
+                _FakeToolCallDelta(index=0, id="call-late", function=_FakeFunction(name="bash")),
+            ]))]),
+            _FakeChunk(choices=[_FakeChoice(delta=_FakeDelta(tool_calls=[
+                _FakeToolCallDelta(index=0, function=_FakeFunction(arguments=' "ls"}')),
+            ]))]),
+            _FakeChunk(choices=[_FakeChoice(finish_reason="tool_calls")]),
+        ]
+        adapter, _ = _make_completions_adapter(chunks)
+        out = await _collect(adapter.stream([{"role": "user", "content": "hi"}]))
+
+        deltas = [chunk for chunk in out if getattr(chunk, "type", "") == "tool-call-delta"]
+        assert [chunk.arguments_delta for chunk in deltas] == [
+            '{"command":',
+            ' "ls"}',
+        ]
+        assert all(chunk.call_id == "call-late" for chunk in deltas)
+
+    @pytest.mark.asyncio
     async def test_stop_finish(self):
         chunks = [
             _FakeChunk(choices=[_FakeChoice(delta=_FakeDelta(content="hi"))]),
@@ -393,6 +418,31 @@ class TestResponsesAdapter:
         assert asm.finish_reason().reason.kind == "stop"
 
     @pytest.mark.asyncio
+    async def test_real_responses_reasoning_text_delta_events(self):
+        """OpenAI SDK 的真实 Responses 事件名必须产出 thinking block。
+
+        OpenCode 直连的 curl/SSE 事件是 ``response.reasoning_text.delta``，
+        SDK 将其解析为 ``ResponseReasoningTextDeltaEvent``；此前适配器只识别
+        旧的 ``ResponseReasoningDeltaEvent``，会让前端只看到最终文本。
+        """
+        events = [
+            _FakeRespEvent("ResponseReasoningTextDeltaEvent", item_id="rs-1", delta="think "),
+            _FakeRespEvent("ResponseReasoningTextDeltaEvent", item_id="rs-1", delta="deep"),
+            _FakeRespEvent("ResponseTextDeltaEvent", item_id="msg-1", delta="answer"),
+            _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+        ]
+        adapter, _ = _make_responses_adapter(events)
+        out = await _collect(adapter.stream([{"role": "user", "content": "hi"}]))
+        asm = BlockAssembler()
+        for chunk in out:
+            asm.feed(chunk)
+        asm.validate()
+        assert asm.blocks() == [
+            {"type": "thinking", "thinking": "think deep"},
+            {"type": "text", "text": "answer"},
+        ]
+
+    @pytest.mark.asyncio
     async def test_incomplete_maps_max_tokens(self):
         @dataclass
         class _Incomplete:
@@ -549,3 +599,97 @@ class TestResponsesAdapter:
             {"role": "user", "content": "thanks"},
         ]
         assert captured["instructions"] == "sys"
+
+    @pytest.mark.asyncio
+    async def test_thinking_tool_history_replays_reasoning_item(self):
+        """Thinking 模式的下一轮必须回传上一轮 reasoning_text。
+
+        OpenCode DeepSeek V4 Flash 在 Tool Result 后继续推理时会校验该 item；
+        只回传 assistant/function_call 会返回 400。
+        """
+        captured = {}
+        adapter = OpenAIResponsesAdapter(
+            model="deepseek-v4-flash",
+            api_key="k",
+            reasoning_effort="high",
+        )
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "先检查文件，再执行命令。",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": '{"command":"git status"}',
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "clean"},
+        ]
+
+        [chunk async for chunk in adapter.stream(messages)]
+
+        reasoning = captured["input"][1]
+        assert reasoning["type"] == "reasoning"
+        assert reasoning["id"].startswith("rs_")
+        assert reasoning["summary"] == []
+        assert "status" not in reasoning
+        assert reasoning["content"] == [{
+            "type": "reasoning_text",
+            "text": "先检查文件，再执行命令。",
+        }]
+        assert captured["input"][2:] == [
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "bash",
+                "arguments": '{"command":"git status"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "clean",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gpt_responses_omits_legacy_reasoning_content(self):
+        """GPT Responses 不发送旧会话的 reasoning content 数组。"""
+        captured = {}
+        adapter = OpenAIResponsesAdapter(
+            model="gpt-5.6-luna",
+            api_key="k",
+            reasoning_effort="max",
+        )
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _FakeResponsesStream([
+                _FakeRespEvent("ResponseCompletedEvent", response=_FakeResponse()),
+            ])
+
+        adapter._client.responses.create = _create  # type: ignore[attr-defined]
+        messages = [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "旧会话思考",
+            },
+        ]
+
+        [chunk async for chunk in adapter.stream(messages)]
+
+        assert captured["input"] == [{"role": "user", "content": "inspect"}]

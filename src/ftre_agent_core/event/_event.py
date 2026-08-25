@@ -113,6 +113,9 @@ class ModelCallEndEvent(EventBase):
     completion_tokens: int
     total_tokens: int
     finished_reason: str = "completed"
+    # Responses 适配器返回的原始 Output Item 元数据。它只用于 Host
+    # 持久化和下一轮协议重放，不参与客户端可见文本渲染。
+    response_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ── 文本块流式 ──
@@ -197,6 +200,10 @@ class ToolCallEndEvent(EventBase):
     type: Literal["TOOL_CALL_END"] = "TOOL_CALL_END"
     reply_id: str
     tool_call_id: str
+    # 完整的原始 JSON 参数。增量事件用于实时展示，结束事件是客户端恢复和
+    # 持久化对齐的最终事实；保留字符串可覆盖丢失/乱序的 delta，也不丢失
+    # Provider 返回的原始 JSON 形态。
+    arguments: str = ""
 
 
 # ── 工具结果流式 ──
