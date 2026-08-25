@@ -303,6 +303,7 @@ class ReActRunner:
             yield ReplyStartEvent(
                 session_id=self.state.runtime_context.get("session_id", ""),
                 reply_id=self.state.reply_id,
+                message_id=self.state.message_id,
                 name=self.agent.model,
             )
 
@@ -312,7 +313,7 @@ class ReActRunner:
         try:
             if prologue is not None:
                 async for event in prologue:
-                    yield event
+                    yield self._annotate_event(event)
 
             async for event in self._loop():
                 yield event
@@ -322,6 +323,7 @@ class ReActRunner:
             self._finalize(ReplyFinishedReason.INTERRUPTED)
             yield ReplyEndEvent(
                 session_id=session_id, reply_id=reply_id,
+                message_id=self.state.message_id,
                 finished_reason=ReplyFinishedReason.INTERRUPTED,
             )
 
@@ -330,6 +332,7 @@ class ReActRunner:
             self._finalize(ReplyFinishedReason.ERROR)
             yield ReplyEndEvent(
                 session_id=session_id, reply_id=reply_id,
+                message_id=self.state.message_id,
                 finished_reason=ReplyFinishedReason.ERROR,
                 error={"message": str(self.state.error or "Unknown error")},
             )
@@ -418,8 +421,9 @@ class ReActRunner:
             for msg in message:
                 MessageContext.add_raw(self.agent.state.context, msg)
 
-        # ── 生成 reply_id（一次 run() 只产一次 ReplyStartEvent，由 run() 负责）──
+        # ── 生成稳定 run reply_id 与首个 Assistant message_id ──
         self.state.reply_id = uuid.uuid4().hex[:16]
+        self.state.message_id = uuid.uuid4().hex[:16]
 
     def _accept_confirmation(self, event: UserConfirmResultEvent) -> bool:
         """处理一条用户确认结果（纯同步，不产事件）。
@@ -446,12 +450,23 @@ class ReActRunner:
                 f"UserConfirmResultEvent.tool_call_id {event.tool_call_id!r} "
                 f"is not awaiting confirmation."
             )
-        # 采信事件携带的 reply_id 并回填到运行状态：core 内部 assistant 消息的
-        # Msg.id 由 add_raw 生成，与 reply_id 无必然相等关系，无法从 context 反推；
-        # 而 reply_id 是调用方（从 RequireUserConfirmEvent）原样带回的权威值，
-        # 后续 resume_execute 与事件产出都需要用它保证事件归属到原回复。
+        # 采信事件携带的 reply_id 并回填到运行状态。ToolCall 所在的 Msg.id
+        # 同时恢复当前 message_id，避免权限恢复把结果写到另一条 AssistantMsg。
         if event.reply_id:
             self.state.reply_id = event.reply_id
+        owner = next(
+            (
+                message
+                for message in context
+                if any(
+                    isinstance(block, ToolCallBlock) and block.id == event.tool_call_id
+                    for block in message.content
+                )
+            ),
+            None,
+        )
+        if owner is not None:
+            self.state.message_id = owner.id
 
         # 两种入口都必须支持：
         # 1) Core 独立使用：宿主直接调用 agent.run(UserConfirmResultEvent)，
@@ -499,6 +514,19 @@ class ReActRunner:
         """
         if self._run_task is not None and not self._run_task.done():
             self._run_task.cancel()
+
+    def _annotate_event(self, event: AgentStreamEvent) -> AgentStreamEvent:
+        """给流事件补上当前 AssistantMsg 坐标。
+
+        ``reply_id`` 贯穿整个 run；事件实际落到哪个 AssistantMsg 由
+        ``message_id`` 决定。统一在 Runner 出口补字段，避免每个执行器重复
+        传递同一个短生命周期坐标。
+        """
+        if getattr(event, "reply_id", None):
+            return event.model_copy(
+                update={"message_id": self.state.message_id or event.reply_id}
+            )
+        return event
 
     async def _dispatch_before_reasoning(self) -> BeforeReasoningResult:
         """在每次真实 LLM Reasoning 前消费宿主贡献的上下文。
@@ -582,9 +610,23 @@ class ReActRunner:
                             self.agent.state.context,
                             dict(message),
                         )
+                    # 正式 UserMessage 是真实对话边界。当前已存在 AssistantMsg 时，
+                    # 下一次 Reasoning 使用新的 message_id；system/assistant 贡献不
+                    # 凭空制造用户可见的 Assistant 气泡。
+                    had_current_assistant = any(
+                        message.role == "assistant"
+                        and message.id == self.state.message_id
+                        for message in self.agent.state.context
+                    )
+                    has_user_message = any(
+                        str(message.get("role", "")) == "user"
+                        for message in before_reasoning.messages
+                    )
+                    if had_current_assistant and has_user_message:
+                        self.state.message_id = uuid.uuid4().hex[:16]
                     # 执行 LLM 调用 + 流式消费 + 重试
                     async for event in reasoning_executor.stream(action):
-                        yield event
+                        yield self._annotate_event(event)
                     # 获取本轮推理的结构化产物，供下一轮 _decide() 消费
                     prev = reasoning_executor.result
 
@@ -595,7 +637,7 @@ class ReActRunner:
                     # 表示整批挂起、未执行任何工具。
                     paused = False
                     async for event in acting_executor.stream(action):
-                        yield event
+                        yield self._annotate_event(event)
                         if isinstance(event, RequireUserConfirmEvent):
                             paused = True
                     if paused:
@@ -611,7 +653,7 @@ class ReActRunner:
                 elif isinstance(action, Exit):
                     # ── Exit：结束（或暂停）当前回复 ──
                     async for event in exit_executor.stream(action):
-                        yield event
+                        yield self._annotate_event(event)
                     # ContinueTurn 返回时不退出
                     if exit_executor.outcome.should_continue:
                         # 注入续写提示已在 ExitExecutor 中完成
@@ -625,6 +667,7 @@ class ReActRunner:
             yield ReplyEndEvent(
                 session_id=self.state.runtime_context.get("session_id", ""),
                 reply_id=self.state.reply_id,
+                message_id=self.state.message_id,
                 finished_reason=ReplyFinishedReason.INTERRUPTED,
             )
 

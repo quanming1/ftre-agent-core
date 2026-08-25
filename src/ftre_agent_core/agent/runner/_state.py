@@ -61,6 +61,9 @@ class RunState:
     # 运行上下文
     runtime_context: dict = field(default_factory=dict)
     reply_id: str = ""
+    # 当前 AssistantMsg 的唯一 id。一个 run 可以在 before-reasoning 注入正式
+    # UserMessage 后旋转到新的 message_id，但 reply_id 保持整次运行不变。
+    message_id: str = ""
     turn_id: str = ""
 
     # 空响应恢复（仅 _decide 读写）
@@ -95,6 +98,7 @@ class RunState:
         self.in_finalization = False
         self.trace_span = None
         self.reply_id = ""
+        self.message_id = ""
         self.turn_id = self.runtime_context.get("turn_id") or f"turn_{uuid.uuid4().hex[:12]}"
         self.token_usage = {
             "prompt_tokens": 0,

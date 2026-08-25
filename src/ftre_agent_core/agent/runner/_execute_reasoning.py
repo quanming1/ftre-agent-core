@@ -173,7 +173,7 @@ class ReasoningExecutor:
         5. 成功完成
             关闭 LLM span（输出 text/reasoning/finish_reason/has_tool_calls/usage/
             response_metadata），把本次 Provider 响应的 thinking/text/tool_calls
-            作为内容块追加到当前 reply_id 对应的 assistant Msg。最后组装成功
+            作为内容块追加到当前 message_id 对应的 assistant Msg。最后组装成功
             TurnResult 写入 self.result 并 return。
 
         6. 异常处理
@@ -185,6 +185,7 @@ class ReasoningExecutor:
               收集器后进入下一轮尝试。
         """
         reply_id = self.state.reply_id
+        message_id = self.state.message_id or self.state.reply_id
         model_name = self.agent.model
 
         # ── 阶段 1：hint 写入 memory + yield HintBlockEvent ──────────────────────
@@ -199,7 +200,7 @@ class ReasoningExecutor:
             )
             MessageContext.append_reply_blocks(
                 self.agent.state.context,
-                reply_id,
+                message_id,
                 [hint_block],
             )
             yield HintBlockEvent(
@@ -421,10 +422,9 @@ class ReasoningExecutor:
                         "response_metadata": response_metadata,
                     })
 
-                # AgentScope 的关键约束：一次 run() 的整个 reply 只对应一个 Msg。
-                # 每次 Provider 响应完成后，将同轮 thinking/text/tool_calls 一次性
-                # 追加到当前 reply_id；Acting 之后只追加 ToolResultBlock。这样实时
-                # context 与 FTRE 根据事件重建的 state.json 具有完全相同的块结构。
+                # 一次 run() 可包含多条 AssistantMsg。当前 Reasoning/Acting 的
+                # thinking/text/tool_calls 统一追加到 message_id；只有正式
+                # UserMessage 进入下一次 before-reasoning 后才会旋转到新的 id。
                 response_blocks = []
                 if full_reasoning:
                     response_blocks.append(ThinkingBlock(thinking=full_reasoning))
@@ -440,7 +440,7 @@ class ReasoningExecutor:
                 )
                 MessageContext.append_reply_blocks(
                     self.agent.state.context,
-                    reply_id,
+                    message_id,
                     response_blocks,
                 )
 
@@ -478,7 +478,7 @@ class ReasoningExecutor:
                     partial_blocks.append(TextBlock(text=_full_text))
                 MessageContext.append_reply_blocks(
                     self.agent.state.context,
-                    reply_id,
+                    message_id,
                     partial_blocks,
                 )
                 raise
@@ -508,7 +508,7 @@ class ReasoningExecutor:
                     partial_blocks.append(TextBlock(text=_full_text))
                 MessageContext.append_reply_blocks(
                     self.agent.state.context,
-                    reply_id,
+                    message_id,
                     partial_blocks,
                 )
 

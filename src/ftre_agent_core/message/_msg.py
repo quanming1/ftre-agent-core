@@ -184,12 +184,15 @@ class Msg(BaseModel):
         USER_CONFIRM_RESULT 会持久化为 ALLOWED/FINISHED。其余人工介入事件
         暂不处理，收到时静默跳过。
         """
-        # reply_id 校验
-        reply_id = getattr(event, "reply_id", None)
-        if reply_id is not None and reply_id != self.id:
+        # 事件同时携带运行级 reply_id 和消息级 message_id。Steering 会让同一
+        # 次运行产生多个 Assistant 消息，因此消息归属优先使用 message_id；
+        # 只有旧事件没有该字段时才回退到 reply_id。
+        event_message_id = getattr(event, "message_id", None)
+        target_id = event_message_id or getattr(event, "reply_id", None)
+        if target_id is not None and target_id != self.id:
             logger.warning(
-                "Event %s reply_id %r != msg id %r, skipping.",
-                event.__class__.__name__, reply_id, self.id,
+                "Event %s message_id/reply_id %r != msg id %r, skipping.",
+                event.__class__.__name__, target_id, self.id,
             )
             return self
 

@@ -63,7 +63,8 @@ class ActingExecutor:
 
     职责定位（与 ToolHandler 的分工）：
       - 本类是“编排层”：拿到 Reasoning 已写入 context 的 tool_calls 后，负责
-        权限分流、调度工具并把 tool(result) 追加到同一个 reply Msg，向上层
+        权限分流、调度工具并把 tool(result) 追加到当前 message_id 对应的
+        AssistantMsg，向上层
         yield 工具结果与 hint 事件，并在取消时抛出 CancelledError。
       - ToolHandler 是“执行层”：负责单个工具的真正派发、Tool Hook 管线、异常归一化、
         tracing span 管理；它不关心 memory 写入与事件产出。
@@ -177,11 +178,12 @@ class ActingExecutor:
 
         # 被拒绝（用户拒绝）或被 DENY 的调用：写 DENIED 结果 + 产出事件三元组
         reply_id = self.state.reply_id
+        message_id = self.state.message_id or self.state.reply_id
         for tc in denied:
             denied_text = f"[USER_DENIED] 用户拒绝了工具 [{tc.name}] 的执行"
             MessageContext.add_tool_result(
                 self.agent.state.context,
-                reply_id=reply_id,
+                message_id=message_id,
                 tool_call_id=tc.id,
                 name=tc.name,
                 content=denied_text,
@@ -281,6 +283,7 @@ class ActingExecutor:
              CancelledError。
         """
         reply_id = self.state.reply_id
+        message_id = self.state.message_id or self.state.reply_id
 
         # ── 阶段 1：spawn 所有工具任务 ──
         # 对每个 tool_call 调 tool_handler.spawn 创建 asyncio.Task，这里【不 await】——
@@ -319,7 +322,7 @@ class ActingExecutor:
             # 写入这一条 tool 结果（role="tool"），与上面的 assistant 消息配对
             MessageContext.add_tool_result(
                 self.agent.state.context,
-                reply_id=reply_id,
+                message_id=message_id,
                 tool_call_id=tc.id,
                 name=tc.name,
                 content=result.result or f"[{tc.name}] 已完成",
@@ -365,7 +368,7 @@ class ActingExecutor:
             )
             MessageContext.append_reply_blocks(
                 self.agent.state.context,
-                reply_id,
+                message_id,
                 [hint_block],
             )
             yield HintBlockEvent(
@@ -466,6 +469,7 @@ class ExitExecutor:
         """
         session_id = self.state.runtime_context.get("session_id", "")
         reply_id = self.state.reply_id
+        message_id = self.state.message_id or self.state.reply_id
 
         # ── 仅 COMPLETED 触发 stop-decision ──
         # ERROR（LLM 调用失败 / 空响应耗尽重试）和 EXCEED_MAX_ITERS（超过最大迭代数）
@@ -499,7 +503,7 @@ class ExitExecutor:
                     )
                     MessageContext.append_reply_blocks(
                         self.agent.state.context,
-                        reply_id,
+                        message_id,
                         [hint_block],
                     )
                     yield HintBlockEvent(

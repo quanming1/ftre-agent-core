@@ -1,6 +1,6 @@
 [project]
 name = "ftre-agent-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent framework core - ReAct Agent, Tool System, LLM Adapters"
 readme = "README.md"
 requires-python = ">=3.12"
