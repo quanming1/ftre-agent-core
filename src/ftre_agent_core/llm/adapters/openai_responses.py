@@ -444,6 +444,7 @@ def _convert_messages_to_responses_input(
     instructions: str | None = None
     input_items: list[dict] = []
     reasoning_ordinal = 0
+    legacy_reasoning_count = 0
 
     for msg in messages:
         role = msg.get("role", "")
@@ -483,11 +484,7 @@ def _convert_messages_to_responses_input(
                         f"{reasoning_ordinal}\0{reasoning_text}".encode()
                     ).hexdigest()[:24]
                     reasoning_ordinal += 1
-                    logger.warning(
-                        "[responses] missing raw reasoning Output Item; "
-                        "using status-free legacy replay id=%s",
-                        digest[:12],
-                    )
+                    legacy_reasoning_count += 1
                     input_items.append({
                         "type": "reasoning",
                         "id": f"rs_{digest}",
@@ -531,6 +528,12 @@ def _convert_messages_to_responses_input(
                 "output": output,
             })
 
+    if legacy_reasoning_count:
+        logger.warning(
+            "[responses] missing raw reasoning Output Item; "
+            "using status-free legacy replay count=%d",
+            legacy_reasoning_count,
+        )
     return instructions, input_items
 
 
