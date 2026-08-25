@@ -53,9 +53,12 @@
   `reasoning_content` 重新伪造成完整的 provider Output Item，也不得在请求 input 中手工补充
   仅由 API 返回时填充的 `status`。适配器必须在 `ResponseOutputItemDoneEvent` 到达时保留原始
   Output Item 的传输字段（包括 `id`、`summary`、`content`、`encrypted_content` 等可用字段），
-  通过 `response_metadata` 暴露给宿主；宿主负责持久化和下一轮筛选后重放。旧会话缺少原始
-  Item 时允许使用明确记录的 status-free 最小 reasoning 降级，不得假装它是原始 Item。UI
-  展示用的 `ThinkingBlock` 与 Responses 传输 Item 必须是两个边界，不能互相替代。
+  通过 `response_metadata` 暴露给宿主；宿主负责持久化。请求重放只能使用 input-safe 的
+  `id`、`summary`、`encrypted_content`，不得把返回态 `content` 数组复制到 reasoning input。
+  只有显式识别的 DeepSeek thinking 兼容路径允许回传 `reasoning_text`；GPT 和未知模型
+  一律不发送 `content`。旧会话缺少可重放字段时必须记录诊断并跳过 reasoning item，
+  不得伪造 content 或空壳 Item。
+  UI 展示用的 `ThinkingBlock` 与 Responses 传输 Item 必须是两个边界，不能互相替代。
 - [x] **FR10：Responses Vision 输入契约**——Responses 请求中的图片必须使用
   `{"type": "input_image", "image_url": "<url-or-data-url>"}` 或 `file_id`；文本和图片
   同处于 user content 数组时分别使用 `input_text` 与 `input_image`。Chat Completions 的
@@ -181,15 +184,19 @@ response_metadata.output_items
     ↓
 ftre Host/Session 持久化传输元数据
     ↓
-下一轮 Responses 请求按原始 Item 形状重放
+下一轮 Responses 请求按 input-safe 字段筛选重放
 ```
 
 约束：
 
 - `status` 可以出现在 API 返回的 Output Item 中，但它是返回态字段；Core 不得在手工构造
   的 Responses input 中臆造 `status`，也不得把返回对象未经筛选地当成新的 input。
+- `content` 是 reasoning 输出文本。虽然它可以存在于持久化的原始 Output Item 中，
+  但请求侧不得发送该数组；跨 provider 的无状态重放优先使用 `encrypted_content`，其次使用
+  `summary`。这避免 Console Go 对 GPT `input[n].content` 的 `maxItems=0` 校验失败。
+  OpenCode DeepSeek 的旧 thinking 协议是明确例外，只有该兼容路径保留 content。
 - 已持久化的旧会话如果只有 `reasoning_content` 文本，没有原始 Output Item，必须走明确的
-  安全降级/诊断路径；不得用“伪造 status”掩盖缺失的传输状态。
+  安全降级/诊断路径；当前策略是记录 warning 并省略该 reasoning item，不得伪造 content。
 - UI 的思考展示和 Responses 的传输 Item 分离：前者可以继续使用 ThinkingBlock，后者必须
   使用可重放的 provider metadata。
 
@@ -255,8 +262,8 @@ class BlockAssembler:
 - [x] AC7：Responses 手工构造的历史 input 不包含 output-only 的 `status` 字段；多轮请求顺序保持不变，Console Go 不再报 `input[n].status` unknown parameter。
 - [x] AC8：Responses 适配器在 `ResponseOutputItemDoneEvent` 收到时捕获原始 Output Item 元数据，Host 可以持久化并在下一轮筛选后重放；ThinkingBlock 仍只承担 UI 展示，不冒充传输 Item。
 - [x] AC9：Vision 回归覆盖公开 URL、Base64 data URL、`file_id` 至少一种实际调用路径；断言 Responses 请求使用 `input_text`/`input_image`，而不是 Chat Completions 的嵌套 `image_url` 对象。
-- [x] AC10：缺少原始 reasoning Output Item 的旧会话记录明确的 status-free 降级诊断，不合成
-  供应商未知字段；图片输入不会触发 reasoning 状态错误。
+- [x] AC10：缺少原始 reasoning Output Item 的旧会话记录明确诊断并省略不可重放 Item；请求
+  不合成 `content`/`status` 等供应商返回字段；图片输入不会触发 reasoning 输入错误。
 
 ## 6. 测试计划
 
@@ -264,8 +271,9 @@ class BlockAssembler:
   - `tests/test_stream_chunk_contract.py`（新增）：BlockAssembler 组装 + 畸形序列拒绝（AC1）
   - `tests/test_registry.py`（新增）：工厂分发 / INVALID_API_TYPE（AC3）
   - `tests/test_adapters_chunk.py`（新增）：两适配器的 fake 流 → chunk 序列断言（AC4）
-  - `tests/test_responses_input_contract.py`（新增）：历史 Output Item 重放不带手工 `status`、原始
-    response metadata 保存、`input_image` 的 URL/data URL/file_id 形态（AC7-AC10）
+  - `tests/test_responses_input_contract.py`（新增）：历史 Output Item 重放不带手工 `status`/
+    `content`、仅保留 `encrypted_content`/`summary`，旧会话不可重放时省略、原始 response metadata
+    保存、`input_image` 的 URL/data URL/file_id 形态（AC7-AC10）
   - `tests/test_execute_reasoning.py` / `test_react_runner_*.py`：断言更新为 StreamChunk 语义（fake_llm 产新协议）
 - 手动验证：AC6 双协议真实对话
 - 回归基线：开发前先跑全量测试记录通过清单，迁移后逐文件比对（断言语义变化但覆盖点不减）
@@ -284,3 +292,4 @@ class BlockAssembler:
 | 2026-08-25 | `Msg.append_event` 以 `TOOL_CALL_END.arguments` 重建持久化入参，只有旧事件缺字段时才回退 delta 缓冲；新增事件重建回归 | 结束事件是唯一完整快照，不能让持久化层继续只依赖可能丢失的实时增量 |
 | 2026-08-25 | 官方 Responses 协议复核：`status` 是 API 返回 Output Item 的状态字段，不得由 Core 人工拼进请求 input；修复方案改为保存/重放原始 Output Item，并补充 `input_image` Vision 契约（FR9/FR10、AC7-AC10） | `ws_sess_e2a68a947984` 重现 `input[2].status` 400；图片形态本身正确，根因是 reasoning 历史传输边界丢失 |
 | 2026-08-25 | 实现 Responses Output Item metadata 传递：`OutputItemDone` → `ModelCallEndEvent.response_metadata` → Msg metadata → 下一轮 `responses` input；请求侧过滤 `status`，旧会话走 status-free 最小降级；补齐 Vision `detail` / `file_id` | 让 Console Go 不再收到 `input[n].status`，同时保留新会话的原始 reasoning item 边界 |
+| 2026-08-25 | 收紧 reasoning 请求重放：持久化仍保留完整 Output Item，但请求只允许 `id`/`summary`/`encrypted_content`；旧会话无可重放字段时记录 warning 并省略，不再伪造 `content` 数组 | `ws_sess_e2a68a947984` 在切换 GPT Responses 后触发 Console Go `input[2].content array_above_max_length`；官方协议将 encrypted reasoning 作为无状态多轮重放字段 |
