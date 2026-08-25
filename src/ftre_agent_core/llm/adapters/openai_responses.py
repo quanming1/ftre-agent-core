@@ -182,6 +182,12 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                     item = get_attr(event, "item", {})
                     item_id = get_attr(item, "id", "")
                     item_type = get_attr(item, "type", "")
+                    # OutputItemDone 是 Responses 多轮重放的唯一完整快照。
+                    # 这里保存 JSON-safe 原始字段，不能只依赖 reasoning delta；
+                    # Host 会把它写入 Msg metadata，下一轮再由转换器筛选重放。
+                    raw_item = _serialize_response_item(item)
+                    if raw_item:
+                        response_metadata.setdefault("output_items", []).append(raw_item)
                     if item_type == "function_call":
                         entry = items.setdefault(item_id, {"kind": "tool-call", "index": None, "started": False})
                         if entry["index"] is None:
@@ -292,6 +298,67 @@ class OpenAIResponsesAdapter(OpenAIAdapterBase):
                 ))
 
 
+def _json_safe(value: Any) -> Any:
+    """把 SDK Output Item 转成可持久化的 JSON 值。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe(model_dump(mode="json", exclude_none=True))
+        except TypeError:
+            return _json_safe(model_dump(exclude_none=True))
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
+
+
+def _serialize_response_item(item: Any) -> dict[str, Any]:
+    """提取 Responses Output Item 的完整 JSON-safe 快照。"""
+    value = _json_safe(item)
+    return value if isinstance(value, dict) and value.get("type") else {}
+
+
+def _sanitize_reasoning_item(item: Any) -> dict[str, Any] | None:
+    """把返回态 reasoning item 转成可写入下一次 input 的最小字段集。
+
+    Responses 返回对象可能带 ``status``、时间戳或供应商扩展字段；这些字段
+    只能留在 response_metadata，不能未经筛选复制到请求 input。``status``
+    因此在这里明确丢弃。
+    """
+    value = _serialize_response_item(item)
+    if value.get("type") != "reasoning":
+        return None
+    allowed = ("type", "id", "summary", "content", "encrypted_content")
+    result = {key: value[key] for key in allowed if key in value}
+    return result or None
+
+
+def _reasoning_replay_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """读取 Host 写入 assistant 消息的原始 reasoning Output Item。"""
+    candidates: Any = message.get("responses_output_items")
+    if candidates is None:
+        metadata = message.get("response_metadata")
+        if isinstance(metadata, dict):
+            candidates = metadata.get("output_items")
+    if candidates is None:
+        groups = message.get("responses_output_item_groups")
+        if isinstance(groups, list) and groups:
+            candidates = groups[0]
+    if not isinstance(candidates, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in candidates:
+        sanitized = _sanitize_reasoning_item(item)
+        if sanitized is not None:
+            result.append(sanitized)
+    return result
+
+
 def _convert_user_content_to_responses(content: Any) -> Any:
     """user content → Responses API 兼容形态（对齐 DSH pi-ai context.ts）。
 
@@ -318,7 +385,18 @@ def _convert_user_content_to_responses(content: Any) -> Any:
         elif part_type in ("image_url", "input_image"):
             image = part.get("image_url")
             url = image.get("url", "") if isinstance(image, dict) else str(image or "")
-            converted.append({"type": "input_image", "image_url": url})
+            image_part: dict[str, Any] = {"type": "input_image"}
+            if url:
+                image_part["image_url"] = url
+            file_id = part.get("file_id") or part.get("image_file", {}).get("file_id")
+            if file_id:
+                image_part["file_id"] = str(file_id)
+            detail = part.get("detail")
+            if detail is None and isinstance(image, dict):
+                detail = image.get("detail")
+            if detail:
+                image_part["detail"] = detail
+            converted.append(image_part)
         else:
             # 未知 part（如插件扩展块）：按文本占位，保持 index 对齐
             converted.append({"type": "input_text", "text": ""})
@@ -393,28 +471,32 @@ def _convert_messages_to_responses_input(
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
             reasoning_text = msg.get("reasoning_content")
-            if (
-                include_reasoning
-                and isinstance(reasoning_text, str)
-                and reasoning_text
-            ):
-                # Responses thinking mode 要求上一轮 reasoning_text 原样回传。
-                # Core 的稳定事实是 ThinkingBlock 文本，不保存供应商私有 item；
-                # 因此按序号 + 内容生成稳定 id，并重建标准 reasoning input item。
-                digest = hashlib.sha256(
-                    f"{reasoning_ordinal}\0{reasoning_text}".encode()
-                ).hexdigest()[:24]
-                reasoning_ordinal += 1
-                input_items.append({
-                    "type": "reasoning",
-                    "id": f"rs_{digest}",
-                    "summary": [],
-                    "content": [{
-                        "type": "reasoning_text",
-                        "text": reasoning_text,
-                    }],
-                    "status": "completed",
-                })
+            if include_reasoning and isinstance(reasoning_text, str) and reasoning_text:
+                replay_items = _reasoning_replay_items(msg)
+                if replay_items:
+                    input_items.extend(replay_items)
+                else:
+                    # 旧会话没有保存 Output Item 时只能走降级路径。它保留
+                    # reasoning_text 语义，但绝不拼接 API 返回态 status 字段；
+                    # 新会话会优先走上面的原始 Item 重放分支。
+                    digest = hashlib.sha256(
+                        f"{reasoning_ordinal}\0{reasoning_text}".encode()
+                    ).hexdigest()[:24]
+                    reasoning_ordinal += 1
+                    logger.warning(
+                        "[responses] missing raw reasoning Output Item; "
+                        "using status-free legacy replay id=%s",
+                        digest[:12],
+                    )
+                    input_items.append({
+                        "type": "reasoning",
+                        "id": f"rs_{digest}",
+                        "summary": [],
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": reasoning_text,
+                        }],
+                    })
             content = _convert_assistant_content_to_responses(content)
             if tool_calls:
                 if content:
@@ -428,7 +510,14 @@ def _convert_messages_to_responses_input(
                         "arguments": fn.get("arguments", ""),
                     })
             else:
-                input_items.append({"role": "assistant", "content": content})
+                # reasoning-only assistant 已经由上面的 reasoning item 表达，
+                # 不再额外发送一个空 assistant message。
+                if content or not (
+                    include_reasoning
+                    and isinstance(reasoning_text, str)
+                    and reasoning_text
+                ):
+                    input_items.append({"role": "assistant", "content": content})
 
         elif role == "tool":
             call_id = msg.get("tool_call_id", "")

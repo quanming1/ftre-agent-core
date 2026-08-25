@@ -221,6 +221,20 @@ class Msg(BaseModel):
                 self.token.usage.total_tokens += current.total_tokens
                 self.token.last_call_usage = current.model_copy(deep=True)
 
+            # Responses 的原始 Output Item 属于传输元数据，不属于可见内容块。
+            # 按模型调用顺序分组保存，MessageContext 在下一次请求时只把当前
+            # assistant 片段对应的组带回适配器。
+            response_metadata = getattr(event, "response_metadata", None)
+            output_items = (
+                response_metadata.get("output_items")
+                if isinstance(response_metadata, dict)
+                else None
+            )
+            if isinstance(output_items, list) and output_items:
+                groups = self.metadata.setdefault("responses_output_item_groups", [])
+                if isinstance(groups, list):
+                    groups.append([dict(item) for item in output_items if isinstance(item, dict)])
+
         # ── 文本块三段式 ──
         elif et == "TEXT_BLOCK_START":
             self.content.append(TextBlock(id=event.block_id, text=""))

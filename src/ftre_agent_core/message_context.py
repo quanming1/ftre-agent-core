@@ -48,10 +48,14 @@ def _msg_to_dicts(msg: Msg) -> list[dict]:
     # 消息，否则一条 Msg 被切成多段后会重复发送同一段推理。
     metadata_reasoning = msg.metadata.get("reasoning_content")
     metadata_reasoning_used = False
+    response_item_groups = msg.metadata.get("responses_output_item_groups")
+    if not isinstance(response_item_groups, list):
+        response_item_groups = []
+    response_item_group_used = 0
 
     def flush_assistant() -> None:
         """把当前累积的非 tool-result blocks 输出为一条 OpenAI 消息。"""
-        nonlocal metadata_reasoning_used
+        nonlocal metadata_reasoning_used, response_item_group_used
 
         # 没有待输出 block 时不生成空 assistant，避免在 tool 消息之前
         # 额外插入无意义的协议消息。
@@ -72,6 +76,14 @@ def _msg_to_dicts(msg: Msg) -> list[dict]:
             if metadata_reasoning and not result.get("reasoning_content"):
                 result["reasoning_content"] = metadata_reasoning
             metadata_reasoning_used = True
+
+        if response_item_group_used < len(response_item_groups):
+            group = response_item_groups[response_item_group_used]
+            if isinstance(group, list) and group:
+                result["responses_output_items"] = [
+                    dict(item) for item in group if isinstance(item, dict)
+                ]
+            response_item_group_used += 1
 
         # 先加入结果，再清空原列表。clear() 不会影响 result，因为
         # to_openai_message() 已经构造了新的 dict/list。
@@ -218,13 +230,26 @@ class MessageContext:
             if message_id and any(item.id == message_id for item in context):
                 return
             metadata = message.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            # Responses 原始 Output Item 由 Host 通过普通消息字段传入；
+            # 它只进入 Core metadata，不会被误当成可见 content。
+            if isinstance(message.get("responses_output_items"), list):
+                metadata["responses_output_item_groups"] = [
+                    [dict(item) for item in message["responses_output_items"] if isinstance(item, dict)]
+                ]
+            elif isinstance(message.get("response_metadata"), dict):
+                output_items = message["response_metadata"].get("output_items")
+                if isinstance(output_items, list):
+                    metadata["responses_output_item_groups"] = [
+                        [dict(item) for item in output_items if isinstance(item, dict)]
+                    ]
             context.append(
                 Msg(
                     name=MsgName.DEFAULT,
                     content=blocks,
                     role=role,
                     id=message_id or uuid.uuid4().hex[:16],
-                    metadata=dict(metadata) if isinstance(metadata, dict) else {},
+                    metadata=metadata,
                 )
             )
             return

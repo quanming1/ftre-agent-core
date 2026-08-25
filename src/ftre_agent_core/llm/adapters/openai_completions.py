@@ -120,6 +120,11 @@ class OpenAICompletionsAdapter(OpenAIAdapterBase):
         emitted_finish = False
         try:
             request_messages = _normalize_chat_messages(messages)
+            # Responses 的原始 Output Item 只属于 responses 适配器；不能把
+            # Host 为下一轮 Responses 重放保留的扩展字段泄漏给 Chat API。
+            for message in request_messages:
+                message.pop("responses_output_items", None)
+                message.pop("response_metadata", None)
             llm_log.log_input(request_messages, tools)
 
             params: dict[str, Any] = {

@@ -78,10 +78,10 @@ stages:
 
       - id: B2
         title: LLM 协议适配层
-        status: in_progress
+        status: done
         date: 2026-08-19
         prd: docs/prd/PRD-B2-llm-adapter.md
-        prd_status: 开发中
+        prd_status: 已验收
         modules:
           - src/ftre_agent_core/llm/（契约层 + 协议注册表 + 适配器）
         acceptance: LLMAdapter 契约 + create_llm_handler 工厂就位；completions/responses 两适配器行为与现状逐字节等价；消费方零协议感知；新协议接入只加文件 + 注册表一行；补充完成 Responses 原始 Output Item 重放、输出态字段隔离和 Vision input_image 契约
