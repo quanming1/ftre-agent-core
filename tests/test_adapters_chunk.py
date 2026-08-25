@@ -645,7 +645,7 @@ class TestResponsesAdapter:
         assert reasoning["type"] == "reasoning"
         assert reasoning["id"].startswith("rs_")
         assert reasoning["summary"] == []
-        assert reasoning["status"] == "completed"
+        assert "status" not in reasoning
         assert reasoning["content"] == [{
             "type": "reasoning_text",
             "text": "先检查文件，再执行命令。",

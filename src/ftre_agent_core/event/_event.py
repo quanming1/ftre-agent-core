@@ -113,6 +113,9 @@ class ModelCallEndEvent(EventBase):
     completion_tokens: int
     total_tokens: int
     finished_reason: str = "completed"
+    # Responses 适配器返回的原始 Output Item 元数据。它只用于 Host
+    # 持久化和下一轮协议重放，不参与客户端可见文本渲染。
+    response_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ── 文本块流式 ──

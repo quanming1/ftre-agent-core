@@ -407,6 +407,7 @@ class ReasoningExecutor:
                                 completion_tokens=usage["completion_tokens"],
                                 total_tokens=usage["total_tokens"],
                                 finished_reason=finish_reason,
+                                response_metadata=response_metadata,
                             )
 
                 # ── 阶段 5：成功完成 ───────────────────────────────────────────
