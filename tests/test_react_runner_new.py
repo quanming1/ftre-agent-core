@@ -136,16 +136,15 @@ async def test_tool_call_turn_is_one_atomic_assistant_message():
         for message in second_call_messages
     )
 
-    # Core 运行态与 FTRE 事件投影采用同一种结构：整次 reply 只有一个
-    # assistant Msg，内部按真实时序保存 reasoning → tool_call → result → text。
-    reply_id = next(
-        event.reply_id for event in events if event.type == EventType.REPLY_START
-    )
+    # Core 运行态与 FTRE 事件投影采用同一种结构：没有 UserMessage 边界时，
+    # 这一段 Reasoning/Acting 聚合到同一个 AssistantMsg，内部保持真实块时序。
+    reply_start = next(event for event in events if event.type == EventType.REPLY_START)
     assistant_replies = [
         message for message in agent.state.context if message.role == "assistant"
     ]
     assert len(assistant_replies) == 1
-    assert assistant_replies[0].id == reply_id
+    assert assistant_replies[0].id == reply_start.message_id
+    assert reply_start.message_id != reply_start.reply_id
     assert [block.type for block in assistant_replies[0].content] == [
         "thinking",
         "tool_call",

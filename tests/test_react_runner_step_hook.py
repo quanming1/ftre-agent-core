@@ -118,6 +118,50 @@ async def test_hook_runs_again_after_turn_continuation():
 
 
 @pytest.mark.asyncio
+async def test_user_message_creates_new_assistant_message_id_at_reasoning_boundary():
+    """正式 UserMessage 让同一 reply 形成 A→User→B，Tool 状态不被搬运。"""
+    class BoundaryDispatcher:
+        async def dispatch(self, spec, payload, *, context=None):
+            del context
+            if spec is AGENT_BEFORE_REASONING_SPEC and payload.iteration == 2:
+                return BeforeReasoningResult(({
+                    "id": "user-steer-1",
+                    "role": "user",
+                    "content": "请继续，但改用中文",
+                    "metadata": {"request_id": "request-steer-1"},
+                },))
+            if spec is AGENT_STOP_DECISION_SPEC:
+                return StopTurn()
+            return await spec.default(payload)
+
+    agent = ReActAgent(
+        model="fake", api_key="fake", hooks=BoundaryDispatcher(), max_iterations=3,
+    )
+    agent.runner._llm = SequenceLLM([
+        seq(ToolCall(id="call-1", name="echo", input={"value": "ok"}),
+            StepFinish(finish_reason="tool_calls")),
+        _text_sequence("完成"),
+    ])
+    agent.tool_registry.register(Tool(name="echo", func=lambda value: value))
+
+    events = [event async for event in agent.run("开始")]
+    assistant = [message for message in agent.state.context if message.role == "assistant"]
+    users = [message for message in agent.state.context if message.role == "user"]
+    assert len(assistant) == 2
+    reply_start = next(event for event in events if event.type == "REPLY_START")
+    model_starts = [
+        event.message_id for event in events if event.type == "MODEL_CALL_START"
+    ]
+    assert model_starts == [assistant[0].id, assistant[1].id]
+    assert assistant[0].id == reply_start.message_id
+    assert assistant[0].id != assistant[1].id
+    assert [message.id for message in users if message.id == "user-steer-1"] == ["user-steer-1"]
+    assert [event.reply_id for event in events if getattr(event, "reply_id", None)]
+    assert len({event.reply_id for event in events if getattr(event, "reply_id", None)}) == 1
+    assert assistant[0].get_content_blocks("tool_result")
+
+
+@pytest.mark.asyncio
 async def test_cancelled_context_does_not_dispatch_or_inject():
     dispatcher = BeforeReasoningDispatcher()
     agent = ReActAgent(model="fake", api_key="fake", hooks=dispatcher)

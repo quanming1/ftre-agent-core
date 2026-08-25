@@ -1,4 +1,5 @@
 """Stateless helpers for reading and updating ``AgentState.context``."""
+import uuid
 from typing import Any
 
 from .message import (
@@ -150,31 +151,30 @@ class MessageContext:
     @staticmethod
     def append_reply_blocks(
         context: list[Msg],
-        reply_id: str,
+        message_id: str,
         blocks: list[ContentBlock],
     ) -> None:
-        """把内容块追加到 ``reply_id`` 对应的 assistant 消息。
+        """把内容块追加到 ``message_id`` 对应的 assistant 消息。
 
-        一次 ``agent.run()`` 只产生一个 ``reply_id``。同一次回复内可能经历多次
-        Reasoning / Acting，但它们都必须聚合到同一个 ``Msg`` 中；真正发送给
-        Provider 时，再由 ``_msg_to_dicts()`` 按 ToolResultBlock / HintBlock 切分。
+        一次 ``agent.run()`` 可以产生多个 AssistantMsg。一个 Reasoning 及其
+        Acting 使用同一个 message_id；下一次 Reasoning 若前面插入了正式
+        UserMessage，则由 Runner 分配新的 message_id。Provider 仍由
+        ``_msg_to_dicts()`` 负责 ToolResultBlock / HintBlock 的协议展开。
 
-        这与 AgentScope ``AgentState.append_context()`` 的规则一致：只有尾消息
-        同时是 assistant 且 id 等于当前 reply_id 时才扩展，否则创建新的回复消息。
+        通常当前 AssistantMsg 位于尾部；如果 Hook 只插入了 system/assistant
+        上下文，仍回到同一个已有 message_id 追加，避免无边界的重复 Msg.id。
+        正式 UserMessage 已在 Runner 中先触发 message_id 旋转，因此不会复用旧消息。
         空 blocks 不创建空 assistant，避免产生无 content/tool_calls 的非法请求。
         """
         if not blocks:
             return
-        if (
-            context
-            and context[-1].role == "assistant"
-            and context[-1].id == reply_id
-        ):
-            context[-1].content.extend(blocks)
-            return
+        for message in reversed(context):
+            if message.role == "assistant" and message.id == message_id:
+                message.content.extend(blocks)
+                return
         context.append(
             Msg(
-                id=reply_id,
+                id=message_id,
                 name=MsgName.DEFAULT,
                 content=blocks,
                 role="assistant",
@@ -185,16 +185,16 @@ class MessageContext:
     def add_tool_result(
         context: list[Msg],
         *,
-        reply_id: str,
+        message_id: str,
         tool_call_id: str,
         name: str,
         content: str,
         state: ToolResultState = ToolResultState.SUCCESS,
     ) -> None:
-        """把工具结果追加到其所属 reply。
+        """把工具结果追加到其所属 AssistantMsg。
 
-        ``reply_id`` 和 ``name`` 必须显式提供：缺少 reply_id 会重新创建 assistant
-        Msg，破坏单 Reply 单 Msg；缺少 name 会让持久化的 ToolResultBlock 信息不完整。
+        ``message_id`` 和 ``name`` 必须显式提供：ToolResult 必须回到产生
+        ToolCall 的 AssistantMsg，不能依赖整次 run 的 reply_id 猜测。
         """
         block = ToolResultBlock(
             id=tool_call_id,
@@ -202,7 +202,7 @@ class MessageContext:
             output=content,
             state=state,
         )
-        MessageContext.append_reply_blocks(context, reply_id, [block])
+        MessageContext.append_reply_blocks(context, message_id, [block])
 
     @staticmethod
     def add_raw(context: list[Msg], message: Any) -> None:
@@ -214,7 +214,19 @@ class MessageContext:
             role = message.get("role", "user")
             if role not in ("user", "assistant", "system"):
                 role = "assistant"
-            context.append(Msg(name=MsgName.DEFAULT, content=blocks, role=role))
+            message_id = message.get("id")
+            if message_id and any(item.id == message_id for item in context):
+                return
+            metadata = message.get("metadata")
+            context.append(
+                Msg(
+                    name=MsgName.DEFAULT,
+                    content=blocks,
+                    role=role,
+                    id=message_id or uuid.uuid4().hex[:16],
+                    metadata=dict(metadata) if isinstance(metadata, dict) else {},
+                )
+            )
             return
         context.append(message)
 

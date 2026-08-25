@@ -156,3 +156,4 @@ agent/after-turn          # ftre：一次 Turn 完成后
 | 2026-08-23 | 创建并批准 C2：新增 `agent/before-reasoning`，将 ftre Turn 级 Hook 与 Core Step 级 Hook 分名 | `agent/pre-step` 与真实 Core Step 边界语义混淆；F12 需要在运行中消费 `next-step` |
 | 2026-08-23 | C2 验收：Core 238 passed；ftre 421 passed；ruff、diff check、Gateway start/close 与 ftre-inbox + Core ReAct active-steer 集成测试通过 | 完成每次 Reasoning 前的通用消息注入，不让 Core 依赖 Inbox 或队列模型 |
 | 2026-08-23 | F12 收尾复审：Core 238 passed；ftre 425 passed；补齐 Inbox receipt 去重和 CompletionRegistry shutdown 回归，独立 Inbox/Compaction wheel 构建通过 | 关闭跨仓库迁移后的生命周期与重复 request 资源泄漏债务 |
+| 2026-08-24 | 后续 C4 接管 UserMessage 后的 Assistant 消息边界；C2 的 Hook 名称、触发时机和仅含 messages 的 Result 契约保持不变 | C2 解决“何时注入”，C4 解决同一 reply 内多条 AssistantMsg 的唯一 message_id，避免宿主按 reply_id 伪切分 |

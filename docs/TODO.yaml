@@ -150,3 +150,37 @@ stages:
             title: Core 全量验证、wheel 与发行候选
             status: done
             date: 2026-08-24
+
+      - id: C4
+        title: UserMessage 与 Assistant message_id 边界
+        status: done
+        date: 2026-08-24
+        completed_date: 2026-08-24
+        prd: docs/prd/PRD-C4-user-message-assistant-boundary.md
+        prd_status: 已验收
+        depends_on:
+          - C2
+          - C3
+        paired_stage: E:\ftre F23；E:\binn\ftre-desktop B4
+        implementation_boundary: 只修改 Core Message/Event/Runner/Hook 文档与测试；不引入 ftre、Inbox、Cordis、Session 或 Channel
+        modules:
+          - src/ftre_agent_core/agent/runner/
+          - src/ftre_agent_core/message_context.py
+          - src/ftre_agent_core/message/_msg.py
+          - src/ftre_agent_core/event/_event.py
+          - src/ftre_agent_core/hooks.py
+          - tests/
+        acceptance: BeforeReasoningResult 保持只有 messages；正式 role=user 自动建立新的 Assistant message_id；同一 reply_id 可含 A→User→B 且 Msg.id 唯一；Tool/权限/重试/取消不回归；Core、ftre F23 和 Desktop B4 跨仓验证通过
+        tasks:
+          - id: C4.1
+            title: reply_id/message_id 契约与事件基线
+            status: done
+          - id: C4.2
+            title: Before-Reasoning UserMessage 边界与 Context 唯一 id
+            status: done
+          - id: C4.3
+            title: Reasoning、Acting 与权限恢复迁移
+            status: done
+          - id: C4.4
+            title: Core 全量门禁与跨仓发行候选
+            status: done

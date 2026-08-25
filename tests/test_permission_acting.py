@@ -376,6 +376,7 @@ async def test_resume_across_fresh_instance_via_persisted_context():
             confirm_events.append(ev)
     assert len(confirm_events) == 1
     reply_id = confirm_events[0].reply_id
+    message_id = confirm_events[0].message_id
     tool_call_id = confirm_events[0].tool_call_id
 
     # ── 持久化往返：把 A 的 context 序列化再反序列化（模拟 state.json 存取）──
@@ -437,7 +438,8 @@ async def test_resume_across_fresh_instance_via_persisted_context():
         message for message in agent_b.state.context if message.role == "assistant"
     ]
     assert len(assistant_replies) == 1
-    assert assistant_replies[0].id == reply_id
+    assert assistant_replies[0].id == message_id
+    assert assistant_replies[0].id != reply_id
     assert [block.type for block in assistant_replies[0].content] == [
         "tool_call",
         "tool_result",

@@ -70,6 +70,10 @@ class EventBase(BaseModel):
     id: str = Field(default_factory=_gen_id)
     created_at: str = Field(default_factory=_now_iso)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # reply_id 代表整次 Agent Reply；message_id 代表本次事件所属的具体
+    # AssistantMsg。两者分开后，同一轮中插入 UserMessage 不需要复制或重命名
+    # 已有消息。非 Assistant 事件可以保持 None。
+    message_id: str | None = None
 
 
 # ── 生命周期 ──

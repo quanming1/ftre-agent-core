@@ -8,6 +8,8 @@
     "created_at": "ISO 8601",
     "metadata": {},
     "type": "TEXT_BLOCK_DELTA",
+    "reply_id": "运行级 Reply ID",
+    "message_id": "具体 AssistantMsg ID",
     # 事件专属字段直接位于顶层
 }
 ```
@@ -34,7 +36,9 @@
 - `DATA_BLOCK_START` / `DATA_BLOCK_DELTA` / `DATA_BLOCK_END`
 - `HINT_BLOCK` 是一次性事件
 
-同一内容块由 `block_id` 关联，同一回复由 `reply_id` 关联。
+同一内容块由 `block_id` 关联；`reply_id` 关联整次运行，`message_id` 关联
+具体 AssistantMsg。一次运行在 before-reasoning 注入正式 UserMessage 后，
+可以自然形成多条 AssistantMsg。
 
 ## 工具
 
@@ -51,19 +55,22 @@
 ```python
 from ftre_agent_core.message import AssistantMsg
 
-message = None
+messages = {}
 async for event in agent.run(prompt):
     if event.type == "REPLY_START":
-        message = AssistantMsg(
+        messages[event.message_id] = AssistantMsg(
             name=event.name,
             content=[],
-            id=event.reply_id,
+            id=event.message_id,
             created_at=event.created_at,
         )
-    if message is not None and getattr(event, "reply_id", None) == message.id:
+    message = messages.get(getattr(event, "message_id", None))
+    if message is not None:
         message.append_event(event)
     if event.type == "REPLY_END":
-        persist(message)  # 一条 Msg，而不是一批 Event
+        for message in messages.values():
+            persist(message)
 ```
 
-`Msg.append_event()` 会聚合正文、思考、工具参数、工具结果、usage 和结束状态。
+`Msg.append_event()` 会按 `message_id` 聚合正文、思考、工具参数、工具结果、usage
+和结束状态；`reply_id` 不能替代消息级坐标。
