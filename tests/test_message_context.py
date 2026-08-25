@@ -110,3 +110,20 @@ def test_append_reply_blocks_keeps_one_msg_and_splits_hint_as_user():
             "reasoning_content": "",
         },
     ]
+
+
+def test_non_user_hook_context_does_not_duplicate_assistant_message_id():
+    """system/assistant Hook mapping 没有正式 UserMessage 时仍复用当前 Msg。"""
+    context = [
+        Msg(id="assistant-a", role="assistant", content=[TextBlock(text="before")]),
+        Msg(id="system-1", role="system", content=[TextBlock(text="hint")]),
+    ]
+
+    MessageContext.append_reply_blocks(
+        context,
+        "assistant-a",
+        [TextBlock(text="after")],
+    )
+
+    assert [message.id for message in context] == ["assistant-a", "system-1"]
+    assert context[0].get_text_content() == "before\nafter"
