@@ -242,3 +242,19 @@ stages:
           - id: C6.3
             title: Core 发行与跨仓合同验收
             status: done
+      - id: C7
+        title: ftre-llm StreamChunk 协议 Owner 收敛
+        status: done
+        date: 2026-08-26
+        prd: docs/prd/PRD-C7-ftre-llm-protocol-owner.md
+        prd_status: 已验收
+        depends_on:
+          - C6
+        paired_stage: E:\\ftre F30
+        implementation_boundary: Core 只重导出并消费 ftre-llm 协议；Runner 提供构造期 LLM 注入和运行锁保护的 set_llm；不修改 Agent 业务状态机、Tool、Session 或客户端协议
+        modules:
+          - src/ftre_agent_core/llm/__init__.py（从 ftre-llm 导出 StreamChunk）
+          - src/ftre_agent_core/agent/runner/
+          - pyproject.toml
+          - tests/test_llm_protocol_owner.py
+        acceptance: ftre-llm 是唯一 StreamChunk Owner；Core Runner 直接消费同一类对象；Retry Plugin 的 llm/error 决策真实生效；Core pytest、ruff、wheel 与跨仓测试通过

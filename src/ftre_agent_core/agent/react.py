@@ -10,6 +10,7 @@ from ftre_agent_core.tracing import Tracer
 
 from ..event import AgentStreamEvent
 from ..hooks import HookDispatcher
+from ..llm import LLMAdapter
 from .runner import ReActRunner
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class ReActAgent:
         tracer: Tracer | None = None,
         hooks: HookDispatcher | None = None,
         hook_context: object | None = None,
+        llm: LLMAdapter | None = None,
     ):
         # 下面这些字段是“静态 Agent 配置”；本次 run 的 iteration、reply_id、
         # cancellation 等短生命周期状态统一放在 ReActRunner.state，避免多次
@@ -62,7 +64,10 @@ class ReActAgent:
         # AgentState.permission_context，调用方无需也不应注入引擎实例。
         self._permission_engine = PermissionEngine()
         self._registry = tool_registry if tool_registry is not None else ToolRegistry()
-        self._runner = ReActRunner(self)
+        # 宿主可在构造阶段注入 LLM seam（例如 ftre 的 LlmServiceAdapter）。
+        # 未注入时才由 Core 根据 api_type 创建内置适配器；这样 Service 已经
+        # 拥有 Provider 时，Core 不会先构造一个没有凭据的 OpenAI 客户端。
+        self._runner = ReActRunner(self, llm=llm)
 
     @property
     def system_prompt(self) -> str:

@@ -17,8 +17,8 @@ B2：产 StreamChunk 协议（七种 chunk + 配对契约），供 runner 测试
         "rate_limit", retries=2, text="重试成功！"
     )
 
-    # 替换到 runner 的 llm 上：
-    agent.runner._llm = adapter
+    # 在运行前注入到 Runner：
+    agent.runner.set_llm(adapter)
 """
 import json
 import time

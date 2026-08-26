@@ -19,8 +19,13 @@ ReActAgent(
     tracer: Tracer | None = None,
     hooks: HookDispatcher | None = None,
     hook_context: object | None = None,
+    llm: LLMAdapter | None = None,
 )
 ```
+
+`llm` 可选。宿主已有统一 LLM Service 时，在构造 Agent 阶段注入一个实现
+`stream(messages, tools)` 与 `cancel()` 的适配器；不传时 Core 才按 `api_type`
+创建内置适配器。运行中的 Runner 不允许更换适配器。
 
 ### run
 
