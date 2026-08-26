@@ -32,6 +32,9 @@ class SequenceLLM:
         for chunk in sequence:
             yield chunk
 
+    def cancel(self) -> None:
+        return None
+
 
 class BeforeReasoningDispatcher:
     def __init__(self, *, continue_once: bool = False) -> None:
@@ -67,11 +70,11 @@ async def test_hook_runs_before_first_reasoning_and_after_tool():
     agent.tool_registry.register(
         Tool(name="echo", func=lambda value: value),
     )
-    agent.runner._llm = SequenceLLM([
+    agent.runner.set_llm(SequenceLLM([
         seq(ToolCall(id="call-1", name="echo", input={"value": "ok"}),
             StepFinish(finish_reason="tool_calls")),
         _text_sequence("完成"),
-    ])
+    ]))
 
     events = [
         event async for event in agent.run(
@@ -84,7 +87,7 @@ async def test_hook_runs_before_first_reasoning_and_after_tool():
         if spec is AGENT_BEFORE_REASONING_SPEC
     ]
     assert [payload.iteration for payload in before_calls] == [1, 2]
-    llm = agent.runner._llm
+    llm = agent.runner.llm
     assert len([
         message for message in llm.calls[0]
         if "steer-1" in str(message.get("content"))
@@ -102,7 +105,7 @@ async def test_hook_runs_again_after_turn_continuation():
     agent = ReActAgent(
         model="fake", api_key="fake", hooks=dispatcher, max_iterations=3,
     )
-    agent.runner._llm = SequenceLLM([_text_sequence("第一轮"), _text_sequence("第二轮")])
+    agent.runner.set_llm(SequenceLLM([_text_sequence("第一轮"), _text_sequence("第二轮")]))
 
     [
         event async for event in agent.run(
@@ -137,11 +140,11 @@ async def test_user_message_creates_new_assistant_message_id_at_reasoning_bounda
     agent = ReActAgent(
         model="fake", api_key="fake", hooks=BoundaryDispatcher(), max_iterations=3,
     )
-    agent.runner._llm = SequenceLLM([
+    agent.runner.set_llm(SequenceLLM([
         seq(ToolCall(id="call-1", name="echo", input={"value": "ok"}),
             StepFinish(finish_reason="tool_calls")),
         _text_sequence("完成"),
-    ])
+    ]))
     agent.tool_registry.register(Tool(name="echo", func=lambda value: value))
 
     events = [event async for event in agent.run("开始")]

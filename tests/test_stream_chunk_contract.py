@@ -12,10 +12,7 @@
 from __future__ import annotations
 
 import pytest
-
-from ftre_agent_core.llm.block_assembler import BlockAssembler
-from ftre_agent_core.llm.errors import LLMError
-from ftre_agent_core.llm.events import (
+from ftre_llm.events import (
     BlockEnd,
     BlockStart,
     FinishChunk,
@@ -25,6 +22,9 @@ from ftre_agent_core.llm.events import (
     ToolCallDeltaChunk,
     UsageChunk,
 )
+
+from ftre_agent_core.llm.block_assembler import BlockAssembler
+from ftre_agent_core.llm.errors import LLMError
 
 
 def _ok_sequence():

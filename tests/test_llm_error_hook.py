@@ -71,7 +71,7 @@ async def test_llm_error_hook_runs_before_next_core_attempt():
         retry_delay=0,
         hooks=dispatcher,
     )
-    agent.runner._llm.stream = _error_then_text("rate_limit", failures=1, text="ok")
+    agent.runner.llm.stream = _error_then_text("rate_limit", failures=1, text="ok")
 
     executor = ReasoningExecutor(agent, _state(), agent.runner.llm, dispatcher)
     events = [event async for event in executor.stream(Reasoning())]
@@ -94,7 +94,7 @@ async def test_llm_error_stop_prevents_retry_even_for_retryable_error():
         raise LLMError(message="failed", code="rate_limit")
         yield
 
-    agent.runner._llm.stream = always_error
+    agent.runner.llm.stream = always_error
 
     executor = ReasoningExecutor(agent, _state(), agent.runner.llm, dispatcher)
     events = [event async for event in executor.stream(Reasoning())]
@@ -111,7 +111,7 @@ async def test_llm_error_hook_failure_falls_back_to_core_default(caplog):
     agent = ReActAgent(
         model="fake", api_key="fake", max_retries=1, retry_delay=0, hooks=dispatcher
     )
-    agent.runner._llm.stream = _error_then_text("rate_limit", failures=1, text="ok")
+    agent.runner.llm.stream = _error_then_text("rate_limit", failures=1, text="ok")
 
     executor = ReasoningExecutor(agent, _state(), agent.runner.llm, dispatcher)
     events = [event async for event in executor.stream(Reasoning())]

@@ -207,21 +207,27 @@ class ReActRunner:
       - 统一终态写入（_finalize）
     """
 
-    def __init__(self, agent: ReActAgent):
+    def __init__(self, agent: ReActAgent, *, llm: LLMAdapter | None = None):
         # 关联的 ReActAgent 实例（提供 model / memory / hooks / tracer 等依赖）
         self.agent = agent
         # 本次 run() 的可变运行状态（iteration / empty_retries / trace_span 等）
         self.state = RunState()
         # 当前 run() 对应的 asyncio.Task，用于取消和并发锁检查
         self._run_task: asyncio.Task | None = None
-        # LLM 适配器（B2：协议注册表工厂按 api_type 分发，消费方零协议感知）
-        self._llm: LLMAdapter = create_llm_handler(
-            agent.api_type,
-            model=agent.model,
-            api_key=agent.api_key,
-            api_base=agent.api_base,
-            max_tokens=agent.max_tokens,
-            reasoning_effort=agent.reasoning_effort,
+        # LLM 适配器（B2：协议注册表工厂按 api_type 分发，消费方零协议感知）。
+        # 宿主若已经有统一 LLM Service，可以在构造 Agent 时注入兼容 seam；
+        # 只有独立使用 Core 且未注入时，才创建 Core 自带的 OpenAI 适配器。
+        self._llm: LLMAdapter = (
+            llm
+            if llm is not None
+            else create_llm_handler(
+                agent.api_type,
+                model=agent.model,
+                api_key=agent.api_key,
+                api_base=agent.api_base,
+                max_tokens=agent.max_tokens,
+                reasoning_effort=agent.reasoning_effort,
+            )
         )
         # 工具并发调度、取消传播和结果归并
         self._tool_handler = ToolHandler(
@@ -236,6 +242,22 @@ class ReActRunner:
     def llm(self) -> LLMAdapter:
         """LLM 适配器实例（B2：LLMAdapter 契约）。"""
         return self._llm
+
+    def set_llm(self, llm: LLMAdapter) -> None:
+        """在运行前替换 LLM seam，供宿主注入统一 Service 适配器。
+
+        过去 Host 直接写 ``runner._llm``，绕过了 Runner 的并发边界。现在
+        注入优先发生在 ``ReActAgent(..., llm=...)`` 构造阶段；这个公开方法
+        只保留给需要延迟装配的宿主和测试，并禁止在 in-flight run 中替换，
+        避免同一轮 Reasoning 看到两个不同的 Provider。
+        """
+        if not callable(getattr(llm, "stream", None)):
+            raise TypeError("llm must provide an async stream(messages, tools) method")
+        if not callable(getattr(llm, "cancel", None)):
+            raise TypeError("llm must provide cancel()")
+        if self._run_task is not None and not self._run_task.done():
+            raise RuntimeError("cannot replace LLM while agent is running")
+        self._llm = llm
 
     @property
     def tool_handler(self) -> ToolHandler:
