@@ -32,10 +32,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        # 全链 --no-deps + 手动装三方依赖：pip 解析 ftre-llm 的依赖时会递归
+        # 到 cordis-py（同样未发布 PyPI）导致失败；而测试运行时
+        # ftre_llm.contracts/events 与 core 只需 openai/pydantic/标准库。
         run: |
           pip install -e ./ftre/packages/ftre-llm --no-deps
-          pip install -e .
-          pip install pytest pytest-asyncio
+          pip install -e . --no-deps
+          pip install openai pydantic pytest pytest-asyncio
 
       - name: Syntax check
         run: |
