@@ -1,6 +1,9 @@
 # 版本变更公告
 
-### 未发布（C9 文档与测试卫生清理）
+## [0.3.0] - 2026-08-27
+
+### C9 文档与测试卫生清理
+
 - **删除仅用于性能对比/手工验证的孤儿脚本**：`src/tests/test_curl_vs_litellm.py`、
   `test_deepminer_curl.py`、`test_llm_only.py`、`test_reasoning_content_mode.py`
   （依赖外部网络与真实 key，不进 CI）。
@@ -8,6 +11,10 @@
   ReAct 执行循环的长期归属见 TODO），docs 目录移除断链风险。
 - 清理 Core 文档中的过期 `LLMHandler`/LiteLLM 示例，移除无引用的临时 Hook 脚本和生成轨迹，
   并收紧 wheel 配置，避免构建目录残留已删除模块。
+
+## [0.2.2] - 2026-08-25
+
+### B2 / C5 / C6 修复与协议增强
 
 
 - 清理 Core 文档中的过期 `LLMHandler`/LiteLLM 示例，移除无引用的临时 Hook 脚本和生成轨迹，

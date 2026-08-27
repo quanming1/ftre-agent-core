@@ -46,7 +46,7 @@ All checks passed
 
 ## Git 状态
 
-- Core 当前基线已保存于 `130e7ca`；B2 补充实现待提交于当前 `feature/B2-responses-reasoning-event`。
-- Core 仓库此前没有本地或远程 `develop`；已从 `130e7ca` 创建本地 `develop` 分支。
-- ftre 当前工作区已在 `feature/F29-llm-stream-fallback` 保存为 `8c4760c`，Host metadata 接线在该分支继续提交。
-- 按仓库规范，后续通过远程 PR 合入 `develop`，不直接向受保护分支推送。
+- B2 provider-safe reasoning replay 修复已通过 PR #15 合入 `develop`（merge commit
+  `1c5716f`，实现提交 `4118167`）。
+- 当前发布候选从 `develop` 创建 `release/0.2.2`；ftre 工作区的既有审计修改未纳入本次发布。
+- 发布仍按远程 PR 合入 `master`，不在本地直接 merge 受保护分支。
