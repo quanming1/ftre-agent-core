@@ -16,6 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ftre-agent-core 依赖 ftre-llm（C7 协议唯一 Owner，源码在 ftre 主仓
+      # packages/ 下，未发布到 PyPI）。ftre 仓库为 public，可直接 checkout；
+      # 以 no-deps 注册本发行物，再安装 core 本体即可满足全部依赖约束。
+      # 测试运行时 ftre_llm.contracts/events 仅使用标准库，无需其三方依赖。
+      - name: Checkout ftre (for ftre-llm)
+        uses: actions/checkout@v4
+        with:
+          repository: quanming1/ftre
+          path: ftre
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -23,6 +33,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install -e ./ftre/packages/ftre-llm --no-deps
           pip install -e .
           pip install pytest pytest-asyncio
 
