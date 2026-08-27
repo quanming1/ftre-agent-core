@@ -2,188 +2,115 @@
 
 English | [中文](README.zh-CN.md)
 
-A lightweight Python Agent framework, extracted from the [ftre](https://github.com/quanming1/ftre) project as the core runtime.
+A small, stateless Python agent runtime library extracted from [ftre](https://github.com/quanming1/ftre).
+The host owns configuration, persistence, plugins and lifecycle; this package owns the ReAct
+execution loop, typed messages/events, hook contracts, tool abstractions, permissions and tracing.
 
-## Background
+## Design principles
 
-ftre is a local-first AI coding assistant, similar to Cursor / Windsurf, but fully open-source and self-hostable. While developing ftre, we found that the core Agent capabilities (ReAct loop, tool system, LLM adaptation, message management) are generic and shouldn't be coupled with ftre's business logic.
-
-So we extracted this part into `ftre-agent-core`.
-
-## Design Principles
-
-**1. Don't reinvent wheels, just glue**
-
-LLM calls use the OpenAI SDK — no custom HTTP wrappers. Tool definitions use JSON Schema — no invented DSL. We let users write code in familiar ways.
-
-**2. Streaming first**
-
-All Agent execution is streaming, yielding events step by step via a Generator. Frontends can display reasoning, tool calls, and intermediate results in real time.
-
-**3. Interruptible**
-
-Supports runtime cancellation via `CancellationToken`. Tools can be interrupted at any time during execution. Thread-safe cancel signals coordinate between the main loop and tool executors.
-
-**4. Protocol adaptation**
-
-Different LLM vendors have different API protocols (OpenAI completions vs responses). `ftre-agent-core` adapts at the lower layer, exposing a unified OpenAI SDK interface upstream.
+- **Core is stateless**: no Channel, Session, Plugin registry or process-wide mutable state.
+- **Streaming first**: `ReActAgent.run()` is an async generator of typed `AgentStreamEvent` values.
+- **One protocol owner**: `ftre-llm` owns `StreamChunk` and the OpenAI-compatible adapters.
+- **Host-injected hooks**: Core accepts an async `HookDispatcher`; the host decides scope and lifecycle.
+- **Interruptible**: cancellation propagates through the LLM and parallel tool tasks.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      ReActAgent                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │                   ReActRunner                     │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │  │
-│  │  │ LLMHandler  │  │ ToolHandler │  │  Memory   │  │  │
-│  │  │ (streaming) │  │ (execution) │  │ (messages) │  │  │
-│  │  └─────────────┘  └─────────────┘  └───────────┘  │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-                           │
-            ┌───────────────┼───────────────┐
-            ▼               ▼               ▼
-     ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
-     │  LLM Layer  │ │ Tool Layer  │ │ Cancellation │
-     │ (protocol)  │ │ (registry)  │ │   (signal)   │
-     └─────────────┘ └─────────────┘ └──────────────┘
+```text
+ReActAgent
+└─ ReActRunner
+   ├─ ReasoningExecutor  ── consumes ftre-llm StreamChunk streams
+   ├─ ActingExecutor     ── ToolHandler ── ToolRegistry
+   ├─ MessageContext      ── caller-owned AgentState.context
+   ├─ PermissionEngine
+   ├─ HookDispatcher      ── host-provided async hooks
+   └─ Tracer              ── optional exporters
 ```
 
-### Core Modules
+Hook specifications are `tool/before`, `tool/after`, `llm/stream`, `llm/error`,
+`agent/before-reasoning` and `agent/stop-decision`. Core defines the typed contract; the host
+registers listeners and supplies lifecycle scope.
 
-| Module | Role |
-|------|------|
-| `agent/` | Agent abstraction and ReAct implementation |
-| `agent/runner/` | Execution engine: LLM calls, tool execution, event dispatch |
-| `tool/` | Tool definition, registration, middleware, dependency injection |
-| `llm/` | LLM client adapters (completions / responses protocol) |
-| `memory.py` | Message history management, token counting |
-| `threading.py` | Global thread pool (grouped by purpose) |
-| `tracing.py` | Agent / LLM / Tool tree-shaped tracing and exporters |
-
-## Comparison with LangChain / AutoGen
-
-| | ftre-agent-core | LangChain | AutoGen |
-|---|---|---|---|
-| Focus | Lightweight runtime | All-in-one toolkit | Multi-agent collaboration |
-| Dependencies | Only openai, httpx | Deep dependency tree | Depends on openai |
-| Streaming | Native | Requires extra config | Supported |
-| Tool definition | `@tool` decorator | Multiple approaches | Function annotations |
-| Learning curve | Low | High | Medium |
-
-We don't aim to be feature-complete — we just do Agent execution well.
+> 归属说明：`StreamChunk` 协议与 OpenAI 兼容适配器由 `ftre-llm` 唯一拥有；Core 的
+> ReActAgent/ReActRunner 只消费 `ftre-llm` 的流协议。执行循环的长期归属（Core Runner
+> 与 ftre Agent Runtime turn_executor 的收敛）见主仓库 TODO。
 
 ## Installation
 
 ```bash
-# Install from GitHub
-pip install git+https://github.com/quanming1/ftre-agent-core.git
-
-# Local development (editable mode)
-git clone https://github.com/quanming1/ftre-agent-core.git
-pip install -e ./ftre-agent-core
+pip install ftre-agent-core
+# or for local development
+pip install -e ".[dev]"
 ```
 
-## Quick Start
+Requires Python 3.12. Install `ftre-llm` separately when you need OpenAI-compatible
+protocol adapters or the `StreamChunk` payload types referenced by the hook specs.
+
+## Quick start
 
 ```python
+import asyncio
+import os
+
 from ftre_agent_core.agent import ReActAgent
-from ftre_agent_core.tool import tool
-from ftre_agent_core.llm import create_client
+from ftre_agent_core.tool import ToolRegistry, tool
 
-# Define tools
-@tool(description="Read file contents")
-def read_file(path: str) -> str:
-    """path: file path"""
-    return open(path).read()
 
-@tool(description="Write file")
-def write_file(path: str, content: str) -> str:
-    """path: file path, content: file content"""
-    open(path, 'w').write(content)
-    return f"Written to {path}"
+@tool(description="Add two integers")
+def add_numbers(a: int, b: int) -> str:
+    return str(a + b)
 
-# Create client
-client = create_client(
-    api_key="sk-xxx",
-    base_url="https://api.openai.com/v1",
-)
 
-# Create Agent
-agent = ReActAgent(
-    client=client,
-    model="gpt-4",
-    system_prompt="You are a file processing assistant",
-    tools=[read_file, write_file],
-    max_iterations=20,
-)
+async def main() -> None:
+    registry = ToolRegistry()
+    registry.register(add_numbers)
+    agent = ReActAgent(
+        model="gpt-4.1-mini",
+        api_key=os.environ["OPENAI_API_KEY"],
+        system_prompt="You are a concise assistant.",
+        tool_registry=registry,
+        max_iterations=10,
+    )
+    async for event in agent.run("Calculate 7 + 5."):
+        if event.type == "TEXT_BLOCK_DELTA":
+            print(event.delta, end="", flush=True)
+        elif event.type == "REPLY_END":
+            print(f"\nfinished: {event.finished_reason}")
 
-# Stream execution
-for event in agent.stream("Read config.json and format it"):
-    print(event.type, event.data)
+
+asyncio.run(main())
 ```
 
-## Local Development
+For a host-owned LLM service, pass `llm=` to `ReActAgent` at construction time. The object must
+implement `stream(messages, tools)` and `cancel()`; the runner rejects replacement while a run is
+in flight.
 
-```bash
-git clone https://github.com/quanming1/ftre-agent-core.git
-cd ftre-agent-core
-pip install -e .
+## Persistent state and tracing
+
+`AgentState.context` contains typed `Msg` objects and can be serialized with Pydantic. Use
+`MessageContext` to add messages or convert the caller-owned context to provider messages.
+`Tracer` is disabled by default; configure `InMemoryTraceExporter` or `JsonlTraceExporter` when
+you need an agent → LLM/tool run tree. Exporter failures are logged and never break execution.
+
+## Repository layout
+
+```text
+src/ftre_agent_core/
+├─ agent/                # ReAct state machine and executors (ReActAgent/ReActRunner)
+├─ llm/                  # adapter seam over ftre-llm, registry, normalization
+├─ tool/                # Tool, @tool, Injected, ToolRegistry, cancellation
+├─ message/             # Msg and ContentBlock models/converters
+├─ permission/          # allow/deny/ask engine
+├─ state/               # serializable AgentState
+├─ event/               # streaming AgentStreamEvent models
+├─ hooks.py             # typed host Hook contracts
+└─ tracing.py           # optional trace tree and exporters
 ```
-
-In editable mode, changes to `ftre-agent-core` code take effect immediately without reinstalling.
-
-## Tracing
-
-Tracing is disabled by default. When an exporter is explicitly configured, each execution generates an
-`agent -> llm/tool` run tree recording inputs, outputs, duration, status, errors, usage,
-`finish_reason`, and provider response metadata.
-
-```python
-from ftre_agent_core import JsonlTraceExporter, Tracer
-from ftre_agent_core.agent import ReActAgent
-
-tracer = Tracer([JsonlTraceExporter(".ftre/traces.jsonl")])
-agent = ReActAgent(
-    model="gpt-4.1",
-    api_key="sk-xxx",
-    tracer=tracer,
-)
-
-async for event in agent.run(
-    "Complete the task",
-    runtime_context={
-        "trace_name": "session-turn",
-        "trace_tags": ["desktop"],
-        "trace_metadata": {"session_id": "sess_123"},
-    },
-):
-    print(event.type)
-```
-
-For testing or embedded usage, use `InMemoryTraceExporter.get_trace(trace_id)` to read the full
-run tree. Exporter exceptions only log and never interrupt the Agent. Traces contain full messages
-and tool inputs/outputs — handle access control and sensitive information appropriately when
-enabling persistent exporters.
-
-## Roadmap
-
-- [x] ReAct Agent core loop
-- [x] Tool system (definition, registration, middleware)
-- [x] LLM protocol adaptation (completions / responses)
-- [x] Streaming event output
-- [x] Runtime cancellation (CancellationToken)
-- [x] Agent / LLM / Tool tree-shaped tracing
-- [ ] Checkpoint snapshot and restore
-- [ ] Multi-agent collaboration
-- [ ] More LLM adapters (Anthropic native, Gemini)
-- [ ] Visual debugging tools
 
 ## License
 
 MIT
 
-## Related Projects
+## Related projects
 
-- [ftre](https://github.com/quanming1/ftre) - AI coding assistant built on this framework
+- [ftre](https://github.com/quanming1/ftre) — the host application built on these contracts

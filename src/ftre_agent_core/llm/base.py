@@ -24,9 +24,9 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import openai
+from ftre_llm.events import FinishChunk, FinishReason, LlmFailure, StreamChunk
 
 from .errors import LLMError
-from .events import FinishChunk, FinishReason, LlmFailure, StreamChunk
 from .utils import LLMLogger
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class LLMAdapter(ABC):
     """协议适配器契约：ftre 的 LlmAdapter seam。
 
-    stream() 必须遵守 StreamChunk 协议契约（见 events.py 模块注释）：
+    stream() 必须遵守 StreamChunk 协议契约（见 ``ftre_llm.events``）：
     block-start/block-end 配对、usage 在 finish 前、finish 收尾。
     """
 

@@ -2,188 +2,109 @@
 
 [English](README.md) | 中文
 
-一个轻量级 Python Agent 框架，从 [ftre](https://github.com/quanming1/ftre) 项目中抽取的核心运行时。
+一个从 [ftre](https://github.com/quanming1/ftre) 抽取的轻量、无状态 Python Agent 运行时库。
+宿主负责配置、持久化、插件和生命周期；本包拥有 ReAct 执行循环，并提供类型化的
+消息/事件、Hook 规范、工具抽象、权限引擎和追踪能力。
 
-## 背景
+## 设计原则
 
-ftre 是一个本地运行的 AI 编程助手，类似 Cursor / Windsurf，但完全开源、可自托管。在开发 ftre 的过程中，我们发现 Agent 的核心能力（ReAct 循环、工具系统、LLM 适配、消息管理）是通用的，不应该和 ftre 的业务逻辑耦合在一起。
-
-于是我们把这部分抽取出来，形成了 `ftre-agent-core`。
-
-## 设计理念
-
-**1. 不造轮子，只做胶水**
-
-LLM 调用用 OpenAI SDK，不自己封装 HTTP。工具定义用 JSON Schema，不发明 DSL。尽量让用户用熟悉的方式写代码。
-
-**2. 流式优先**
-
-所有 Agent 执行都是流式的，通过 Generator 逐步 yield 事件。前端可以实时展示思考过程、工具调用、中间结果。
-
-**3. 可中断**
-
-支持运行时取消（`CancellationToken`），工具执行中可随时中断。通过线程安全的取消信号，主循环和工具执行器协同响应用户取消请求。
-
-**4. 协议适配**
-
-不同 LLM 厂商的 API 协议不一样（OpenAI completions vs responses），`ftre-agent-core` 在底层做适配，上层统一用 OpenAI SDK 的接口。
+- **轻内核**：不持有 Channel、Session、Plugin 注册表或进程级可变状态。
+- **流式优先**：`ReActAgent.run()` 是异步生成器，逐个产出 `AgentStreamEvent`。
+- **协议唯一 Owner**：`StreamChunk` 与 OpenAI 兼容适配器由 `ftre-llm` 提供。
+- **Hook 由宿主注入**：Core 只依赖异步 `HookDispatcher` 协议，作用域和生命周期由宿主决定。
+- **可取消**：取消信号会传播到 LLM 和并行工具任务。
 
 ## 架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      ReActAgent                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │                   ReActRunner                     │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │  │
-│  │  │ LLMHandler  │  │ ToolHandler │  │  Memory   │  │  │
-│  │  │  (流式调用)  │  │  (工具执行)  │  │ (消息管理) │  │  │
-│  │  └─────────────┘  └─────────────┘  └───────────┘  │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-                           │
-           ┌───────────────┼───────────────┐
-           ▼               ▼               ▼
-    ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
-    │   LLM 层    │ │  Tool 层    │ │ Cancellation │
-    │ (协议适配)   │ │ (注册/执行)  │ │  (取消信号)   │
-    └─────────────┘ └─────────────┘ └──────────────┘
+```text
+ReActAgent
+└─ ReActRunner
+   ├─ ReasoningExecutor  ── 消费 ftre-llm 的 StreamChunk 流
+   ├─ ActingExecutor     ── ToolHandler ── ToolRegistry
+   ├─ MessageContext      ── 调用方持有的 AgentState.context
+   ├─ PermissionEngine
+   ├─ HookDispatcher      ── 宿主注入的异步 Hook
+   └─ Tracer              ── 可选导出器
 ```
 
-### 核心模块
+Hook 规范包括 `tool/before`、`tool/after`、`llm/stream`、`llm/error`、
+`agent/before-reasoning` 和 `agent/stop-decision`。Core 只定义类型化契约；监听器的注册
+与生命周期作用域由宿主负责。
 
-| 模块 | 职责 |
-|------|------|
-| `agent/` | Agent 抽象和 ReAct 实现 |
-| `agent/runner/` | 执行引擎：LLM 调用、工具执行、事件分发 |
-| `tool/` | 工具定义、注册、中间件、依赖注入 |
-| `llm/` | LLM 客户端适配（completions / responses 协议） |
-| `memory.py` | 消息历史管理、token 计数 |
-| `threading.py` | 全局线程池（按用途分组） |
-| `tracing.py` | Agent / LLM / Tool 树状追踪与 exporter |
-
-## 与 LangChain / AutoGen 的区别
-
-| | ftre-agent-core | LangChain | AutoGen |
-|---|---|---|---|
-| 定位 | 轻量运行时 | 全家桶 | 多 Agent 协作 |
-| 依赖 | 只依赖 openai, httpx | 依赖树很深 | 依赖 openai |
-| 流式 | 原生支持 | 需要额外配置 | 支持 |
-| 工具定义 | `@tool` 装饰器 | 多种方式 | 函数注解 |
-| 学习成本 | 低 | 高 | 中 |
-
-我们不追求功能全面，只做好 Agent 执行这一件事。
+> 归属说明：`StreamChunk` 协议与 OpenAI 兼容适配器由 `ftre-llm` 唯一拥有；Core 的
+> ReActAgent/ReActRunner 只消费 `ftre-llm` 的流协议。执行循环的长期归属（Core Runner
+> 与 ftre Agent Runtime turn_executor 的收敛）见主仓库 TODO。
 
 ## 安装
 
 ```bash
-# 从 GitHub 安装
-pip install git+https://github.com/quanming1/ftre-agent-core.git
-
-# 本地开发（editable 模式，改代码立即生效）
-git clone https://github.com/quanming1/ftre-agent-core.git
-pip install -e ./ftre-agent-core
+pip install ftre-agent-core
+# or for local development
+pip install -e ".[dev]"
 ```
+
+需要 Python 3.12。需要 OpenAI 兼容协议适配器或 Hook 规范引用的 `StreamChunk`
+payload 类型时，请单独安装 `ftre-llm`。
 
 ## 快速开始
 
 ```python
+import asyncio
+import os
+
 from ftre_agent_core.agent import ReActAgent
-from ftre_agent_core.tool import tool
-from ftre_agent_core.llm import create_client
+from ftre_agent_core.tool import ToolRegistry, tool
 
-# 定义工具
-@tool(description="读取文件内容")
-def read_file(path: str) -> str:
-    """path: 文件路径"""
-    return open(path).read()
 
-@tool(description="写入文件")
-def write_file(path: str, content: str) -> str:
-    """path: 文件路径, content: 文件内容"""
-    open(path, 'w').write(content)
-    return f"已写入 {path}"
+@tool(description="Add two integers")
+def add_numbers(a: int, b: int) -> str:
+    return str(a + b)
 
-# 创建客户端
-client = create_client(
-    api_key="sk-xxx",
-    base_url="https://api.openai.com/v1",
-)
 
-# 创建 Agent
-agent = ReActAgent(
-    client=client,
-    model="gpt-4",
-    system_prompt="你是一个文件处理助手",
-    tools=[read_file, write_file],
-    max_iterations=20,
-)
+async def main() -> None:
+    registry = ToolRegistry()
+    registry.register(add_numbers)
+    agent = ReActAgent(
+        model="gpt-4.1-mini",
+        api_key=os.environ["OPENAI_API_KEY"],
+        system_prompt="You are a concise assistant.",
+        tool_registry=registry,
+        max_iterations=10,
+    )
+    async for event in agent.run("Calculate 7 + 5."):
+        if event.type == "TEXT_BLOCK_DELTA":
+            print(event.delta, end="", flush=True)
+        elif event.type == "REPLY_END":
+            print(f"\nfinished: {event.finished_reason}")
 
-# 流式执行
-for event in agent.stream("读取 config.json 并格式化"):
-    print(event.type, event.data)
+
+asyncio.run(main())
 ```
 
-## 本地开发
+宿主已有统一 LLM Service 时，可在构造 `ReActAgent` 时传 `llm=` 注入实现
+`stream(messages, tools)` 与 `cancel()` 的适配器；运行中不允许更换。
 
-```bash
-# 克隆
-git clone https://github.com/quanming1/ftre-agent-core.git
-cd ftre-agent-core
+## 持久状态与追踪
 
-# editable 安装
-pip install -e .
+`AgentState.context` 保存类型化 `Msg` 对象并可用 Pydantic 序列化。用 `MessageContext`
+追加消息或将调用方持有的 context 转换为 provider messages。`Tracer` 默认关闭；需要
+agent → LLM/tool 运行树时配置 `InMemoryTraceExporter` 或 `JsonlTraceExporter`。导出器
+失败只记录日志，不中断执行。
 
-# 在其他项目中引用（假设在同级目录）
-pip install -e ../ftre-agent-core
+## 目录结构
+
+```text
+src/ftre_agent_core/
+├─ agent/                # ReAct 状态机与执行器（ReActAgent/ReActRunner）
+├─ llm/                  # 基于 ftre-llm 的适配层、注册表、归一化
+├─ tool/                # Tool、@tool、Injected、ToolRegistry、取消
+├─ message/             # Msg 与 ContentBlock 模型及转换器
+├─ permission/          # allow/deny/ask 引擎
+├─ state/               # 可序列化 AgentState
+├─ event/               # 流式 AgentStreamEvent 模型
+├─ hooks.py             # 类型化宿主 Hook 契约
+└─ tracing.py           # 可选追踪树与导出器
 ```
-
-editable 模式下，修改 `ftre-agent-core` 的代码会立即生效，不需要重新安装。
-
-## Tracing
-
-Tracing 默认关闭。显式配置 exporter 后，每次执行会生成一棵
-`agent -> llm/tool` run 树，记录输入输出、耗时、状态、错误、usage、
-`finish_reason` 和 provider 返回的响应元数据。
-
-```python
-from ftre_agent_core import JsonlTraceExporter, Tracer
-from ftre_agent_core.agent import ReActAgent
-
-tracer = Tracer([JsonlTraceExporter(".ftre/traces.jsonl")])
-agent = ReActAgent(
-    model="gpt-4.1",
-    api_key="sk-xxx",
-    tracer=tracer,
-)
-
-async for event in agent.run(
-    "完成任务",
-    runtime_context={
-        "trace_name": "session-turn",
-        "trace_tags": ["desktop"],
-        "trace_metadata": {"session_id": "sess_123"},
-    },
-):
-    print(event.type)
-```
-
-测试或嵌入式调用可使用 `InMemoryTraceExporter.get_trace(trace_id)` 读取完整
-run 树。Exporter 异常只写日志，不会中断 Agent。Trace 会包含完整消息和工具
-输入输出，启用持久化 exporter 时应按部署环境处理访问控制和敏感信息。
-
-## 路线图
-
-- [x] ReAct Agent 基础循环
-- [x] 工具系统（定义、注册、中间件）
-- [x] LLM 协议适配（completions / responses）
-- [x] 流式事件输出
-- [x] 运行时取消（CancellationToken）
-- [x] Agent / LLM / Tool 树状 tracing
-- [ ] Checkpoint 快照与恢复
-- [ ] 多 Agent 协作
-- [ ] 更多 LLM 适配器（Anthropic native、Gemini）
-- [ ] 可视化调试工具
 
 ## License
 
@@ -191,4 +112,4 @@ MIT
 
 ## 相关项目
 
-- [ftre](https://github.com/quanming1/ftre) - 基于此框架构建的 AI 编程助手
+- [ftre](https://github.com/quanming1/ftre) — 基于这些契约的宿主应用

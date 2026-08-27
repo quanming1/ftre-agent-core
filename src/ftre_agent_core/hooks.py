@@ -13,6 +13,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
+from ftre_llm.contracts import LlmStreamPayload as LLMStreamPayload
+
 
 class HookMode(StrEnum):
     """Core 只声明调度语义，具体监听器由宿主 HookDispatcher 管理。
@@ -243,39 +245,6 @@ LLM_STREAM = "llm/stream"
 
 def _readonly_sequence(value) -> tuple[Mapping[str, Any], ...]:
     return tuple(MappingProxyType(dict(item)) for item in (value or ()))
-
-
-@dataclass(frozen=True, slots=True)
-class LLMStreamPayload:
-    """一次 Reasoning 的 LLM 调用快照和 continuation。
-
-    ``messages``/``tools`` 只描述本次调用，不是 AgentState 的可变引用；Plugin
-    可以通过 waterfall 包装 ``invoke`` 或构造新 payload 改写本次调用，但不能
-    直接篡改 Core 的持久 Memory。
-    """
-
-    agent_id: str
-    session_id: str
-    turn_id: str
-    model: str
-    messages: tuple[Mapping[str, Any], ...]
-    tools: tuple[Mapping[str, Any], ...]
-    cancellation: asyncio.Event
-    invoke: Callable[[], AsyncIterator[Any]]
-    # Core RetryExecutor 的 1-based 尝试坐标。默认值保留旧宿主直接构造
-    # Payload 的行为；真实 Reasoning dispatch 会显式传入本次 attempt/上限。
-    attempt: int = 1
-    max_attempts: int = 1
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "messages", _readonly_sequence(self.messages))
-        object.__setattr__(self, "tools", _readonly_sequence(self.tools))
-        if self.attempt < 1:
-            raise ValueError("LLMStreamPayload.attempt must be positive")
-        if self.max_attempts < 1:
-            raise ValueError("LLMStreamPayload.max_attempts must be positive")
-        if self.attempt > self.max_attempts:
-            raise ValueError("LLMStreamPayload.attempt cannot exceed max_attempts")
 
 
 async def _stream(payload: LLMStreamPayload) -> AsyncIterator[Any]:

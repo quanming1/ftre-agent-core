@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from .errors import LLMError
-from .events import (
+from ftre_llm.events import (
     BlockEnd,
     BlockStart,
     FinishChunk,
@@ -26,6 +25,8 @@ from .events import (
     ToolCallDeltaChunk,
     UsageChunk,
 )
+
+from .errors import LLMError
 
 logger = logging.getLogger(__name__)
 

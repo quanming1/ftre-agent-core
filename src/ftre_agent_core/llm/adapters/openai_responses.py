@@ -22,9 +22,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from ..base import OpenAIAdapterBase
-from ..errors import LLMError, get_attr
-from ..events import (
+from ftre_llm.events import (
     BlockEnd,
     BlockStart,
     FinishChunk,
@@ -36,6 +34,9 @@ from ..events import (
     ToolCallDeltaChunk,
     UsageChunk,
 )
+
+from ..base import OpenAIAdapterBase
+from ..errors import LLMError, get_attr
 from ..utils import LLMLogger
 from ..wire.normalize import _normalize_chat_messages, normalize_usage
 

@@ -54,7 +54,7 @@ async def test_payload_attempt_increments_for_each_core_retry() -> None:
         for chunk in seq(TextDelta(text="ok"), StepFinish(finish_reason="stop")):
             yield chunk
 
-    agent.runner._llm.stream = stream
+    agent.runner.llm.stream = stream
     executor = ReasoningExecutor(agent, _state(), agent.runner.llm, recorder)
     _events = [event async for event in executor.stream(Reasoning())]
 
